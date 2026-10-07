@@ -49,6 +49,7 @@ typedef OpPattern<torq_hl::MaxPool2dOp> MaxPool2dPattern;
 typedef OpPattern<torq_hl::MatMulOp> MatMulPattern;
 typedef OpPattern<torq_hl::ZeroPointBiasTableOp> ZeroPointBiasTablePattern;
 typedef OpPattern<torq_hl::ZeroPointCorrectOp> ZeroPointCorrectPattern;
+typedef OpPattern<torq_hl::MixedQuantMatMulOp> MixedQuantMatMulPattern;
 typedef OpPattern<torq_hl::GatherOp> GatherPattern;
 typedef OpPattern<torq_hl::Im2ColOp> Im2ColPattern;
 typedef OpPattern<torq_hl::IdentityOp> IdentityPattern;

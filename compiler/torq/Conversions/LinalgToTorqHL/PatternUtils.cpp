@@ -57,6 +57,7 @@ using namespace mlir::linalg;
 namespace mlir::syna::torq {
 
 const std::string TORQ_FUSE_GROUP_ID = "torq-fuse-group-id";
+
 const std::string TORQ_FUSE_GROUP = "torq-fuse-group";
 const std::string TORQ_BROADCAST_MATMUL = "torq-broadcast-matmul";
 const std::string TORQ_RAISED_MATMUL_INTEGER = "torq-raised-matmul-integer";
@@ -4971,4 +4972,108 @@ FailureOr<Value> addInitToResult(Value initVal, Value val, PatternRewriter &rewr
     return addInitToResultInt(initVal, val, rewriter);
 }
 
+static Value getIntToFPInput(Value value) {
+    if (auto sitofpOp = value.getDefiningOp<arith::SIToFPOp>()) {
+        return sitofpOp.getIn();
+    }
+    if (auto uitofpOp = value.getDefiningOp<arith::UIToFPOp>()) {
+        return uitofpOp.getIn();
+    }
+    return {};
+}
+
+static BlockArgument getWeightArgFromIntToFP(Value value) {
+    Value intInput = getIntToFPInput(value);
+    if (!intInput) {
+        return {};
+    }
+    if (auto weightArg = dyn_cast<BlockArgument>(intInput)) {
+        return weightArg;
+    }
+    auto weightExt = intInput.getDefiningOp<arith::ExtSIOp>();
+    if (!weightExt) {
+        return {};
+    }
+    return dyn_cast<BlockArgument>(weightExt.getIn());
+}
+
+static BlockArgument getIntegerBlockArg(Value value) {
+    if (auto arg = dyn_cast<BlockArgument>(value)) {
+        return arg;
+    }
+    if (auto extOp = value.getDefiningOp<arith::ExtSIOp>()) {
+        return dyn_cast<BlockArgument>(extOp.getIn());
+    }
+    if (auto extOp = value.getDefiningOp<arith::ExtUIOp>()) {
+        return dyn_cast<BlockArgument>(extOp.getIn());
+    }
+    return {};
+}
+
+bool dequantHasUnsignedZeroPoint(linalg::GenericOp genericOp) {
+    auto yieldOp = dyn_cast<linalg::YieldOp>(genericOp.getBody()->getTerminator());
+    if (!yieldOp || yieldOp.getNumOperands() != 1) {
+        return false;
+    }
+
+    auto mulfOp = yieldOp.getOperand(0).getDefiningOp<arith::MulFOp>();
+    if (!mulfOp) {
+        return false;
+    }
+
+    Value intToFPInput = getIntToFPInput(mulfOp.getLhs());
+    auto subOp = intToFPInput ? intToFPInput.getDefiningOp<arith::SubIOp>() : arith::SubIOp();
+    if (!subOp) {
+        return false;
+    }
+
+    if (subOp.getRhs().getDefiningOp<arith::ExtUIOp>()) {
+        return true;
+    }
+
+    return false;
+}
+
+bool matchMatmulRhsBlockQuantizedBody(linalg::GenericOp genericOp) {
+    auto yieldOp = dyn_cast<linalg::YieldOp>(genericOp.getBody()->getTerminator());
+    if (!yieldOp || yieldOp.getNumOperands() != 1) {
+        return false;
+    }
+
+    auto mulfOp = yieldOp.getOperand(0).getDefiningOp<arith::MulFOp>();
+    if (!mulfOp) {
+        return false;
+    }
+    auto scaleArg = dyn_cast<BlockArgument>(mulfOp.getRhs());
+    if (!scaleArg || scaleArg.getArgNumber() != 1) {
+        return false;
+    }
+
+    if (genericOp.getNumDpsInputs() == 2) {
+        Value intToFPInput = getIntToFPInput(mulfOp.getLhs());
+        if (!intToFPInput) {
+            return false;
+        }
+        auto weightArg = getIntegerBlockArg(intToFPInput);
+        return weightArg && weightArg.getArgNumber() == 0;
+    }
+
+    if (auto subfOp = mulfOp.getLhs().getDefiningOp<arith::SubFOp>()) {
+        auto weightArg = getWeightArgFromIntToFP(subfOp.getLhs());
+        auto zpArg = dyn_cast<BlockArgument>(subfOp.getRhs());
+        return weightArg && zpArg && weightArg.getArgNumber() == 0 && zpArg.getArgNumber() == 2;
+    }
+
+    Value intToFPInput = getIntToFPInput(mulfOp.getLhs());
+    if (!intToFPInput) {
+        return false;
+    }
+    auto subOp = intToFPInput.getDefiningOp<arith::SubIOp>();
+    if (!subOp) {
+        return false;
+    }
+    auto weightArg = getIntegerBlockArg(subOp.getLhs());
+    auto zpArg = getIntegerBlockArg(subOp.getRhs());
+    return weightArg && zpArg && weightArg.getArgNumber() == 0 && zpArg.getArgNumber() == 2;
+}
 } // namespace mlir::syna::torq

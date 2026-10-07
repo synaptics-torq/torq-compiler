@@ -469,6 +469,8 @@ KernelEncoding MatMulOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding ZeroPointBiasTableOp::getKernelEncoding() { return getNoEncoding(); }
 
+KernelEncoding MixedQuantMatMulOp::getKernelEncoding() { return getNoEncoding(); }
+
 KernelEncoding ZeroPointCorrectOp::getKernelEncoding() { return getNoEncoding(); }
 
 // The NCHW conv, depthwise conv and max pool kernels fuse H and W into one scan, so the H-W

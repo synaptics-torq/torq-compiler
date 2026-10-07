@@ -159,6 +159,12 @@ bool isMarkedFuseGroup(Operation *op);
 // linalg::MatmulOp patterns must check this and decline to avoid racing it.
 bool isQuantizedMatmulChain(linalg::MatmulOp op);
 
+// Block-quantized dequant-matmul body matchers
+bool matchMatmulRhsBlockQuantizedBody(linalg::GenericOp genericOp);
+
+// True when such a dequant body subtracts a zero-extended (unsigned) zero point.
+bool dequantHasUnsignedZeroPoint(linalg::GenericOp genericOp);
+
 // `TorqStructuredOpMatcher::addPredicate` helper: reject ops already marked
 // as part of a fuse group when `active` is true (typically `_markFuseGroups`).
 // Used to gate discovery-mode patterns from re-marking already-marked ops.

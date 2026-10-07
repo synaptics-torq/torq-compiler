@@ -21,6 +21,7 @@ set(sources
   ExpandWeightsPattern.cpp
   GeluPattern.cpp
   MatmulPattern.cpp
+  MixedQuantMatmulPattern.cpp
   PoolingPattern.cpp
   ReduceMeanPattern.cpp
   SigmoidPattern.cpp

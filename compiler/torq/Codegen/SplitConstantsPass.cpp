@@ -6,6 +6,7 @@
 
 #include "PassesDetail.h"
 #include "torq/Codegen/BufferizationUtils.h"
+#include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/MemoryUtils.h"
 
@@ -19,6 +20,13 @@
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-split-constants"
+
+static llvm::cl::opt<bool> clEnableSplitConstantsOptimization(
+    "torq-enable-split-constants-optimization",
+    llvm::cl::desc("Split every splittable constant per use (constants marked "
+                   "torq-split-constant are always split)"),
+    llvm::cl::init(false)
+);
 
 namespace mlir::syna::torq {
 
@@ -55,6 +63,12 @@ bool isSplittableDerivedMemRefOperation(Operation *op) {
         return isIdentityReinterpretCast(reinterpretOp);
 
     return true;
+}
+
+// A constant is split when the global flag asks for it or when whoever
+// created it marked it (it then knows the parent dies and splitting is free).
+bool shouldSplitConstant(syna::torq_hl::ConstOp constOp) {
+    return clEnableSplitConstantsOptimization;
 }
 
 bool hasOnlySplittableUses(syna::torq_hl::ConstOp constOp) {
@@ -333,7 +347,7 @@ struct SplitConstSubView : OpRewritePattern<memref::SubViewOp> {
     LogicalResult
     matchAndRewrite(memref::SubViewOp subviewOp, PatternRewriter &rewriter) const override {
         auto constOp = subviewOp.getSource().getDefiningOp<syna::torq_hl::ConstOp>();
-        if (!constOp)
+        if (!constOp || !shouldSplitConstant(constOp))
             return failure();
 
         if (!isStaticSubview(subviewOp)) {
@@ -360,7 +374,7 @@ struct SplitConstCollapseShape : OpRewritePattern<memref::CollapseShapeOp> {
     LogicalResult
     matchAndRewrite(memref::CollapseShapeOp collapseOp, PatternRewriter &rewriter) const override {
         auto constOp = collapseOp.getSrc().getDefiningOp<syna::torq_hl::ConstOp>();
-        if (!constOp)
+        if (!constOp || !shouldSplitConstant(constOp))
             return failure();
 
         if (!hasOnlySplittableUses(constOp))
@@ -388,7 +402,7 @@ struct SplitConstDerivedMemRef : RewritePattern {
             return failure();
 
         auto constOp = getDerivedMemRefBase(op).get().getDefiningOp<syna::torq_hl::ConstOp>();
-        if (!constOp)
+        if (!constOp || !shouldSplitConstant(constOp))
             return failure();
 
         if (!hasOnlySplittableUses(constOp))

@@ -97,11 +97,6 @@ static llvm::cl::opt<bool> clEnableTransposeOptimization(
     llvm::cl::desc("enable transpose layout optimization pass"), llvm::cl::init(true)
 );
 
-static llvm::cl::opt<bool> clEnableSplitConstantsOptimization(
-    "torq-enable-split-constants-optimization",
-    llvm::cl::desc("reduce constants to the actual slice that is being used"), llvm::cl::init(false)
-);
-
 enum class IsNanMode { Lower, Remove };
 
 static llvm::cl::opt<IsNanMode> clTorqIsNanMode(
@@ -265,8 +260,8 @@ void addNssUpToAssignLramAddresses(
     funcPm.addPass(createCanonicalizerPass());
     funcPm.addPass(createCSEPass());
 
-    if (clEnableSplitConstantsOptimization)
-        funcPm.addPass(createSplitConstantsPass());
+    // always on: only splits flag- or marker-selected constants
+    funcPm.addPass(createSplitConstantsPass());
 
     funcPm.addPass(torq_hl::createTorqHLFoldTableConstantPass());
 

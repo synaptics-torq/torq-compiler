@@ -7,12 +7,19 @@
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
+#include "torq/Dialect/TorqHW/TorqHWInfo.h"
+#include "torq/Utils/TorqHw.h"
+
+#include "mlir/IR/DialectResourceBlobManager.h"
+
 #include "torq/Utils/ComputeConstants.h"
 #include "torq/Utils/ConversionUtils.h"
 
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -22,12 +29,14 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/MathExtras.h"
 
+#include <cmath>
 #include <limits>
 #include <optional>
 
@@ -130,102 +139,6 @@ arith::ConstantOp getConstantLikeTensorOp(Value value) {
         }
         value = sliceOp.getSource();
     }
-}
-
-Value getIntToFPInput(Value value) {
-    if (auto sitofpOp = value.getDefiningOp<arith::SIToFPOp>()) {
-        return sitofpOp.getIn();
-    }
-    if (auto uitofpOp = value.getDefiningOp<arith::UIToFPOp>()) {
-        return uitofpOp.getIn();
-    }
-    return {};
-}
-
-BlockArgument getWeightArgFromIntToFP(Value value) {
-    Value intInput = getIntToFPInput(value);
-    if (!intInput) {
-        return {};
-    }
-    if (auto weightArg = dyn_cast<BlockArgument>(intInput)) {
-        return weightArg;
-    }
-    auto weightExt = intInput.getDefiningOp<arith::ExtSIOp>();
-    if (!weightExt) {
-        return {};
-    }
-    return dyn_cast<BlockArgument>(weightExt.getIn());
-}
-
-BlockArgument getIntegerBlockArg(Value value) {
-    if (auto arg = dyn_cast<BlockArgument>(value)) {
-        return arg;
-    }
-    if (auto extOp = value.getDefiningOp<arith::ExtSIOp>()) {
-        return dyn_cast<BlockArgument>(extOp.getIn());
-    }
-    if (auto extOp = value.getDefiningOp<arith::ExtUIOp>()) {
-        return dyn_cast<BlockArgument>(extOp.getIn());
-    }
-    return {};
-}
-
-bool matchMatmulRhsBlockQuantizedBody(linalg::GenericOp genericOp) {
-    auto yieldOp = dyn_cast<linalg::YieldOp>(genericOp.getBody()->getTerminator());
-    if (!yieldOp || yieldOp.getNumOperands() != 1) {
-        return false;
-    }
-
-    auto mulfOp = yieldOp.getOperand(0).getDefiningOp<arith::MulFOp>();
-    if (!mulfOp) {
-        return false;
-    }
-    auto scaleArg = dyn_cast<BlockArgument>(mulfOp.getRhs());
-    if (!scaleArg || scaleArg.getArgNumber() != 1) {
-        return false;
-    }
-
-    if (auto subfOp = mulfOp.getLhs().getDefiningOp<arith::SubFOp>()) {
-        auto weightArg = getWeightArgFromIntToFP(subfOp.getLhs());
-        auto zpArg = dyn_cast<BlockArgument>(subfOp.getRhs());
-        return weightArg && zpArg && weightArg.getArgNumber() == 0 && zpArg.getArgNumber() == 2;
-    }
-
-    Value intToFPInput = getIntToFPInput(mulfOp.getLhs());
-    if (!intToFPInput) {
-        return false;
-    }
-    auto subOp = intToFPInput.getDefiningOp<arith::SubIOp>();
-    if (!subOp) {
-        return false;
-    }
-    auto weightArg = getIntegerBlockArg(subOp.getLhs());
-    auto zpArg = getIntegerBlockArg(subOp.getRhs());
-    return weightArg && zpArg && weightArg.getArgNumber() == 0 && zpArg.getArgNumber() == 2;
-}
-
-bool usesUnsignedIntegerZeroPoint(linalg::GenericOp genericOp) {
-    auto yieldOp = dyn_cast<linalg::YieldOp>(genericOp.getBody()->getTerminator());
-    if (!yieldOp || yieldOp.getNumOperands() != 1) {
-        return false;
-    }
-
-    auto mulfOp = yieldOp.getOperand(0).getDefiningOp<arith::MulFOp>();
-    if (!mulfOp) {
-        return false;
-    }
-
-    Value intToFPInput = getIntToFPInput(mulfOp.getLhs());
-    auto subOp = intToFPInput ? intToFPInput.getDefiningOp<arith::SubIOp>() : arith::SubIOp();
-    if (!subOp) {
-        return false;
-    }
-
-    if (subOp.getRhs().getDefiningOp<arith::ExtUIOp>()) {
-        return true;
-    }
-
-    return false;
 }
 
 uint64_t readLittleEndianBits(ArrayRef<char> data, int64_t elementIndex, unsigned byteWidth) {
@@ -506,8 +419,9 @@ FailureOr<Value> buildReductionDimBias(
 
     auto zeroPointElementType = dyn_cast<IntegerType>(zeroPointConstType.getElementType());
     if (!zeroPointElementType) {
-        anchorOp.emitError("non-integer zero-point for reduction-dimension expand_weights bias is "
-                           "not yet supported");
+        // Not supported by the expand_weights path; fail the match quietly so
+        // other patterns (e.g. the mixed-quant matmul conversion) can claim
+        // the chain instead of aborting the conversion pass.
         return failure();
     }
 
@@ -523,7 +437,7 @@ FailureOr<Value> buildReductionDimBias(
     // 8-bit and wider zero points already have room and are left unchanged.
     // getIntegerConstantValues returns the raw bit pattern, so sign-extend for
     // signed zero points and zero-extend for unsigned ones.
-    bool zeroPointUnsigned = usesUnsignedIntegerZeroPoint(anchorOp);
+    bool zeroPointUnsigned = dequantHasUnsignedZeroPoint(anchorOp);
     unsigned biasWidth = zeroPointElementType.getWidth();
     if (biasWidth < 8)
         biasWidth = 8;
@@ -567,7 +481,7 @@ LogicalResult getSplatIntegerZeroPoint(
     Type elementType = denseAttr.getElementType();
     if (isa<IntegerType>(elementType)) {
         APInt value = denseAttr.getSplatValue<APInt>();
-        zeroPoint = usesUnsignedIntegerZeroPoint(anchorOp)
+        zeroPoint = dequantHasUnsignedZeroPoint(anchorOp)
                         ? static_cast<int64_t>(value.getZExtValue())
                         : value.getSExtValue();
     }

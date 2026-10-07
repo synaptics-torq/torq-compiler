@@ -24,6 +24,7 @@ set(sources
     IdentityPattern.cpp
     ExpandWeightsPattern.cpp
     MatMulPattern.cpp
+    MixedQuantMatMulPattern.cpp
     MaxPool2dPattern.cpp
     MaxPool2dToHw.cpp
     MulPattern.cpp

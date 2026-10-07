@@ -125,7 +125,7 @@ class FoldConvertChainWithKernel : public OpInterfaceRewritePattern<torq_hl::Ker
 
         // FIXME: we cannot simplify these operations because the kernel requirements are currently
         // not correctly defined for them
-        if (isa<torq_hl::AddOp, torq_hl::FMAOp>(op.getOperation())) {
+        if (isa<torq_hl::AddOp, torq_hl::FMAOp, torq_hl::MixedQuantMatMulOp>(op.getOperation())) {
             return failure();
         }
 
@@ -261,6 +261,33 @@ class FoldConvertChainWithKernel : public OpInterfaceRewritePattern<torq_hl::Ker
             return failure();
         }
 
+        return success();
+    }
+};
+
+// A convert whose input is a tensor.empty copies undefined data (e.g. the
+// scratch operand of a kernel that is written on-device before being read);
+// drop the copy and hand users the convert's own init, which already has the
+// destination encoding. This turns a DMA of garbage bytes into a plain
+// allocation.
+class FoldConvertOfEmpty : public OpRewritePattern<torq_hl::ConvertOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(torq_hl::ConvertOp op, PatternRewriter &rewriter) const override {
+        if (!op.getOutput())
+            return failure(); // memref form: not a value-producing copy
+        if (!op.getInput().getDefiningOp<tensor::EmptyOp>())
+            return failure();
+        // Only sound when the result is the init's buffer: the op is
+        // dst-bufferizable (it copies its input into the init's buffer and
+        // returns it), and the verifier pins the init's encoding to the
+        // destination encoding, so users keep the intended memory space.
+        // The copy's source is undefined (tensor.empty), so dropping it
+        // loses no data regardless of the consumers' read/write order.
+        if (op.getOutput().getType() != op.getInit().getType())
+            return failure();
+        rewriter.replaceOp(op, op.getInit());
         return success();
     }
 };
@@ -1164,6 +1191,7 @@ void FoldConvertPass::runOnOperation() {
 
     RewritePatternSet patterns(ctx);
     patterns.add<FoldConvertChainWithKernel>(ctx);
+    patterns.add<FoldConvertOfEmpty>(ctx);
     patterns.add<FoldRoundTripConversion>(ctx);
     patterns.add<FoldLramToLramConversionChain>(ctx);
     patterns.add<KeepConcatInLram>(ctx, this->lramSize);

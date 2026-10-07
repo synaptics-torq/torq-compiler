@@ -145,6 +145,29 @@ def TorqHL_ZeroPointCorrectOp: TorqHL_LayerOp<"zero_point_correct"> {
   ));
 }
 
+def TorqHL_MixedQuantMatMulOp: TorqHL_LayerOp<"mixed_quant_matmul"> {
+  let summary = "bf16 x block-quantized-int-weight matmul (cast-on-load, optional zp)";
+  let description = [{
+    Y[N] = x[1,K] . dequant(wq[K,N]), wq int8/int4 with a per-block
+    (block_size along K, nB = K/block_size blocks) per-column bf16 scale and
+    optional zero-point. The weight is widened to bf16 on the WRAM load and
+    consumed directly (never materialized in LRAM); the scale is applied once
+    per block. Symmetric mode: $wscale is [nB, N] and $scratch holds the
+    inter-task partials [nB*N] bf16. Zero-point mode (inferred from the wscale
+    row count): $wscale is the combined compile-time constant [2*nB+1, N] =
+    scale rows | nzs rows (-zp*scale) | a ones row, and $scratch grows to
+    [2*nB*N + 8*nB] for the xsum staging and broadcast rows. $init is the Y
+    output [N]; $scratch is never an output.
+  }];
+  let arguments = !con(commonArgs, (ins
+    I64Attr:$block_size,
+    TensorOrMemref:$x,      // [K, lanes] bf16, replicated across lanes
+    TensorOrMemref:$wq,     // [K, N] i8/i4
+    TensorOrMemref:$wscale, // [nB, N] or combined [2*nB+1, N] bf16
+    TensorOrMemref:$scratch // [nB*N] or [2*nB*N + 8*nB] bf16
+  ));
+}
+
 def TorqHL_MulOp: TorqHL_LayerOp<"mul"> {
 
   let summary = "Mul operation";

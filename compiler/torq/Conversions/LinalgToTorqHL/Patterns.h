@@ -8,6 +8,8 @@
 
 #include "mlir/Transforms/DialectConversion.h"
 
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+
 namespace mlir::syna::torq {
 
 void populateLinalgToTorqHLPrePatterns(
@@ -41,6 +43,10 @@ void populateLinalgToTorqHLConv1DMatmulPatterns(
 void populateLinalgToTorqHLMatMulIntegerCorrectPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups = false
 );
+void populateLinalgToTorqHLMixedQuantMatmulPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
+
 void populateLinalgToTorqHLMatmulPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );

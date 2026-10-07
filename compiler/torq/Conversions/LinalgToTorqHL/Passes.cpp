@@ -13,6 +13,7 @@
 
 #include "torq/Utils/ExecutorAssignment.h"
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -51,6 +52,10 @@ void populateLinalgToTorqHLPrePatterns(
     populateLinalgToTorqHLQMulDivPatterns(context, patterns, markFuseGroups);
     populateLinalgToTorqHLQSigmoidPatterns(context, patterns, markFuseGroups);
     populateLinalgToTorqHLQReducePatterns(context, patterns, markFuseGroups);
+
+    // Mixed-quant (block-dequant) matmuls convert before the Q patterns can
+    // anchor on the dequant generic.
+    populateLinalgToTorqHLMixedQuantMatmulPatterns(context, patterns, markFuseGroups);
 
     // Conv1D-as-matmul → fully_connected with absorbed bias. Registered before
     // the generic Conv2DMatmulOpConversion; its higher pattern benefit lets it
@@ -254,6 +259,9 @@ class LinalgToTorqHLPreConversionPass
             torq_hl::TorqHLDialect, func::FuncDialect, tensor::TensorDialect, arith::ArithDialect,
             math::MathDialect>();
         target.addLegalOp<linalg::TransposeOp>();
+        // Index arithmetic on tile offsets (same form the tiling passes emit);
+        // patterns composing slice offsets may create these.
+        target.addLegalOp<affine::AffineApplyOp>();
         target.addDynamicallyLegalDialect<linalg::LinalgDialect>(
             [](Operation *op) -> std::optional<bool> {
                 // we do not need to legalize operations that will be executed on the host or css
