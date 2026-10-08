@@ -1444,6 +1444,94 @@ TileFit TileAndFusePass::fitTileToMemoryWithOrder(
     return TileFit::FitsShrunk;
 }
 
+// Keep in sync with getPeelingTileSize, getSlicingTileSize and peelAndSlice in
+// LinalgSlicingPass.cpp.
+//
+// Rows per slice that LinalgSlicing runs for one tile of `size` rows. The part
+// that fills all slices is split evenly. The rest runs on fewer slices, or on
+// one slice if it is shorter than two groupings.
+static int64_t slicedTileCost(int64_t size, int64_t sliceCount) {
+    if (size < 2 * kGrouping)
+        return size;
+    int64_t chunk = sliceCount * kGrouping;
+    if (size >= chunk) {
+        int64_t rem = size % chunk;
+        return (size - rem) / sliceCount + slicedTileCost(rem, sliceCount);
+    }
+    int64_t rem = size % kGrouping;
+    return kGrouping + slicedTileCost(rem, sliceCount);
+}
+
+// Rows per slice for the whole domain, tiled by `size`.
+static int64_t slicedDomainCost(int64_t domainSize, int64_t size, int64_t sliceCount) {
+    int64_t full = domainSize / size, tail = domainSize % size;
+    return full * slicedTileCost(size, sliceCount) + (tail ? slicedTileCost(tail, sliceCount) : 0);
+}
+
+// Round `size` down to a multiple of the chunk (slice count x grouping), but
+// only if that lowers slicedDomainCost.
+static int64_t makeSliceAlignedTileSize(int64_t sliceCount, int64_t domainSize, int64_t size) {
+    int64_t chunk = sliceCount * kGrouping;
+    if (size <= chunk || size >= domainSize || size % chunk == 0)
+        return size;
+    int64_t aligned = size - size % chunk;
+    if (slicedDomainCost(domainSize, aligned, sliceCount) <
+        slicedDomainCost(domainSize, size, sliceCount))
+        return aligned;
+    return size;
+}
+
+// The domain of `consumerOp` that LinalgSlicing slices for this principal, or
+// nullopt if LinalgSlicing leaves the principal on one slice. The slicing checks
+// are shared with ElementwisePattern and ReciprocalPattern.
+static std::optional<int64_t> getSlicedDomain(
+    Operation *principalOp, TilingInterface consumerOp, ArrayRef<int64_t> iterDomainSizes
+) {
+    std::optional<int64_t> dim = getElementwiseSlicingDim(principalOp);
+    if (!dim)
+        return std::nullopt;
+
+    // The consumer must index the principal's result domain one to one.
+    auto consumer = dyn_cast<linalg::LinalgOp>(consumerOp.getOperation());
+    if (!consumer || !linalg::isElementwise(consumer))
+        return std::nullopt;
+    if (principalOp->getNumResults() != 1 || consumer->getNumResults() != 1)
+        return std::nullopt;
+    auto pType = dyn_cast<ShapedType>(principalOp->getResultTypes()[0]);
+    auto cType = dyn_cast<ShapedType>(consumer->getResultTypes()[0]);
+    if (!pType || !cType || pType.getShape() != cType.getShape() ||
+        (int64_t)iterDomainSizes.size() != cType.getRank())
+        return std::nullopt;
+    if (!consumer.getIndexingMapMatchingResult(consumer->getResult(0)).isIdentity())
+        return std::nullopt;
+    return dim;
+}
+
+// Make the tile on the slicing domain a multiple of the chunk. This runs on the
+// consumer only, not in getTilingInfo, so the producer fusion checks do not
+// change.
+static void applySliceAlignedTiles(
+    TilingInfo &tilingInfo, TilingInterface tiOp, ArrayRef<int64_t> iterDomainSizes,
+    int64_t sliceCount
+) {
+    if (clDisableSlicing || sliceCount < 2)
+        return;
+    Operation *principalOp = tiOp;
+    if (isMarkedFuseGroup(tiOp))
+        if (Operation *found = getFuseGroupPrincipalOpBackward(tiOp))
+            principalOp = found;
+
+    std::optional<int64_t> dim = getSlicedDomain(principalOp, tiOp, iterDomainSizes);
+    if (!dim || !tilingInfo.tilingOrder.contains(*dim))
+        return;
+    int64_t domainSize = iterDomainSizes[*dim];
+    tilingInfo.adjustSize[*dim] = composeSizeAdjustments(
+        [=](int64_t size) { return makeSliceAlignedTileSize(sliceCount, domainSize, size); },
+        tilingInfo.adjustSize[*dim]
+    );
+    LLVM_DEBUG(llvm::dbgs() << "  slice-aligned tiles on domain " << *dim << "\n");
+}
+
 bool shouldFuseMultiUsersOp(Operation *op) {
     if (std::distance(op->getUsers().begin(), op->getUsers().end()) <= 2)
         return true;
@@ -1944,6 +2032,7 @@ void TileAndFusePass::resetTilingInfoAndProducerOps(
     updatePatternProducers(tiOp, producerOps);
     tilingInfo = getTilingInfo(tiOp, this->sliceCount);
     applyMatmulTilingHeuristics(tilingInfo, tiOp, iterDomainConstSizes, producerOps);
+    applySliceAlignedTiles(tilingInfo, tiOp, iterDomainConstSizes, this->sliceCount);
 }
 
 // Find a tile size that fits `tiOp` and `producerOps` in memory, with the heavy
@@ -2146,6 +2235,7 @@ void TileAndFusePass::tileAndFuse(
     // The matmul heuristics need to know which producers the tile will fuse,
     // hence after the probe rather than in getTilingInfo.
     applyMatmulTilingHeuristics(tilingInfo, tiOp, *iterDomainConstSizes, producerOps);
+    applySliceAlignedTiles(tilingInfo, tiOp, *iterDomainConstSizes, this->sliceCount);
 
     // Find a tile size that fits tiOp in memory, together with all the
     // candidate producers in MaxProducers mode (pattern-fuse-group members are

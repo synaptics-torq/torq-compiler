@@ -41,6 +41,8 @@ namespace mlir::syna::torq {
 
 namespace {
 
+// Keep in sync with slicedTileCost in TileAndFusePass.cpp, which models the
+// remainder below to pick tile sizes.
 // Return tile size for peeling.
 int64_t getPeelingTileSize(int64_t domainSize, int64_t grouping, int64_t sliceCount) {
     assert(domainSize > grouping);
@@ -244,6 +246,36 @@ static Value elementwiseChainSource(Value value) {
     return value;
 }
 
+// True when the fuse group of `op` contains a residual add: an elementwise op
+// with two live activations from different branches. Bias adds (one live input
+// plus a constant-like broadcast) are safe to slice once constant pipelines are
+// kept out of the group, and so are gates like SiLU's x * sigmoid(x), whose live
+// inputs are elementwise functions of one value. Residual groups still break
+// dominance if pulled into scf.forall (ConvTranspose skip-connects).
+static bool groupHasResidualAdd(Operation *op, IntegerAttr fuseGroup) {
+    bool hasResidualAdd = false;
+    op->getParentOp()->walk([&](Operation *candidate) {
+        auto groups = candidate->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
+        if (!groups || !llvm::is_contained(groups, fuseGroup))
+            return WalkResult::advance();
+        if (auto linalgOp = dyn_cast<linalg::LinalgOp>(candidate)) {
+            if (linalg::isElementwise(linalgOp) && linalgOp.getNumDpsInputs() > 1) {
+                SmallVector<Value> sources;
+                for (Value input : linalgOp.getDpsInputs()) {
+                    if (!isConstantLikeProducer(input))
+                        sources.push_back(elementwiseChainSource(input));
+                }
+                if (sources.size() > 1 && !llvm::all_equal(sources)) {
+                    hasResidualAdd = true;
+                    return WalkResult::interrupt();
+                }
+            }
+        }
+        return WalkResult::advance();
+    });
+    return hasResidualAdd;
+}
+
 LogicalResult peelAndSlice(
     PatternRewriter &rewriter, Operation *op, size_t slicingIter, int64_t grouping,
     int64_t sliceCount
@@ -256,38 +288,12 @@ LogicalResult peelAndSlice(
     // (op is assumed to be the principal op of the group); otherwise, tile op only.
     IntegerAttr fuseGroup = isFuseGroupPrincipalOp(op);
 
-    // Skip slicing fuse groups that contain a residual add (two live activations
-    // from different branches). Bias adds (one live input plus a constant-like
-    // broadcast) are safe to slice once constant pipelines are kept out of the
-    // group, and so are gates like SiLU's x * sigmoid(x), whose live inputs are
-    // elementwise functions of one value. Residual groups still break dominance
-    // if pulled into scf.forall (ConvTranspose skip-connects).
-    if (fuseGroup) {
-        bool hasResidualAdd = false;
-        op->getParentOp()->walk([&](Operation *candidate) {
-            auto groups = candidate->getAttrOfType<ArrayAttr>(TORQ_FUSE_GROUP);
-            if (!groups || !llvm::is_contained(groups, fuseGroup))
-                return WalkResult::advance();
-            if (auto linalgOp = dyn_cast<linalg::LinalgOp>(candidate)) {
-                if (linalg::isElementwise(linalgOp) && linalgOp.getNumDpsInputs() > 1) {
-                    SmallVector<Value> sources;
-                    for (Value input : linalgOp.getDpsInputs()) {
-                        if (!isConstantLikeProducer(input))
-                            sources.push_back(elementwiseChainSource(input));
-                    }
-                    if (sources.size() > 1 && !llvm::all_equal(sources)) {
-                        hasResidualAdd = true;
-                        return WalkResult::interrupt();
-                    }
-                }
-            }
-            return WalkResult::advance();
-        });
-        if (hasResidualAdd)
-            return rewriter.notifyMatchFailure(
-                op, "skip slicing fuse group that includes a residual add"
-            );
-    }
+    // Skip slicing fuse groups that contain a residual add (see
+    // groupHasResidualAdd).
+    if (fuseGroup && groupHasResidualAdd(op, fuseGroup))
+        return rewriter.notifyMatchFailure(
+            op, "skip slicing fuse group that includes a residual add"
+        );
 
     // If op is a principal op of a pattern fuse group, it is not a member of any
     // other group.
@@ -556,42 +562,40 @@ static Operation *findBlockedConvProducer(Operation *op, IntegerAttr fuseGroup) 
     return nullptr;
 }
 
-// Elementwise pattern for linalg.generic ops. Picks the leftmost non-unit
-// dimension to slice on, keeping inner dimensions contiguous in memory.
-struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
-    int64_t sliceCount_;
+} // namespace
 
-    ElementwisePattern(MLIRContext *context, int64_t sliceCount)
-        : OpRewritePattern<linalg::GenericOp>(context), sliceCount_(sliceCount) {}
+std::optional<int64_t> getElementwiseSlicingDim(Operation *op, StringRef *reason) {
+    auto skip = [&](StringRef why) -> std::optional<int64_t> {
+        if (reason)
+            *reason = why;
+        return std::nullopt;
+    };
 
-    LogicalResult
-    matchAndRewrite(linalg::GenericOp genericOp, PatternRewriter &rewriter) const override {
-        // Host-executed elementwise ops are compile-time helper/rescale paths
-        // and should not be tiled/sliced.
-        if (getTargetExecutor(genericOp) == torq_hl::Executor::Host)
-            return rewriter.notifyMatchFailure(genericOp, "host-executed operation");
+    if (!isa<linalg::GenericOp, linalg::ReciprocalOp>(op))
+        return skip("not an elementwise generic or a reciprocal");
 
-        // If this op is part of a fuse group but is NOT the principal op, skip
-        // it — the principal op drives tiling for the whole group.
-        // Standalone elementwise ops (no fuse-group attr) are allowed through.
-        if (isMarkedFuseGroup(genericOp) && !isFuseGroupPrincipalOp(genericOp)) {
-            return rewriter.notifyMatchFailure(genericOp, "not the principal operation");
-        }
+    // Host-executed elementwise ops are compile-time helper/rescale paths
+    // and should not be tiled/sliced.
+    if (getTargetExecutor(op) == torq_hl::Executor::Host)
+        return skip("host-executed operation");
 
+    // If this op is part of a fuse group but is NOT the principal op, skip
+    // it — the principal op drives tiling for the whole group.
+    // Standalone elementwise ops (no fuse-group attr) are allowed through.
+    if (isMarkedFuseGroup(op) && !isFuseGroupPrincipalOp(op))
+        return skip("not the principal operation");
+
+    if (auto genericOp = dyn_cast<linalg::GenericOp>(op)) {
         // Only operate on elementwise (all-parallel) generic ops.
-        if (!linalg::isElementwise(genericOp)) {
-            return rewriter.notifyMatchFailure(genericOp, "Not an elementwise operation");
-        }
+        if (!linalg::isElementwise(genericOp))
+            return skip("Not an elementwise operation");
 
         // Downstream NSS lowering for standalone elementwise linalg.generic ops
         // only recognizes unary, binary, ternary/select, and a few named
         // special cases. Wider n-ary epilogues, such as quantized matmul
         // zero-point correction, stay on CSS/host and should not be sliced.
-        if (genericOp.getNumDpsInputs() > 3) {
-            return rewriter.notifyMatchFailure(
-                genericOp, "n-ary elementwise generic has no NSS lowering, skipping slicing"
-            );
-        }
+        if (genericOp.getNumDpsInputs() > 3)
+            return skip("n-ary elementwise generic has no NSS lowering, skipping slicing");
 
         // Skip gather / table-lookup ops: their body reads a tensor via
         // tensor.extract, which is a hidden data-dependent operand that is NOT
@@ -604,9 +608,7 @@ struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
             genericOp.getBody()->walk([](tensor::ExtractOp) { return WalkResult::interrupt(); }
             ).wasInterrupted();
         if (hasExtract)
-            return rewriter.notifyMatchFailure(
-                genericOp, "gather/table extract is not sliceable as elementwise, skipping slicing"
-            );
+            return skip("gather/table extract is not sliceable as elementwise, skipping slicing");
 
         // Skip linalg.generic ops that contain a narrowing integer/float
         // truncation (arith.trunci / arith.truncf) and are not part of any
@@ -623,32 +625,45 @@ struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
                                      })
                                      .wasInterrupted();
         if (hasNarrowingTrunc && !isMarkedFuseGroup(genericOp))
-            return rewriter.notifyMatchFailure(
-                genericOp,
-                "standalone op with trunci/truncf not in any fuse group, skipping slicing"
-            );
+            return skip("standalone op with trunci/truncf not in any fuse group, skipping slicing");
 
         // A conv TileAndFuse keeps on one slice must not have its single-use i32
         // rescale epilogue sliced, or the conv can no longer fuse to an i8
         // torq_hl.conv2d and the full i32 activation is pinned.
-        if (findBlockedConvProducer(genericOp, isFuseGroupPrincipalOp(genericOp))) {
-            return rewriter.notifyMatchFailure(
-                genericOp, "rescale of a single-slice conv, keep full so the conv fuses to i8"
-            );
-        }
+        if (findBlockedConvProducer(genericOp, isFuseGroupPrincipalOp(genericOp)))
+            return skip("rescale of a single-slice conv, keep full so the conv fuses to i8");
+    }
 
-        // Resolve the slicing dimension: leftmost non-unit.
-        std::optional<int64_t> slicingIter;
-        ArrayRef<int64_t> shape = cast<ShapedType>(genericOp->getResultTypes()[0]).getShape();
-        for (auto [i, size] : llvm::enumerate(shape)) {
-            if (size > 1) {
-                slicingIter = i;
-                break;
-            }
-        }
+    // peelAndSlice skips these groups too. Checked here so that callers that only
+    // ask for the dimension (TileAndFusePass) get the same answer.
+    if (IntegerAttr fuseGroup = isFuseGroupPrincipalOp(op))
+        if (groupHasResidualAdd(op, fuseGroup))
+            return skip("skip slicing fuse group that includes a residual add");
+
+    // Resolve the slicing dimension: leftmost non-unit.
+    ArrayRef<int64_t> shape = cast<ShapedType>(op->getResultTypes()[0]).getShape();
+    for (auto [i, size] : llvm::enumerate(shape))
+        if (size > 1)
+            return i;
+    return skip("no dimension to slice");
+}
+
+namespace {
+
+// Elementwise pattern for linalg.generic ops. Picks the leftmost non-unit
+// dimension to slice on, keeping inner dimensions contiguous in memory.
+struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
+    int64_t sliceCount_;
+
+    ElementwisePattern(MLIRContext *context, int64_t sliceCount)
+        : OpRewritePattern<linalg::GenericOp>(context), sliceCount_(sliceCount) {}
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp genericOp, PatternRewriter &rewriter) const override {
+        StringRef reason;
+        std::optional<int64_t> slicingIter = getElementwiseSlicingDim(genericOp, &reason);
         if (!slicingIter)
-            return rewriter.notifyMatchFailure(genericOp, "no dimension to slice");
-
+            return rewriter.notifyMatchFailure(genericOp, reason);
         return peelAndSlice(rewriter, genericOp, *slicingIter, kGrouping, sliceCount_);
     }
 }; // class ElementwisePattern
@@ -665,23 +680,10 @@ struct ReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
 
     LogicalResult
     matchAndRewrite(linalg::ReciprocalOp reciprocalOp, PatternRewriter &rewriter) const override {
-        if (getTargetExecutor(reciprocalOp) == torq_hl::Executor::Host)
-            return rewriter.notifyMatchFailure(reciprocalOp, "host-executed operation");
-
-        if (isMarkedFuseGroup(reciprocalOp) && !isFuseGroupPrincipalOp(reciprocalOp))
-            return rewriter.notifyMatchFailure(reciprocalOp, "not the principal operation");
-
-        std::optional<int64_t> slicingIter;
-        ArrayRef<int64_t> shape = cast<ShapedType>(reciprocalOp->getResultTypes()[0]).getShape();
-        for (auto [i, size] : llvm::enumerate(shape)) {
-            if (size > 1) {
-                slicingIter = i;
-                break;
-            }
-        }
+        StringRef reason;
+        std::optional<int64_t> slicingIter = getElementwiseSlicingDim(reciprocalOp, &reason);
         if (!slicingIter)
-            return rewriter.notifyMatchFailure(reciprocalOp, "no dimension to slice");
-
+            return rewriter.notifyMatchFailure(reciprocalOp, reason);
         return peelAndSlice(rewriter, reciprocalOp, *slicingIter, kGrouping, sliceCount_);
     }
 }; // struct ReciprocalPattern

@@ -27,6 +27,12 @@ enum SlicingIterationDomainIndex : size_t {
 // LinalgSlicingPass.
 std::optional<size_t> getSlicingIterationDomainIndex(Operation *op);
 
+// The dimension LinalgSlicing slices `op` on when `op` is the principal of an
+// elementwise generic or reciprocal group that it slices, or nullopt (with the
+// reason) when it leaves `op` on one slice. TileAndFusePass uses it to round tile
+// sizes only for ops that are sliced. Defined in LinalgSlicingPass.cpp.
+std::optional<int64_t> getElementwiseSlicingDim(Operation *op, StringRef *reason = nullptr);
+
 // Slicing granularity
 constexpr int64_t kGrouping = 4;
 
