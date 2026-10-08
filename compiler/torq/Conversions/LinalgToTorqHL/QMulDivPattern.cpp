@@ -77,19 +77,6 @@ bool matchMulDivBody(linalg::GenericOp op, int &inputIdx0, int &inputIdx1, MulDi
     return true;
 }
 
-bool isScalarTensor(Value v) {
-    auto ty = dyn_cast<RankedTensorType>(v.getType());
-    if (!ty)
-        return false;
-    int64_t numElements = 1;
-    for (int64_t dim : ty.getShape()) {
-        if (dim == ShapedType::kDynamic)
-            return false;
-        numElements *= dim;
-    }
-    return numElements == 1;
-}
-
 struct DequantSource {
     linalg::GenericOp dequant;
     Value quantizedInput;
@@ -220,9 +207,6 @@ struct QMulDivConvert : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(mulOp, "failed to match first Q dequant");
         if (!source1)
             return rewriter.notifyMatchFailure(mulOp, "failed to match second Q dequant");
-
-        if (isScalarTensor(source0->quantizedInput) || isScalarTensor(source1->quantizedInput))
-            return rewriter.notifyMatchFailure(mulOp, "scalar input not supported");
 
         const DequantInfo &dInfo0 = source0->info;
         const DequantInfo &dInfo1 = source1->info;
