@@ -25,11 +25,7 @@ namespace mlir::syna::torq {
 
 namespace {
 
-static bool hasPermutation(linalg::TransposeOp transposeOp, ArrayRef<int64_t> expected) {
-    return transposeOp.getPermutation() == expected;
-}
-
-static bool hasStaticShape(RankedTensorType type, ArrayRef<int64_t> expected) {
+bool hasStaticShape(RankedTensorType type, ArrayRef<int64_t> expected) {
     if (!type || !type.hasStaticShape() || type.getRank() != static_cast<int64_t>(expected.size()))
         return false;
 
@@ -38,7 +34,7 @@ static bool hasStaticShape(RankedTensorType type, ArrayRef<int64_t> expected) {
 
 // True if `op` is an elementwise linalg.generic producing exactly `shape`, or `shape`
 // under a batch dimension.
-static bool isElementwiseOverShape(Operation *op, ArrayRef<int64_t> shape) {
+bool isElementwiseOverShape(Operation *op, ArrayRef<int64_t> shape) {
     auto genericOp = dyn_cast_or_null<linalg::GenericOp>(op);
     if (!genericOp || genericOp.getNumDpsInits() != 1 || !linalg::isElementwise(genericOp))
         return false;
@@ -57,7 +53,7 @@ static bool isElementwiseOverShape(Operation *op, ArrayRef<int64_t> shape) {
 // Collecting the whole block into the matmul's fuse group makes the matmul
 // its principal, and since LinalgSlicing has no linalg.matmul pattern the group
 // stays unsliced and every intermediate stays in LRAM.
-static void collectRaisedMatmulEpilogue(
+void collectRaisedMatmulEpilogue(
     linalg::MatmulOp matmulOp, SmallVectorImpl<Operation *> &groupOps, SmallVector<Value> &boundary
 ) {
     auto shape = cast<RankedTensorType>(matmulOp.getResult(0).getType()).getShape();
@@ -162,7 +158,7 @@ static void collectRaisedMatmulEpilogue(
 // rank-reducing extract_slice that drops the unit second column. The primary
 // matmul's result always reaches its correction directly, never through a
 // slice, so this identifies the auxiliary unambiguously.
-static bool isRaisedMatmulRowsumAuxiliary(linalg::MatmulOp matmulOp) {
+bool isRaisedMatmulRowsumAuxiliary(linalg::MatmulOp matmulOp) {
     Value result = matmulOp.getResult(0);
     if (!result.hasOneUse())
         return false;
@@ -175,7 +171,7 @@ static bool isRaisedMatmulRowsumAuxiliary(linalg::MatmulOp matmulOp) {
            resTy.getShape()[0] == srcTy.getShape()[0];
 }
 
-static bool hasConv1DExpandReassociation(tensor::ExpandShapeOp expandOp) {
+bool hasConv1DExpandReassociation(tensor::ExpandShapeOp expandOp) {
     auto reassociation = expandOp.getReassociationIndices();
     return reassociation.size() == 2 && reassociation[0].size() == 2 && reassociation[0][0] == 0 &&
            reassociation[0][1] == 1 && reassociation[1].size() == 1 && reassociation[1][0] == 2;

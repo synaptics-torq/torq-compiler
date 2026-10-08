@@ -50,6 +50,9 @@ void populateLinalgToTorqHLMixedQuantMatmulPatterns(
 void populateLinalgToTorqHLMatmulPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
+void populateLinalgToTorqHLBatchedRaisedMatmulPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+);
 void populateLinalgToTorqHLPoolingPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );

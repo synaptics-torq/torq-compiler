@@ -62,6 +62,9 @@ void populateLinalgToTorqHLPrePatterns(
     // win when the matmul has the Conv1D transpose/expand layout.
     populateLinalgToTorqHLConv1DMatmulPatterns(context, patterns, markFuseGroups);
 
+    // Claim the raised batch matmul and its epilogue before standalone cast/mul marking.
+    populateLinalgToTorqHLBatchedRaisedMatmulPatterns(context, patterns, markFuseGroups);
+
     // The raised MatMulInteger's i32 zero-point correction plus its int-to-float cast.
     populateLinalgToTorqHLMatMulIntegerCorrectPatterns(context, patterns, markFuseGroups);
 
@@ -145,7 +148,11 @@ static bool isHostOrCssExecutor(Operation *op) {
 }
 
 static LogicalResult validateRaisedMatmulAttributeContract(FunctionOpInterface funcOp) {
-    WalkResult result = funcOp.walk([](linalg::MatmulOp op) {
+    // The raise emits both linalg.matmul and linalg.batch_matmul (the per-channel depthwise
+    // GEMV keeps its batch dimension), so both must honour the contract.
+    WalkResult result = funcOp.walk([](Operation *op) {
+        if (!isa<linalg::MatmulOp, linalg::BatchMatmulOp>(op))
+            return WalkResult::advance();
         Attribute raisedAttr = op->getAttr(TORQ_RAISED_MATMUL_INTEGER);
         Attribute unsignedAttr = op->getAttr(TORQ_MATMUL_LHS_UNSIGNED);
         if (!raisedAttr && !unsignedAttr)
@@ -153,9 +160,9 @@ static LogicalResult validateRaisedMatmulAttributeContract(FunctionOpInterface f
         if (isa_and_nonnull<UnitAttr>(raisedAttr) && isa_and_nonnull<UnitAttr>(unsignedAttr))
             return WalkResult::advance();
 
-        op.emitOpError() << "raised MatMulInteger attribute contract violated: '"
-                         << TORQ_RAISED_MATMUL_INTEGER << "' and '" << TORQ_MATMUL_LHS_UNSIGNED
-                         << "' must both be present as UnitAttr attributes";
+        op->emitOpError() << "raised MatMulInteger attribute contract violated: '"
+                          << TORQ_RAISED_MATMUL_INTEGER << "' and '" << TORQ_MATMUL_LHS_UNSIGNED
+                          << "' must both be present as UnitAttr attributes";
         return WalkResult::interrupt();
     });
     return result.wasInterrupted() ? failure() : success();
@@ -177,8 +184,8 @@ class LinalgToTorqHLConversionPass
         ConversionTarget conversionTarget(getContext());
 
         conversionTarget.addLegalDialect<
-            torq_hl::TorqHLDialect, func::FuncDialect, tensor::TensorDialect, arith::ArithDialect>(
-        );
+            torq_hl::TorqHLDialect, func::FuncDialect, tensor::TensorDialect, arith::ArithDialect,
+            affine::AffineDialect>();
 
         conversionTarget.addDynamicallyLegalDialect<linalg::LinalgDialect>(
             [](Operation *op) -> std::optional<bool> {
@@ -257,7 +264,7 @@ class LinalgToTorqHLPreConversionPass
         ConversionTarget target(*ctx);
         target.addLegalDialect<
             torq_hl::TorqHLDialect, func::FuncDialect, tensor::TensorDialect, arith::ArithDialect,
-            math::MathDialect>();
+            math::MathDialect, affine::AffineDialect>();
         target.addLegalOp<linalg::TransposeOp>();
         // Index arithmetic on tile offsets (same form the tiling passes emit);
         // patterns composing slice offsets may create these.

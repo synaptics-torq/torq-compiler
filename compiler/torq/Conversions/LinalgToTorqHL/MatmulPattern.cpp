@@ -21,6 +21,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
@@ -1080,7 +1081,153 @@ template <typename OpTy> struct MatmulOpRewrite final : public OpRewritePattern<
     }
 };
 
+// True if `op` is an elementwise linalg.generic producing exactly `shape`, or `shape`
+// under a batch dimension.
+bool isElementwiseOverShape(Operation *op, ArrayRef<int64_t> shape) {
+    auto genericOp = dyn_cast_or_null<linalg::GenericOp>(op);
+    if (!genericOp || genericOp.getNumDpsInits() != 1 || !linalg::isElementwise(genericOp))
+        return false;
+    auto type = dyn_cast<RankedTensorType>(genericOp.getResult(0).getType());
+    if (!type)
+        return false;
+    ArrayRef<int64_t> resultShape = type.getShape();
+    while (resultShape.size() > shape.size() && resultShape.front() == 1)
+        resultShape = resultShape.drop_front();
+    return resultShape == shape;
+}
+
+// The per-channel (depthwise) raise's epilogue is built over the collapsed [C, 1]
+// result and ends with an expand back to [C, 1, 1]:
+// batch_matmul -> collapse -> colsum correction -> (drs row correction) -> sitofp
+// -> mulf -> expand. The views are pure rank changes; they do not implement
+// TilingInterface, so they join the walk but not the marked group, and the
+// backward marker stops at the collapse (the primary matmul is marked
+// explicitly by the caller). Everything else follows the rank-2 collector's
+// rules: single-use elementwise chain, auxiliary rowsum matmul, boundary sweep.
+void collectRaisedBatchMatmulEpilogue(
+    linalg::BatchMatmulOp matmulOp, SmallVectorImpl<Operation *> &groupOps,
+    SmallVector<Value> &boundary
+) {
+    auto shape = cast<RankedTensorType>(matmulOp.getResult(0).getType()).getShape();
+    groupOps.push_back(matmulOp.getOperation());
+    DenseSet<Operation *> inGroup{matmulOp.getOperation()};
+
+    Value tail = matmulOp.getResult(0);
+    SmallVector<int64_t> tailShape(shape.begin(), shape.end());
+    while (tail.hasOneUse()) {
+        Operation *user = *tail.getUsers().begin();
+        if (auto collapse = dyn_cast<tensor::CollapseShapeOp>(user)) {
+            auto viewShape = collapse.getResultType().getShape();
+            tailShape.assign(viewShape.begin(), viewShape.end());
+            groupOps.push_back(collapse);
+            inGroup.insert(collapse);
+            tail = collapse.getResult();
+            continue;
+        }
+        if (auto expand = dyn_cast<tensor::ExpandShapeOp>(user)) {
+            groupOps.push_back(expand);
+            inGroup.insert(expand);
+            break;
+        }
+        if (!isElementwiseOverShape(user, tailShape))
+            break;
+        groupOps.push_back(user);
+        inGroup.insert(user);
+        tail = user->getResult(0);
+        // The raise's dequant is a per-tensor mulf, so no bias/clamp extensions
+        // are walked here (unlike the shared-weight path).
+    }
+    Operation *outputOp = groupOps.back();
+
+    // The [C,2] rowsum reaches the row correction through an extract_slice; the
+    // backward marker cannot cross that edge, so retain the narrow matmul
+    // explicitly, as the rank-2 collector does.
+    for (size_t i = 0; i < groupOps.size(); ++i)
+        for (Value operand : groupOps[i]->getOperands()) {
+            Value source = operand;
+            if (auto sliceOp = source.getDefiningOp<tensor::ExtractSliceOp>())
+                source = sliceOp.getSource();
+            auto auxiliary = source.getDefiningOp<linalg::MatmulOp>();
+            if (!auxiliary || !auxiliary->hasAttr(TORQ_RAISED_MATMUL_INTEGER) ||
+                inGroup.contains(auxiliary))
+                continue;
+            groupOps.push_back(auxiliary);
+            inGroup.insert(auxiliary);
+        }
+
+    for (Operation *op : groupOps)
+        for (Value operand : op->getOperands()) {
+            Operation *def = operand.getDefiningOp();
+            if (!def || !inGroup.contains(def))
+                boundary.push_back(operand);
+        }
+
+    // markFuseGroupBackward walks back from the group's output, so it has to be
+    // last even though the auxiliary sweep appended past it.
+    std::swap(groupOps.back(), *llvm::find(groupOps, outputOp));
+}
+
+// The per-channel (depthwise) raise is a linalg.batch_matmul, which the generic
+// MatmulOpRewrite would convert without carrying the raised attributes over: it
+// drops the unsigned LHS (every activation byte >= 128 would multiply as signed)
+// and marks only the group backwards, leaving the correction epilogue out of it.
+// Claim it here instead.
+struct BatchedRaisedMatmulPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
+    BatchedRaisedMatmulPattern(MLIRContext *context, bool markFuseGroups)
+        // Ahead of MatmulOpRewrite's default benefit (1) so the raised matmul
+        // is claimed before the generic rewrite.
+        : OpRewritePattern(context, /*benefit=*/2), _markFuseGroups(markFuseGroups) {}
+
+    LogicalResult
+    matchAndRewrite(linalg::BatchMatmulOp matmulOp, PatternRewriter &rewriter) const override {
+        if (!matmulOp->hasAttr(TORQ_RAISED_MATMUL_INTEGER))
+            return rewriter.notifyMatchFailure(matmulOp, "not a raised MatMulInteger");
+        if (_markFuseGroups && isMarkedFuseGroup(matmulOp))
+            return rewriter.notifyMatchFailure(matmulOp, "Already marked");
+
+        if (_markFuseGroups) {
+            SmallVector<Operation *> groupOps;
+            SmallVector<Value> boundary;
+            collectRaisedBatchMatmulEpilogue(matmulOp, groupOps, boundary);
+            auto fuseGroupAttr = matmulOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
+            markFuseGroupBackward(groupOps.back()->getResult(0), boundary, rewriter, fuseGroupAttr);
+            // The views break the backward walk, so the primary matmul (and the
+            // auxiliary) are marked explicitly; marking is idempotent for the
+            // ops the walk already reached.
+            for (Operation *groupOp : groupOps)
+                if (isa<TilingInterface>(groupOp))
+                    markOpFuseGroup(groupOp, rewriter, fuseGroupAttr);
+            return success();
+        }
+
+        // Fallback rewrite: plain torq_hl.matmul with neutral bias/scale and the
+        // unsigned LHS carried over.
+        auto outTy = cast<RankedTensorType>(matmulOp.getResult(0).getType());
+        auto [outMin, outMax] = getDTypeRange(outTy.getElementType());
+        const std::vector<int32_t> bias = {0};
+        const std::vector<int32_t> scale = {1};
+        Value biasScale = createI32Const(rewriter, matmulOp, interleave(bias, scale));
+        auto matMulOp = torq_hl::MatMulOp::create(
+            rewriter, matmulOp->getLoc(), outTy, createInitTensor(matmulOp, rewriter, outTy), 0,
+            outMin, outMax, 0, biasScale, matmulOp.getOperand(0), matmulOp.getOperand(1),
+            matmulOp->hasAttr(TORQ_MATMUL_LHS_UNSIGNED)
+        );
+        // The raise inits with a zero splat, so there is nothing to add back.
+        rewriter.replaceOp(matmulOp, matMulOp.getResult(0));
+        return success();
+    }
+
+  private:
+    const bool _markFuseGroups;
+};
+
 } // namespace
+
+void populateLinalgToTorqHLBatchedRaisedMatmulPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
+) {
+    patterns.insert<BatchedRaisedMatmulPattern>(context, markFuseGroups);
+}
 
 void populateLinalgToTorqHLMatmulPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups

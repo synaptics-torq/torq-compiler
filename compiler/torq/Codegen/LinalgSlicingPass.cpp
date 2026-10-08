@@ -440,6 +440,15 @@ struct BatchMatmulPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
 
     LogicalResult
     matchAndRewrite(linalg::BatchMatmulOp matmulOp, PatternRewriter &rewriter) const override {
+        // A raised MatMulInteger (per-channel depthwise GEMV) is the principal of a fuse
+        // group carrying its i32 correction epilogue; like linalg.matmul (no slicing
+        // pattern for it here), it must not be sliced away from that epilogue or the
+        // chain's intermediates would round-trip through DRAM at the collapse edge.
+        if (matmulOp->hasAttr(TORQ_RAISED_MATMUL_INTEGER))
+            return rewriter.notifyMatchFailure(
+                matmulOp, "raised MatMulInteger stays whole with its correction epilogue"
+            );
+
         if (isMarkedFuseGroup(matmulOp) && !isFuseGroupPrincipalOp(matmulOp))
             return rewriter.notifyMatchFailure(matmulOp, "not the principal operation");
 

@@ -15,6 +15,7 @@
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ConversionUtils.h"
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
@@ -69,8 +70,15 @@ static Value buildInterleavedColsum(Value negColsum, PatternRewriter &rewriter, 
     auto twice = [&](OpFoldResult v) -> OpFoldResult {
         if (auto attr = dyn_cast<Attribute>(v))
             return rewriter.getIndexAttr(2 * cast<IntegerAttr>(attr).getInt());
-        Value two = arith::ConstantIndexOp::create(rewriter, loc, 2);
-        return arith::MulIOp::create(rewriter, loc, cast<Value>(v), two).getResult();
+        // The offset is a tiling loop induction variable. Emit the doubling as
+        // affine.apply, not arith.muli: the CPU-outlining pass leaves affine.apply
+        // in place (it constant-folds when NSS unrolls the loop), while an
+        // arith.muli would be outlined to a css_arith program, making the slice
+        // offset data-dependent and unaddressable.
+        MLIRContext *ctx = rewriter.getContext();
+        AffineExpr d0 = getAffineDimExpr(0, ctx);
+        auto map = AffineMap::get(1, 0, d0 * getAffineConstantExpr(2, ctx), ctx);
+        return affine::AffineApplyOp::create(rewriter, loc, map, cast<Value>(v)).getResult();
     };
     auto sizeAttr = dyn_cast<Attribute>(size);
     if (!sizeAttr)
@@ -129,16 +137,22 @@ struct MatMulIntegerCorrectPattern : public OpRewritePattern<linalg::GenericOp> 
         if (!isArg(widened, 1))
             return failure();
 
-        // (d...) -> (0) for the zero point, (d...) -> (dLast) for the column sums.
+        // (d...) -> (0) for the zero point; the correction sums index either the last
+        // dimension (shared-weight matmul, one sum per column) or the second-to-last one
+        // (depthwise GEMV, where the per-channel weight makes the sum per row).
         MLIRContext *ctx = corrOp.getContext();
         const unsigned rank = corrTy.getRank();
         SmallVector<AffineMap> maps = corrOp.getIndexingMapsArray();
         if (maps.size() != 4 || !maps[3].isIdentity() || maps[1].getNumResults() != 1 ||
-            maps[1].getResult(0) != getAffineConstantExpr(0, ctx) || maps[2].getNumResults() != 1 ||
-            maps[2].getResult(0) != getAffineDimExpr(rank - 1, ctx))
+            maps[1].getResult(0) != getAffineConstantExpr(0, ctx) || maps[2].getNumResults() != 1)
+            return failure();
+        const bool perRow = rank >= 2 && maps[2].getResult(0) == getAffineDimExpr(rank - 2, ctx);
+        if (!perRow && maps[2].getResult(0) != getAffineDimExpr(rank - 1, ctx))
+            return failure();
+        if (perRow && !maps[0].isIdentity())
             return failure();
 
-        const int64_t n = corrTy.getShape().back();
+        const int64_t n = perRow ? corrTy.getShape()[rank - 2] : corrTy.getShape().back();
         auto negColsumTy = dyn_cast<RankedTensorType>(corrOp.getDpsInputs()[2].getType());
         if (!negColsumTy || negColsumTy.getRank() != 1 || negColsumTy.getShape()[0] != n ||
             !negColsumTy.getElementType().isInteger(32))
@@ -170,7 +184,7 @@ struct MatMulIntegerCorrectPattern : public OpRewritePattern<linalg::GenericOp> 
         auto correctOp = torq_hl::ZeroPointCorrectOp::create(
             rewriter, loc, corrTy, createInitTensor(corrOp, rewriter, corrTy),
             std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::max(), table,
-            corrOp.getDpsInputs()[0], /*per_row=*/false
+            corrOp.getDpsInputs()[0], /*per_row=*/perRow
         );
 
         LLVM_DEBUG(
