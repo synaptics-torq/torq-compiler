@@ -333,10 +333,13 @@ class JenkinsBoardsControl(BoardsControl):
             self._write_control_data_locked(f, data)
 
 
-    def create_boards(self, build_version, force=False, location="SJ"):
+    def create_boards(self, build_version, force=False, location=None):
         """
         Requests Jenkins to create a board with the given public key. The board creation will be queued.
         """
+
+        if location is None:
+            location = os.environ.get("TORQ_BENCH_LOCATION", "SJ")
 
         with open(self.control_file, "a+") as f:
 
