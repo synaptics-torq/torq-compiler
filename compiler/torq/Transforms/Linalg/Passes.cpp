@@ -24,6 +24,8 @@ namespace {
 void registerLinalgForTorqPasses() {
     // Generated.
     registerPasses();
+    // Hand-written (not tablegen-registered).
+    registerPass([]() { return createDecomposeConvsForHardwarePass(); });
 }
 
 } // namespace mlir::syna::torq

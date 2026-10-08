@@ -45,6 +45,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createDecomposeConvToSpaceTo
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createRemoveIsNanPass();
 
+std::unique_ptr<Pass> createDecomposeConvsForHardwarePass();
+
 //----------------------------------------------------------------------------//
 // Registration
 //----------------------------------------------------------------------------//

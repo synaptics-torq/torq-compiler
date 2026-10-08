@@ -46,6 +46,7 @@ iree_cc_library(
     FuseReluClampWithTruncfPattern.cpp
     CommonStandardizationPatterns.cpp
     DecomposeConvToSpaceToDepthPass.cpp
+    DecomposeConvsForHardwarePass.cpp
     OptimizePowOpPattern.cpp
     RemoveIsNanPass.cpp
   DEPS
