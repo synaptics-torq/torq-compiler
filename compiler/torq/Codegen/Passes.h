@@ -46,6 +46,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createMapBindingsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createLowerArithConstantsPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createPrefetchConstantLoadsPass();
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createRecoverLramResidencyPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>>

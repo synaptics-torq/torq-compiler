@@ -7,6 +7,7 @@
 
 #include "PassesDetail.h"
 
+#include "torq/Codegen/LramAllocation.h"
 #include "torq/Codegen/Pool.h"
 #include "torq/Codegen/VirtualMemory.h"
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
@@ -1397,6 +1398,23 @@ static bool lramAllocationSucceeds(FunctionOpInterface funcOp) {
     }
     clone->erase();
     return ok;
+}
+
+std::optional<int64_t> lramSwapBytes(FunctionOpInterface funcOp) {
+    if (!lramAllocationSucceeds(funcOp))
+        return std::nullopt;
+    // the plan that lramAllocationSucceeds found, so it exists
+    const int64_t usable = TorqHw::get().getLramSize() - HwInfo::nss_max_program_size * 2;
+    std::optional<Placement> placement =
+        planPlacement(collectLramBuffers(funcOp), usable, /*replan=*/false);
+    int64_t bytes = 0;
+    for (const auto &[opIdx, swaps] : placement->schedule) {
+        for (const Swap &swap : swaps) {
+            for (Value buffer : swap.buffers)
+                bytes += getEncodedTotalSizeBytes(cast<MemRefType>(buffer.getType()));
+        }
+    }
+    return bytes;
 }
 
 namespace {

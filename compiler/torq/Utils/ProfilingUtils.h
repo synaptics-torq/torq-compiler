@@ -9,6 +9,7 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
 #include "torq/Dialect/TorqHW/TorqHWAttrs.h"
+#include "torq/Dialect/TorqHW/TorqHWOps.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 
@@ -77,5 +78,14 @@ uint64_t cdmaTransferBytes(mlir::Value src);
 
 // Estimated CDMA cycles using the config-dependent throughput factor.
 uint64_t estimateCdmaCycles(uint64_t bytes);
+
+// Cycles of one NDL: the product of its H dims (and the SDIM write overhead for a
+// memory NDL).
+size_t ndlCycle(torq_hw::RegNdlAttr attr);
+size_t ndlCycle(torq_hw::MemNdlAttr attr);
+
+// Estimated cycles of a slice task: its busiest bus, as
+// AnnotateDmaAndSliceCyclesPass records it for ProfilingPass.
+uint64_t estimateSliceTaskCycles(torq_hw::SliceTaskOp sliceTaskOp);
 
 } // namespace mlir::syna::torq

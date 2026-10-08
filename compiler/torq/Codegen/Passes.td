@@ -348,6 +348,28 @@ def ResolveInvocationArguments :
 
 }
 
+def PrefetchConstantLoads :
+    InterfacePass<"torq-prefetch-constant-loads",
+         "mlir::FunctionOpInterface"> {
+  let summary = "Load constants into LRAM while the program before their consumer runs";
+  let description = [{
+    Moves the LRAM load of a constant in front of an earlier wait_program, so the
+    DMA runs while that program computes: the nearest one, or one further back
+    where the estimated idle time hides all of the load. A load moves only when the
+    LRAM that stays live longer fits, and the moves are kept only when the allocator
+    swaps no more bytes than before. Runs only in the real pipeline, after
+    `torq-recover-lram-residency`, so it also sees the plans that fit only after
+    recovery. The tile-fit probe must not count on this overlap.
+  }];
+  let constructor =
+      "mlir::syna::torq::createPrefetchConstantLoadsPass()";
+
+  let dependentDialects = [
+        "syna::torq_hl::TorqHLDialect",
+        "mlir::memref::MemRefDialect"
+    ];
+}
+
 def RecoverLramResidency :
     InterfacePass<"torq-recover-lram-residency",
          "mlir::FunctionOpInterface"> {

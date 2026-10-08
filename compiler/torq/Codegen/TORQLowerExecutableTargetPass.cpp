@@ -299,6 +299,7 @@ void addNssUpToAssignLramAddresses(
     // costs would buy nothing there and would hide it from the tile choice.
     if (isRealPipeline) {
         funcPm.addPass(createRecoverLramResidencyPass());
+        funcPm.addPass(createPrefetchConstantLoadsPass());
     }
 
     // assign addresses to all allocations; the probe gets no re-planning for the same

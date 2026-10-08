@@ -50,6 +50,7 @@ set(sources
     Passes.cpp
     PeelTileLoopsPass.cpp
     Pool.cpp
+    PrefetchConstantLoadsPass.cpp
     ProfilingPass.cpp
     ReductionTilingPass.cpp
     ReplaceForLoopsWithMidIterationPass.cpp
