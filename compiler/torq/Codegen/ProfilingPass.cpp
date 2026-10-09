@@ -413,7 +413,8 @@ processOperationTime(Operation *op, const IRMapping &map, ProfStruct &prof, int 
         }
     }
     else if (isa<memref::AllocOp, memref::DeallocOp, memref::CastOp, memref::MemorySpaceCastOp,
-                 memref::ReinterpretCastOp, memref::ReshapeOp>(op)) {
+                 memref::ReinterpretCastOp, memref::ReshapeOp, syna::torq_hl::ReinterpretCastOp>(op
+             )) {
         // These operations do not affect the profiling timestamp
     }
     else {

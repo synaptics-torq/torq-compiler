@@ -257,6 +257,14 @@ void addNssUpToAssignLramAddresses(
 
     // unroll all loops since NSS cannot deal with them
     funcPm.addPass(createUnrollLoopPass());
+
+    // Bindings are resolved after MapBindings, so element-reinterpreting
+    // torq_hl.reinterpret_cast views (bufferized torq_hl.bitcast) now have
+    // constant offsets; the canonicalizer constifies them (the op's
+    // ReinterpretCastOpConstantFolder) as the slice argument address
+    // resolution and the LRAM address assignment only accept views with
+    // static geometry. (Entries that only become constant after the forall
+    // unrolling are constified by the second canonicalizer below.)
     funcPm.addPass(createCanonicalizerPass());
     funcPm.addPass(createCSEPass());
 
@@ -276,7 +284,10 @@ void addNssUpToAssignLramAddresses(
     funcPm.addPass(createUnrollForallLoopsPass());
     funcPm.addPass(createScheduleSliceProgramsPass());
 
-    // Canonicalize to fold constants and types after the loop unrolling in the previous pass
+    // Canonicalize to fold constants and types after the loop unrolling in the
+    // previous pass; this also constifies element-reinterpreting
+    // torq_hl.reinterpret_cast views whose offsets only became constants here
+    // (the address assignment only accepts views with static geometry).
     funcPm.addPass(createCanonicalizerPass());
 
     // Lower slice ProgramOp bodies to TorqHW before deallocation/addressing.

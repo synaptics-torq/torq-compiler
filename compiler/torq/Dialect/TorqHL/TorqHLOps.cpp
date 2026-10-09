@@ -22,6 +22,7 @@
 #include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Dialect/Utils/StructuredOpsUtils.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
@@ -982,6 +983,327 @@ class SinkWideningConvertIntoMul : public OpRewritePattern<ActOp> {
 
 void ActOp::getCanonicalizationPatterns(RewritePatternSet &results, MLIRContext *context) {
     results.add<FoldNoOpClamp, SinkWideningConvertIntoMul>(context);
+}
+
+/// CastOpInterface: the source and result must be compatible shaped types
+/// (their shape compatibility is checked by the SameOperandsAndResultShape
+/// trait) and the element types must be identical, or both int/float of the
+/// same bit width (a byte re-interpretation, e.g. bf16 <-> i16).
+bool BitcastOp::areCastCompatible(TypeRange inputs, TypeRange outputs) {
+    if (inputs.size() != 1 || outputs.size() != 1)
+        return false;
+    auto sourceType = dyn_cast<ShapedType>(inputs.front());
+    auto resultType = dyn_cast<ShapedType>(outputs.front());
+    if (!sourceType || !resultType)
+        return false;
+    Type sourceElement = sourceType.getElementType();
+    Type resultElement = resultType.getElementType();
+    if (sourceElement == resultElement)
+        return true;
+    return sourceElement.isIntOrFloat() && resultElement.isIntOrFloat() &&
+           sourceElement.getIntOrFloatBitWidth() == resultElement.getIntOrFloatBitWidth();
+}
+
+/// bitcast(extract_slice(x)) -> extract_slice(bitcast(x))
+///
+/// Tiling places the extract_slice below the bitcast (bitcast of the tile).
+/// Bufferized, the bitcast then becomes a torq_hl.reinterpret_cast over the
+/// per-tile subview, which must carry the tile's non-zero offset - a form the
+/// address assignment does not support (a view shares its source's address).
+/// The element types have the same width, so the commutation is byte-exact;
+/// with the bitcast above the slice, the bufferized reinterpret_cast sits
+/// directly on the whole buffer with offset 0 and the tiles subview the
+/// reinterpreted view instead.
+class CommuteBitcastThroughExtractSlice : public OpRewritePattern<BitcastOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(BitcastOp op, PatternRewriter &rewriter) const override {
+        auto slice = op.getSource().getDefiningOp<tensor::ExtractSliceOp>();
+        if (!slice)
+            return failure();
+        auto sourceTensorType = dyn_cast<RankedTensorType>(slice.getSource().getType());
+        auto resultTensorType = dyn_cast<RankedTensorType>(op.getType());
+        if (!sourceTensorType || !resultTensorType)
+            return failure();
+
+        Value whole = rewriter.create<BitcastOp>(
+            op.getLoc(),
+            RankedTensorType::get(
+                sourceTensorType.getShape(), resultTensorType.getElementType(),
+                sourceTensorType.getEncoding()
+            ),
+            slice.getSource()
+        );
+        rewriter.replaceOpWithNewOp<tensor::ExtractSliceOp>(
+            op, resultTensorType, whole, slice.getMixedOffsets(), slice.getMixedSizes(),
+            slice.getMixedStrides()
+        );
+        return success();
+    }
+};
+
+void BitcastOp::getCanonicalizationPatterns(RewritePatternSet &results, MLIRContext *context) {
+    results.add<CommuteBitcastThroughExtractSlice>(context);
+}
+
+//===----------------------------------------------------------------------===//
+// ReinterpretCastOp
+//===----------------------------------------------------------------------===//
+
+/// Sets values[i] to constValues[i] if the latter is a static value, as
+/// indicated by ShapedType::kDynamic. If constValues[i] is dynamic, tries to
+/// extract a constant value from values[i] to allow for additional folding
+/// opportunities. Also converts all existing attributes to index attributes
+/// (they may be i64 attributes). Same helper MLIR uses for
+/// memref.reinterpret_cast (mlir/lib/Dialect/MemRef/IR/MemRefOps.cpp).
+static void
+constifyIndexValues(SmallVectorImpl<OpFoldResult> &values, ArrayRef<int64_t> constValues) {
+    assert(constValues.size() == values.size() && "incorrect number of const values");
+    for (auto [i, cstVal] : llvm::enumerate(constValues)) {
+        Builder builder(values[i].getContext());
+        if (ShapedType::isStatic(cstVal)) {
+            // Constant value is known, use it directly.
+            values[i] = builder.getIndexAttr(cstVal);
+            continue;
+        }
+        if (std::optional<int64_t> cst = getConstantIntValue(values[i])) {
+            // Try to extract a constant or convert an existing one to index.
+            values[i] = builder.getIndexAttr(*cst);
+        }
+    }
+}
+
+/// Build with mixed static and dynamic entries: `static_offsets`,
+/// `static_sizes` and `static_strides` are filled with sentinel values that
+/// encode the dynamic entries, which become the corresponding operands.
+void ReinterpretCastOp::build(
+    OpBuilder &b, OperationState &result, MemRefType resultType, Value source, OpFoldResult offset,
+    ArrayRef<OpFoldResult> sizes, ArrayRef<OpFoldResult> strides, ArrayRef<NamedAttribute> attrs
+) {
+    SmallVector<int64_t> staticOffsets, staticSizes, staticStrides;
+    SmallVector<Value> dynamicOffsets, dynamicSizes, dynamicStrides;
+    dispatchIndexOpFoldResults(offset, dynamicOffsets, staticOffsets);
+    dispatchIndexOpFoldResults(sizes, dynamicSizes, staticSizes);
+    dispatchIndexOpFoldResults(strides, dynamicStrides, staticStrides);
+    result.addAttributes(attrs);
+    build(
+        b, result, resultType, source, dynamicOffsets, dynamicSizes, dynamicStrides,
+        b.getDenseI64ArrayAttr(staticOffsets), b.getDenseI64ArrayAttr(staticSizes),
+        b.getDenseI64ArrayAttr(staticStrides)
+    );
+}
+
+/// Build with fully static entries.
+void ReinterpretCastOp::build(
+    OpBuilder &b, OperationState &result, MemRefType resultType, Value source, int64_t offset,
+    ArrayRef<int64_t> sizes, ArrayRef<int64_t> strides, ArrayRef<NamedAttribute> attrs
+) {
+    SmallVector<OpFoldResult> sizeValues = llvm::to_vector<4>(
+        llvm::map_range(sizes, [&](int64_t v) -> OpFoldResult { return b.getI64IntegerAttr(v); })
+    );
+    SmallVector<OpFoldResult> strideValues = llvm::to_vector<4>(
+        llvm::map_range(strides, [&](int64_t v) -> OpFoldResult { return b.getI64IntegerAttr(v); })
+    );
+    build(
+        b, result, resultType, source, b.getI64IntegerAttr(offset), sizeValues, strideValues, attrs
+    );
+}
+
+LogicalResult ReinterpretCastOp::verify() {
+    auto srcType = cast<MemRefType>(getSource().getType());
+    auto resultType = cast<MemRefType>(getType());
+    if (srcType.getMemorySpace() != resultType.getMemorySpace())
+        return emitError("different memory spaces specified for source type ")
+               << srcType << " and result memref type " << resultType;
+    if (srcType.getElementType() != resultType.getElementType()) {
+        // A reinterpret_cast may re-interpret the element type when both
+        // element types have the same bit width (e.g. a bf16 buffer viewed as
+        // i16): the bytes in memory are unchanged. Shape, layout and memory
+        // space must still match, so the cast stays a free re-interpretation.
+        if (!srcType.getElementType().isIntOrFloat() ||
+            !resultType.getElementType().isIntOrFloat() ||
+            srcType.getElementType().getIntOrFloatBitWidth() !=
+                resultType.getElementType().getIntOrFloatBitWidth())
+            return emitError("different element types specified for source type ")
+                   << srcType << " and result memref type " << resultType;
+    }
+    if (srcType.getShape() != resultType.getShape())
+        return emitError("the source and result must have the same shape, got ")
+               << srcType << " to " << resultType;
+
+    // Match sizes in result memref type and in static_sizes attribute.
+    for (auto [idx, resultSize, expectedSize] :
+         llvm::enumerate(resultType.getShape(), getStaticSizes())) {
+        if (ShapedType::isStatic(resultSize) && resultSize != expectedSize)
+            return emitError("expected result type with size = ")
+                   << (ShapedType::isDynamic(expectedSize) ? std::string("dynamic")
+                                                           : std::to_string(expectedSize))
+                   << " instead of " << resultSize << " in dim = " << idx;
+    }
+
+    // Match offset and strides in static_offsets and static_strides
+    // attributes. If the result memref type has no layout, this assumes an
+    // identity layout.
+    int64_t resultOffset;
+    SmallVector<int64_t, 4> resultStrides;
+    if (failed(resultType.getStridesAndOffset(resultStrides, resultOffset)))
+        return emitError("expected result type to have strided layout but found ") << resultType;
+
+    // Match offset in result memref type and in static_offsets attribute.
+    int64_t expectedOffset = getStaticOffsets().front();
+    if (ShapedType::isStatic(resultOffset) && resultOffset != expectedOffset)
+        return emitError("expected result type with offset = ")
+               << (ShapedType::isDynamic(expectedOffset) ? std::string("dynamic")
+                                                         : std::to_string(expectedOffset))
+               << " instead of " << resultOffset;
+
+    // Match strides in result memref type and in static_strides attribute.
+    for (auto [idx, resultStride, expectedStride] :
+         llvm::enumerate(resultStrides, getStaticStrides())) {
+        if (ShapedType::isStatic(resultStride) && resultStride != expectedStride)
+            return emitError("expected result type with stride = ")
+                   << (ShapedType::isDynamic(expectedStride) ? std::string("dynamic")
+                                                             : std::to_string(expectedStride))
+                   << " instead of " << resultStride << " in dim = " << idx;
+    }
+
+    return success();
+}
+
+/// Whether the op's result starts at the same address as its source's
+/// (i.e. the op does not add an offset of its own). A view over such an op
+/// can swap the op for its source without changing the view's geometry, which
+/// is relative to the same base pointer.
+static bool viewHasSameBaseAsSource(Operation *op) {
+    if (isa<memref::CastOp>(op))
+        return true;
+    if (auto subview = dyn_cast<memref::SubViewOp>(op))
+        // Only a zero-offset subview with the full source shape keeps both
+        // the base pointer and the shape (this op requires the latter).
+        return llvm::all_of(subview.getMixedOffsets(), isZeroInteger) &&
+               cast<ShapedType>(subview.getType()).getShape() ==
+                   cast<ShapedType>(subview.getSource().getType()).getShape();
+    if (auto view = dyn_cast<ReinterpretCastOp>(op))
+        return getConstantIntValue(view.getConstifiedMixedOffset()) == 0;
+    return false;
+}
+
+OpFoldResult ReinterpretCastOp::fold(FoldAdaptor /*adaptor*/) {
+    Value src = getSource();
+
+    // reinterpret_cast(x) over an offset-free view of the same buffer can
+    // drop the intermediate view: the geometry is carried by this op, which
+    // is relative to the same base pointer.
+    if (Operation *prev = src.getDefiningOp()) {
+        if (viewHasSameBaseAsSource(prev)) {
+            getSourceMutable().assign(prev->getOperand(0));
+            return getResult();
+        }
+    }
+
+    // A same-type reinterpret_cast without an offset change is a no-op.
+    if (ShapedType::isStaticShape(getType().getShape()) && src.getType() == getType() &&
+        getStaticOffsets().front() == 0)
+        return src;
+
+    return nullptr;
+}
+
+SmallVector<OpFoldResult> ReinterpretCastOp::getConstifiedMixedSizes() {
+    SmallVector<OpFoldResult> values = getMixedSizes();
+    constifyIndexValues(values, getType().getShape());
+    return values;
+}
+
+SmallVector<OpFoldResult> ReinterpretCastOp::getConstifiedMixedStrides() {
+    SmallVector<OpFoldResult> values = getMixedStrides();
+    SmallVector<int64_t> staticValues;
+    int64_t unused;
+    LogicalResult status = getType().getStridesAndOffset(staticValues, unused);
+    (void)status;
+    assert(succeeded(status) && "could not get strides from type");
+    constifyIndexValues(values, staticValues);
+    return values;
+}
+
+OpFoldResult ReinterpretCastOp::getConstifiedMixedOffset() {
+    SmallVector<OpFoldResult> values = getMixedOffsets();
+    assert(values.size() == 1 && "reinterpret_cast must have one and only one offset");
+    SmallVector<int64_t> staticValues, unused;
+    int64_t offset;
+    LogicalResult status = getType().getStridesAndOffset(unused, offset);
+    (void)status;
+    assert(succeeded(status) && "could not get offset from type");
+    staticValues.push_back(offset);
+    constifyIndexValues(values, staticValues);
+    return values[0];
+}
+
+namespace {
+
+/// Re-spell the view once more of its entries are known than when it was
+/// created: they become constants as the pipeline resolves the bindings and
+/// unrolls the loops. Mirrors MLIR's ReinterpretCastOpConstantFolder for
+/// memref.reinterpret_cast, keeping this op's element type (which it may
+/// re-interpret). Like for memref.reinterpret_cast and subview, this makes
+/// any canonicalizer in the pipeline fold the view as soon as its geometry
+/// is known, so no dedicated refine pass is needed.
+struct ReinterpretCastOpConstantFolder : public OpRewritePattern<ReinterpretCastOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(ReinterpretCastOp op, PatternRewriter &rewriter) const override {
+        unsigned srcStaticCount = llvm::count_if(
+            llvm::concat<OpFoldResult>(
+                op.getMixedOffsets(), op.getMixedSizes(), op.getMixedStrides()
+            ),
+            [](OpFoldResult ofr) { return isa<Attribute>(ofr); }
+        );
+
+        SmallVector<OpFoldResult> offsets = {op.getConstifiedMixedOffset()};
+        SmallVector<OpFoldResult> sizes = op.getConstifiedMixedSizes();
+        SmallVector<OpFoldResult> strides = op.getConstifiedMixedStrides();
+        unsigned dstStaticCount = llvm::count_if(
+            llvm::concat<OpFoldResult>(offsets, sizes, strides),
+            [](OpFoldResult ofr) { return isa<Attribute>(ofr); }
+        );
+
+        // Nothing new was constified: leave the op alone.
+        if (srcStaticCount == dstStaticCount)
+            return failure();
+
+        // Rebuild the result type from the constified entries, keeping the
+        // op's element type and memory space.
+        auto toStatic = [](OpFoldResult ofr) -> int64_t {
+            return isa<Attribute>(ofr) ? cast<IntegerAttr>(cast<Attribute>(ofr)).getInt()
+                                       : ShapedType::kDynamic;
+        };
+        SmallVector<int64_t> staticSizes =
+            llvm::to_vector(llvm::map_range(sizes, [&](OpFoldResult s) { return toStatic(s); }));
+        SmallVector<int64_t> staticStrides =
+            llvm::to_vector(llvm::map_range(strides, [&](OpFoldResult s) { return toStatic(s); }));
+        int64_t staticOffset = toStatic(offsets.front());
+
+        MemRefType refinedType = MemRefType::get(
+            staticSizes, op.getType().getElementType(),
+            StridedLayoutAttr::get(op.getContext(), staticOffset, staticStrides),
+            op.getType().getMemorySpace()
+        );
+
+        rewriter.replaceOpWithNewOp<ReinterpretCastOp>(
+            op, refinedType, op.getSource(), offsets.front(), sizes, strides
+        );
+        return success();
+    }
+};
+
+} // namespace
+
+void ReinterpretCastOp::getCanonicalizationPatterns(
+    RewritePatternSet &results, MLIRContext *context
+) {
+    results.add<ReinterpretCastOpConstantFolder>(context);
 }
 
 } // namespace mlir::syna::torq_hl

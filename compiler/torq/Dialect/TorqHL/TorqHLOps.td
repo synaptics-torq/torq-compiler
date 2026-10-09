@@ -17,7 +17,9 @@ include "mlir/IR/BuiltinAttributeInterfaces.td"
 include "mlir/IR/Traits.td"
 
 include "mlir/Dialect/Linalg/IR/LinalgInterfaces.td"
+include "mlir/Interfaces/CastInterfaces.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
+include "mlir/Interfaces/ViewLikeInterface.td"
 
 // Marks a layer op whose init is updated instead of replaced: the prior init
 // contents are read, or merely left in place by a partial write (e.g. scatter
@@ -523,6 +525,128 @@ def TorqHl_IdentityOp: TorqHL_LayerOp<"identity"> {
   let arguments = !con(commonArgs, (ins
     TensorOrMemref:$input
   ));
+}
+
+def TorqHl_BitcastOp: TorqHL_Op<"bitcast", [
+    Pure,
+    SameOperandsAndResultShape,
+    DeclareOpInterfaceMethods<CastOpInterface>
+]> {
+  let summary = "Re-interpret a tensor's bytes as a same-width element type";
+  let description = [{
+    Returns a view of the source with the same shape but a different element
+    type of the same bit width (e.g. bf16 <-> i16). The bytes in memory are
+    unchanged. Bufferization turns this into a free torq_hl.reinterpret_cast
+    (see BufferizationInterfaces.cpp), so a bitcast never causes a
+    data-movement slice.
+
+    Verification is the community cast pattern (as for memref.cast and the
+    arith casts): SameOperandsAndResultShape checks the shape compatibility,
+    CastOpInterface (areCastCompatible) the element type compatibility, and
+    the same interface folds the no-op cast (identical source/result type).
+  }];
+
+  let arguments = (ins
+    TensorOrMemref:$source
+  );
+
+  let results = (outs
+    TensorOrMemref:$result
+  );
+
+  let hasCanonicalizer = 1;
+}
+
+def TorqHl_ReinterpretCastOp: TorqHL_Op<"reinterpret_cast", [
+    Pure,
+    AttrSizedOperandSegments,
+    OffsetSizeAndStrideOpInterface,
+    ViewLikeOpInterface
+]> {
+  let summary = "Re-interpret a memref's bytes as a same-width element type (free view)";
+  let description = [{
+    A memref-level view (the bufferized form of torq_hl.bitcast): same shape,
+    layout and memory space as the source, but a different element type of the
+    same bit width (e.g. bf16 <-> i16). The bytes in memory are unchanged and
+    the view shares the source's address, so it lowers to nothing.
+
+    It mirrors memref.reinterpret_cast, which in this MLIR - and in current
+    upstream MLIR - forbids changing the element type.
+
+    ```mlir
+    %i16 = torq_hl.reinterpret_cast %bf16 to
+      offset: [0], sizes: [1, 1024, 64], strides: [65536, 64, 1]
+    : memref<1x1024x64xbf16> to memref<1x1024x64xi16>
+    ```
+  }];
+
+  let arguments = (ins
+    AnyNon0RankedMemRef:$source,
+    Variadic<Index>:$offsets,
+    Variadic<Index>:$sizes,
+    Variadic<Index>:$strides,
+    DenseI64ArrayAttr:$static_offsets,
+    DenseI64ArrayAttr:$static_sizes,
+    DenseI64ArrayAttr:$static_strides
+  );
+
+  let results = (outs AnyStridedMemRef:$result);
+
+  let assemblyFormat = [{
+    $source `to` `offset` `` `:`
+    custom<DynamicIndexList>($offsets, $static_offsets)
+    `` `,` `sizes` `` `:`
+    custom<DynamicIndexList>($sizes, $static_sizes)
+    `` `,` `strides` `` `:`
+    custom<DynamicIndexList>($strides, $static_strides)
+    attr-dict `:` type($source) `to` type($result)
+  }];
+
+  let builders = [
+    // Build a ReinterpretCastOp with mixed static and dynamic entries.
+    OpBuilder<(ins "MemRefType":$resultType, "Value":$source,
+      "OpFoldResult":$offset, "ArrayRef<OpFoldResult>":$sizes,
+      "ArrayRef<OpFoldResult>":$strides,
+      CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>,
+    // Build a ReinterpretCastOp with static entries.
+    OpBuilder<(ins "MemRefType":$resultType, "Value":$source,
+      "int64_t":$offset, "ArrayRef<int64_t>":$sizes,
+      "ArrayRef<int64_t>":$strides,
+      CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>
+  ];
+
+  let extraClassDeclaration = [{
+    // The result of the op is always a ranked strided memref.
+    MemRefType getType() { return getResult().getType(); }
+
+    /// ViewLikeOpInterface: the view's source is its first operand.
+    Value getViewSource() { return getSource(); }
+
+    /// Return the rank of the result type.
+    unsigned getResultRank() { return getType().getRank(); }
+
+    /// Return the expected rank of each of the `static_offsets`,
+    /// `static_sizes` and `static_strides` attributes.
+    std::array<unsigned, 3> getArrayAttrMaxRanks() {
+      unsigned resultRank = getType().getRank();
+      return {1, resultRank, resultRank};
+    }
+
+    /// Return the number of leading operands before the `offsets`, `sizes`
+    /// and `strides` operands.
+    static unsigned getOffsetSizeAndStrideStartOperandIndex() { return 1; }
+
+    /// A vector of all the static or dynamic sizes (resp. strides, offset)
+    /// of the op, with statically known entries (from the result type, or
+    /// from a constant operand) returned as index attributes.
+    SmallVector<OpFoldResult> getConstifiedMixedSizes();
+    SmallVector<OpFoldResult> getConstifiedMixedStrides();
+    OpFoldResult getConstifiedMixedOffset();
+  }];
+
+  let hasVerifier = 1;
+  let hasFolder = 1;
+  let hasCanonicalizer = 1;
 }
 
 def TorqHL_ScatterOp: TorqHL_LayerOp<"scatter", [UpdateInPlaceTrait]> {

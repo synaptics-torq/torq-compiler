@@ -31,6 +31,63 @@ using mlir::bufferization::replaceOpWithBufferizedValues;
 
 namespace mlir::syna::torq_hl {
 
+/// Build a torq_hl.reinterpret_cast that views `source` as a memref of
+/// `resultElementType`: same shape, layout and memory space as the source.
+/// Static entries of the source's layout are spelled as static op entries;
+/// dynamic ones are backed by a `memref.extract_strided_metadata`. Returns
+/// the new memref value in `result`.
+static LogicalResult createReinterpretView(
+    OpBuilder &rewriter, Location loc, Value source, Type resultElementType, Value &result
+) {
+    auto sourceType = dyn_cast<MemRefType>(source.getType());
+    if (!sourceType)
+        return emitError(loc, "reinterpret view requires a ranked source memref");
+
+    int64_t staticOffset = 0;
+    SmallVector<int64_t> staticStrides;
+    if (failed(sourceType.getStridesAndOffset(staticStrides, staticOffset)))
+        return emitError(loc, "reinterpret view requires an identity or strided source layout");
+
+    MemRefType resultType = MemRefType::get(
+        sourceType.getShape(), resultElementType, sourceType.getLayout(),
+        sourceType.getMemorySpace()
+    );
+
+    bool needMetadata = ShapedType::isDynamic(staticOffset) ||
+                        llvm::any_of(sourceType.getShape(), ShapedType::isDynamic) ||
+                        llvm::any_of(staticStrides, ShapedType::isDynamic);
+
+    Value dynamicOffset;
+    ValueRange dynamicSizes, dynamicStrides;
+    if (needMetadata) {
+        auto metadata = memref::ExtractStridedMetadataOp::create(rewriter, loc, source);
+        dynamicOffset = metadata.getOffset();
+        dynamicSizes = metadata.getSizes();
+        dynamicStrides = metadata.getStrides();
+    }
+
+    OpFoldResult offset = ShapedType::isDynamic(staticOffset)
+                              ? OpFoldResult(dynamicOffset)
+                              : OpFoldResult(rewriter.getIndexAttr(staticOffset));
+    SmallVector<OpFoldResult> sizes, strides;
+    for (auto [i, dim] : llvm::enumerate(sourceType.getShape()))
+        sizes.push_back(
+            ShapedType::isDynamic(dim) ? OpFoldResult(dynamicSizes[i])
+                                       : OpFoldResult(rewriter.getIndexAttr(dim))
+        );
+    for (auto [i, stride] : llvm::enumerate(staticStrides))
+        strides.push_back(
+            ShapedType::isDynamic(stride) ? OpFoldResult(dynamicStrides[i])
+                                          : OpFoldResult(rewriter.getIndexAttr(stride))
+        );
+
+    result = torq_hl::ReinterpretCastOp::create(
+                 rewriter, loc, resultType, source, offset, sizes, strides
+    )
+                 .getResult();
+    return success();
+}
+
 namespace {
 
 // bufferizes an dps operation by substituting all the operands with buffers
@@ -200,6 +257,84 @@ struct ConvertOpBufferizableOpInterface
     }
 };
 
+/// Bufferization of torq_hl.bitcast. It is a pure view of the source buffer
+/// with a different element type of the same width, so it bufferizes to a
+/// free torq_hl.reinterpret_cast (or a no-op when the element type does not
+/// change) and never causes a copy.
+struct BitcastOpBufferizableOpInterface
+    : public bufferization::BufferizableOpInterface::ExternalModel<
+          BitcastOpBufferizableOpInterface, torq_hl::BitcastOp> {
+
+    // A bitcast never reads or writes memory contents: it only re-describes
+    // an existing buffer (like memref.reinterpret_cast / tensor.reshape).
+    bool
+    bufferizesToMemoryRead(Operation *op, OpOperand &opOperand, const AnalysisState &state) const {
+        return false;
+    }
+
+    bool
+    bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand, const AnalysisState &state) const {
+        return false;
+    }
+
+    // The result is a 1:1 alias of the source buffer.
+    bufferization::AliasingValueList
+    getAliasingValues(Operation *op, OpOperand &opOperand, const AnalysisState &state) const {
+        return {{op->getResult(0), bufferization::BufferRelation::Equivalent}};
+    }
+
+    FailureOr<bufferization::BufferLikeType> getBufferType(
+        Operation *op, Value value, const BufferizationOptions &options,
+        const BufferizationState &state, SmallVector<Value> &invocationStack
+    ) const {
+        auto bitcastOp = cast<torq_hl::BitcastOp>(op);
+        auto maybeSrcBufferType = bufferization::detail::asMemRefType(
+            bufferization::getBufferType(bitcastOp.getSource(), options, state, invocationStack)
+        );
+        if (failed(maybeSrcBufferType))
+            return failure();
+        auto sourceType = cast<MemRefType>(*maybeSrcBufferType);
+        auto resultTensorType = cast<ShapedType>(bitcastOp.getResult().getType());
+        return cast<bufferization::BufferLikeType>(MemRefType::get(
+            resultTensorType.getShape(), resultTensorType.getElementType(), sourceType.getLayout(),
+            sourceType.getMemorySpace()
+        ));
+    }
+
+    LogicalResult bufferize(
+        Operation *op, RewriterBase &rewriter, const BufferizationOptions &options,
+        BufferizationState &state
+    ) const {
+        auto bitcastOp = cast<torq_hl::BitcastOp>(op);
+
+        FailureOr<Value> maybeSourceBuffer =
+            bufferization::getBuffer(rewriter, bitcastOp.getSource(), options, state);
+        if (failed(maybeSourceBuffer))
+            return failure();
+        Value sourceBuffer = *maybeSourceBuffer;
+
+        auto sourceType = dyn_cast<MemRefType>(sourceBuffer.getType());
+        auto resultTensorType = dyn_cast<ShapedType>(bitcastOp.getResult().getType());
+        if (!sourceType || !resultTensorType)
+            return op->emitError("bitcast bufferization requires ranked source and result");
+
+        if (sourceType.getElementType() == resultTensorType.getElementType()) {
+            // Same element type: the bitcast is a no-op.
+            replaceOpWithBufferizedValues(rewriter, op, sourceBuffer);
+            return success();
+        }
+
+        Value resultBuffer;
+        if (failed(createReinterpretView(
+                rewriter, op->getLoc(), sourceBuffer, resultTensorType.getElementType(),
+                resultBuffer
+            )))
+            return failure();
+        replaceOpWithBufferizedValues(rewriter, op, resultBuffer);
+        return success();
+    }
+};
+
 } // namespace
 
 void registerBufferizationInterfaceExternalModels(DialectRegistry &registry) {
@@ -286,6 +421,8 @@ void registerBufferizationInterfaceExternalModels(DialectRegistry &registry) {
 
         syna::torq_hl::SelectOp::attachInterface<
             TorqHLBufferizableOpInterface<syna::torq_hl::SelectOp>>(*context);
+
+        BitcastOp::attachInterface<BitcastOpBufferizableOpInterface>(*context);
     });
 }
 

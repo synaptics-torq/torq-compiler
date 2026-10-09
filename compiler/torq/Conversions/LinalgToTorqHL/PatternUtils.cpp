@@ -3436,11 +3436,7 @@ bool foldScalarRescale(
 Value makeBitcast(
     linalg::LinalgOp srcOp, PatternRewriter &rewriter, RankedTensorType resultType, Value input
 ) {
-    return torq_hl::IdentityOp::create(
-               rewriter, srcOp.getLoc(), resultType, createInitTensor(srcOp, rewriter, resultType),
-               input
-    )
-        .getOutput();
+    return torq_hl::BitcastOp::create(rewriter, srcOp.getLoc(), resultType, input);
 }
 
 static Value makeRescale16(

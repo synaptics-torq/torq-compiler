@@ -154,16 +154,29 @@ static LogicalResult setDerivedMemrefAddress(Operation *op) {
     assert(isDerivedMemRefOperation(op) && "expected a derived memref op");
     auto viewOp = cast<ViewLikeOpInterface>(op);
 
-    // A reinterpret_cast shares its source's address, so it must not add an offset of its
-    // own (that would have to be folded in here, which is unsupported).
-    if (auto reinterpretCast = dyn_cast<memref::ReinterpretCastOp>(op)) {
-        for (int i = 0; i < reinterpretCast.getResultRank(); i++) {
-            if (reinterpretCast.isDynamicOffset(i) || reinterpretCast.isDynamicSize(i)) {
-                return reinterpretCast.emitOpError("dynamic offsets or sizes not supported");
-            }
-            if (reinterpretCast.getStaticOffset(i) != 0) {
-                return reinterpretCast.emitOpError("non-zero static offsets not supported");
-            }
+    // A reinterpret view shares its source's address, so it must not add an
+    // offset of its own (that would have to be folded in here, which is
+    // unsupported). The offset is a single entry (not one per dimension);
+    // sizes and strides must be static so the view's geometry cannot depend
+    // on runtime values the resolver cannot see. This applies to both
+    // memref.reinterpret_cast and the element-reinterpreting
+    // torq_hl.reinterpret_cast (the bufferized form of torq_hl.bitcast).
+    if (isa<memref::ReinterpretCastOp, syna::torq_hl::ReinterpretCastOp>(op)) {
+        auto reinterpretCast = cast<OffsetSizeAndStrideOpInterface>(op);
+        if (reinterpretCast.isDynamicOffset(0)) {
+            return op->emitOpError("dynamic offsets not supported");
+        }
+        if (llvm::any_of(
+                reinterpretCast.getStaticSizes(),
+                [](int64_t size) { return ShapedType::isDynamic(size); }
+            ) ||
+            llvm::any_of(reinterpretCast.getStaticStrides(), [](int64_t stride) {
+                return ShapedType::isDynamic(stride);
+            })) {
+            return op->emitOpError("dynamic sizes or strides not supported");
+        }
+        if (reinterpretCast.getStaticOffset(0) != 0) {
+            return op->emitOpError("non-zero static offsets not supported");
         }
     }
 

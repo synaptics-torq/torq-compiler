@@ -52,6 +52,21 @@ bool isIdentityReinterpretCast(memref::ReinterpretCastOp reinterpretOp) {
     return llvm::equal(strides, mlir::computeStrides(resultType.getShape()));
 }
 
+bool isIdentityTorqReinterpretCast(torq_hl::ReinterpretCastOp reinterpretOp) {
+    auto resultType = reinterpretOp.getType();
+    if (!resultType.hasStaticShape())
+        return false;
+
+    auto offsets = reinterpretOp.getStaticOffsets();
+    auto sizes = reinterpretOp.getStaticSizes();
+    auto strides = reinterpretOp.getStaticStrides();
+    if (offsets.size() != 1 || offsets[0] != 0)
+        return false;
+    if (!llvm::equal(sizes, resultType.getShape()))
+        return false;
+    return llvm::equal(strides, mlir::computeStrides(resultType.getShape()));
+}
+
 bool isSplittableDerivedMemRefOperation(Operation *op) {
     if (!isDerivedMemRefOperation(op))
         return false;
@@ -61,6 +76,16 @@ bool isSplittableDerivedMemRefOperation(Operation *op) {
 
     if (auto reinterpretOp = dyn_cast<memref::ReinterpretCastOp>(op))
         return isIdentityReinterpretCast(reinterpretOp);
+
+    if (auto reinterpretOp = dyn_cast<torq_hl::ReinterpretCastOp>(op)) {
+        // An element-reinterpreting view (bf16 <-> i16) cannot fold a
+        // constant: the dense attribute would have to be re-typed. Only a
+        // same-type no-op view with identity geometry is splittable.
+        if (cast<MemRefType>(reinterpretOp.getSource().getType()).getElementType() !=
+            cast<MemRefType>(reinterpretOp.getType()).getElementType())
+            return false;
+        return isIdentityTorqReinterpretCast(reinterpretOp);
+    }
 
     return true;
 }
@@ -159,6 +184,17 @@ FailureOr<syna::torq_hl::ConstOp> foldDerivedMemRefConstant(
 
     if (auto reinterpretOp = dyn_cast<memref::ReinterpretCastOp>(op)) {
         if (!isIdentityReinterpretCast(reinterpretOp))
+            return failure();
+        return reshapeConstant(
+            rewriter, op->getLoc(), constOp, getDenseMemRefType(reinterpretOp.getType())
+        );
+    }
+
+    if (auto reinterpretOp = dyn_cast<torq_hl::ReinterpretCastOp>(op)) {
+        // Only same-type no-op views reach here: isSplittableDerivedMemRefOperation
+        // rejects element-reinterpreting views (the constant would have to be
+        // re-typed, which the dense attribute cannot express).
+        if (!isIdentityTorqReinterpretCast(reinterpretOp))
             return failure();
         return reshapeConstant(
             rewriter, op->getLoc(), constOp, getDenseMemRefType(reinterpretOp.getType())
@@ -282,6 +318,26 @@ void replaceUsesAndPropagateType(Value oldVal, Value newVal, PatternRewriter &re
                 reinterpretUser.getOffsets(), reinterpretUser.getSizes(),
                 reinterpretUser.getStrides(), reinterpretUser.getStaticOffsets(),
                 reinterpretUser.getStaticSizes(), reinterpretUser.getStaticStrides()
+            );
+            replaceUsesAndPropagateType(
+                reinterpretUser.getResult(), newReinterpret.getResult(), rewriter
+            );
+            rewriter.eraseOp(reinterpretUser);
+            continue;
+        }
+
+        if (auto reinterpretUser = dyn_cast<torq_hl::ReinterpretCastOp>(owner)) {
+            if (&use != &reinterpretUser.getSourceMutable()) {
+                rewriter.modifyOpInPlace(owner, [&]() { use.set(newVal); });
+                continue;
+            }
+
+            rewriter.setInsertionPoint(reinterpretUser);
+            auto newReinterpret = torq_hl::ReinterpretCastOp::create(
+                rewriter, reinterpretUser.getLoc(), reinterpretUser.getType(), newVal,
+                reinterpretUser.getOffsets(), reinterpretUser.getSizes(),
+                reinterpretUser.getStrides(), reinterpretUser.getStaticOffsetsAttr(),
+                reinterpretUser.getStaticSizesAttr(), reinterpretUser.getStaticStridesAttr()
             );
             replaceUsesAndPropagateType(
                 reinterpretUser.getResult(), newReinterpret.getResult(), rewriter

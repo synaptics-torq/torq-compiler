@@ -27,55 +27,6 @@ using namespace std;
 
 namespace mlir::syna::torq {
 
-struct TensorBitcastPattern : public OpRewritePattern<tensor::BitcastOp> {
-    TensorBitcastPattern(MLIRContext *context)
-        : OpRewritePattern<tensor::BitcastOp>(context, /*benefit=*/0) {
-        setDebugName("TensorBitcastPattern");
-    }
-    LogicalResult
-    matchAndRewrite(tensor::BitcastOp bitcastOp, PatternRewriter &rewriter) const override {
-
-        auto inputType = dyn_cast<RankedTensorType>(bitcastOp.getSource().getType());
-        auto resultType = dyn_cast<RankedTensorType>(bitcastOp.getResult().getType());
-
-        if (!inputType || !resultType) {
-            return failure();
-        }
-
-        auto emptyOp = tensor::EmptyOp::create(
-            rewriter, bitcastOp.getLoc(), resultType.getShape(), resultType.getElementType()
-        );
-
-        size_t rank = inputType.getRank();
-        size_t outRank = resultType.getRank();
-        SmallVector<AffineExpr> exprs;
-        for (size_t i = 0; i < rank; ++i) {
-            exprs.push_back(getAffineDimExpr(i, rewriter.getContext()));
-        }
-
-        SmallVector<AffineMap> maps{
-            AffineMap::get(outRank, 0, exprs, rewriter.getContext()),
-            AffineMap::getMultiDimIdentityMap(outRank, rewriter.getContext()),
-        };
-        SmallVector<utils::IteratorType> iteratorTypes{
-            max(rank, outRank), utils::IteratorType::parallel
-        };
-
-        rewriter.replaceOpWithNewOp<linalg::GenericOp>(
-            bitcastOp, resultType, ValueRange{bitcastOp.getSource()}, ValueRange{emptyOp}, maps,
-            iteratorTypes,
-            [&](OpBuilder &nestedBuilder, Location loc, ValueRange args) {
-                auto castOp = arith::BitcastOp::create(
-                    nestedBuilder, loc, resultType.getElementType(), args[0]
-                );
-                linalg::YieldOp::create(nestedBuilder, loc, ValueRange{castOp});
-            }
-        );
-
-        return success();
-    }
-};
-
 // %91 = linalg.generic {...} ins(%87 : tensor<1x2x128x1xbf16>) outs(%90 : tensor<1x2x128x1xi1>) {
 // ^bb0(%in: bf16, %out: i1):
 // %1484 = arith.extf %in : bf16 to f32
@@ -1140,7 +1091,6 @@ struct FoldNhwcDepthToSpacePattern : public OpRewritePattern<tensor::CollapseSha
 };
 
 void populateDecomposeLinalgOpsPatterns(MLIRContext *context, RewritePatternSet &patterns) {
-    patterns.insert<TensorBitcastPattern>(context);
     patterns.insert<BfloatGenericErfPattern>(context);
     patterns.insert<BfloatErfPattern>(context);
     patterns.insert<BfloatDivfPattern>(context);

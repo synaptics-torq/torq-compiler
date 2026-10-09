@@ -282,6 +282,14 @@ LogicalResult createTorqCopy(OpBuilder &builder, Location loc, Value from, Value
     auto fromType = mlir::cast<MemRefType>(from.getType());
     auto toType = mlir::cast<MemRefType>(to.getType());
 
+    // A torq copy moves same-typed buffers; a cross-element-type copy would
+    // mean a view (e.g. a bufferized torq_hl.bitcast) was materialized as a
+    // copy, which the bufferization analysis should have avoided. Fail loudly
+    // instead of emitting a convert that cannot re-type its data.
+    if (fromType.getElementType() != toType.getElementType())
+        return emitError(loc, "cross-element-type copy not supported: ")
+               << fromType << " to " << toType;
+
     bool fromLram = getEncodingMemorySpace(fromType) == torq_hl::MemorySpace::Lram;
     bool toLram = getEncodingMemorySpace(toType) == torq_hl::MemorySpace::Lram;
     bool fromXram = getEncodingMemorySpace(fromType) == torq_hl::MemorySpace::Xram;

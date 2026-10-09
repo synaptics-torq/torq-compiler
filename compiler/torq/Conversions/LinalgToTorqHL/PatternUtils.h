@@ -384,7 +384,8 @@ bool foldScalarRescale(
 );
 
 // `srcOp` is any linalg op (typically the generic being lowered); only its
-// location is used.
+// location is used. Creates a torq_hl.bitcast, which bufferizes to a free
+// torq_hl.reinterpret_cast view (no data movement).
 Value makeBitcast(
     linalg::LinalgOp srcOp, PatternRewriter &rewriter, RankedTensorType resultType, Value input
 );

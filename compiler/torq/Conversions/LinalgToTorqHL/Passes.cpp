@@ -37,6 +37,22 @@
 
 namespace mlir::syna::torq {
 
+/// Rewrites a ranked tensor.bitcast into a torq_hl.bitcast (same source and
+/// result types). The torq op carries the bufferization interface that turns
+/// it into a free torq_hl.reinterpret_cast view.
+class TensorBitcastToTorqBitcastPattern : public OpRewritePattern<tensor::BitcastOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(tensor::BitcastOp op, PatternRewriter &rewriter) const override {
+        auto resultType = dyn_cast<RankedTensorType>(op.getType());
+        if (!resultType)
+            return rewriter.notifyMatchFailure(op, "expected a ranked tensor.bitcast");
+        rewriter.replaceOpWithNewOp<torq_hl::BitcastOp>(op, resultType, op.getSource());
+        return success();
+    }
+};
+
 void populateLinalgToTorqHLPrePatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
@@ -256,6 +272,18 @@ class LinalgToTorqHLPreConversionPass
     void runOnOperation() override {
         auto funcOp = getOperation();
         auto *ctx = funcOp.getContext();
+
+        // Any remaining tensor.bitcast (from the linalg decompositions or the
+        // frontend) becomes a torq_hl.bitcast here, so it bufferizes as a free
+        // torq_hl.reinterpret_cast view instead of a data-movement slice. This
+        // runs after tiling, where tensor.bitcast survives untouched.
+        {
+            RewritePatternSet bitcastPatterns(ctx);
+            bitcastPatterns.add<TensorBitcastToTorqBitcastPattern>(ctx);
+            if (failed(applyPatternsGreedily(funcOp, std::move(bitcastPatterns)))) {
+                return signalPassFailure();
+            }
+        }
 
         if (failed(validateRaisedMatmulAttributeContract(funcOp))) {
             return signalPassFailure();
