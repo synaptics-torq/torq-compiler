@@ -13,8 +13,8 @@
 
 namespace mlir::syna::torq {
 
-// The bytes of the LRAM buffers that the allocation of `funcOp` spills or relocates,
-// or nullopt when the allocation fails. The trial does not change `funcOp`.
+// The bytes the swaps of `funcOp`'s allocation move, counting each swap-out and each
+// swap-in, or nullopt when the allocation fails. The trial does not change `funcOp`.
 std::optional<int64_t> lramSwapBytes(FunctionOpInterface funcOp);
 
 } // namespace mlir::syna::torq

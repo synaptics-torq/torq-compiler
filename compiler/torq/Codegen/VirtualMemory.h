@@ -9,20 +9,18 @@
 
 namespace mlir::syna::torq {
 
-// A swap convertVirtualToPhysicalMemRefs performs: a spill swaps the buffers out to the
-// swapMemSpace (XRAM for LRAM); a reload swaps them back in, each at its offset; a
-// relocation swaps them all out and immediately back in at their offsets.
+// One buffer convertVirtualToPhysicalMemRefs swaps out to the swapMemSpace (XRAM for
+// LRAM), or back in at `offset`.
 struct Swap {
-    enum class Kind { Spill, Reload, Relocate };
+    enum class Kind { Out, In };
     Kind kind;
-    llvm::SmallVector<Value> buffers;
-    // where each buffer lands, for a reload or relocation
-    llvm::SmallVector<int64_t> offsets;
+    Value buffer;
+    int64_t offset = -1;
 };
 
 // The swaps to perform just before the op at each index into the function's op list, in
-// the order they were decided: a relocation followed by a spill of one of the buffers it
-// moved must be applied in that order. Empty when the layout fits as is.
+// the order they were decided: a buffer swapped out and back in at one op (moved to make
+// room) must be applied in that order. Empty when the layout fits as is.
 using SwapSchedule = llvm::DenseMap<int, llvm::SmallVector<Swap>>;
 
 // Rewrite the virtual memrefs of `memorySpace` to physical ones, performing the swaps of

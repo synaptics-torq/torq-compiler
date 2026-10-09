@@ -476,8 +476,13 @@ class PlacementSimulation {
         }
     }
 
-    // Schedule the spill of the released `idx` at `opIdx`, and its reload at its next use.
-    void scheduleSpill(BufferIdx idx, OpIdx opIdx);
+    // Release the resident `idx` and schedule its swap-out at `opIdx`.
+    void swapOut(BufferIdx idx, OpIdx opIdx);
+    // Schedule the swap-in of `idx` at `opIdx`, at the offset it is placed at.
+    void scheduleSwapIn(BufferIdx idx, OpIdx opIdx);
+    // Queue the reload of the released `idx` at its next use after `opIdx`.
+    void scheduleReload(BufferIdx idx, OpIdx opIdx);
+    // Swap `victim` out at `opIdx` and reload it at its next use.
     void spill(BufferIdx victim, OpIdx opIdx);
     // Re-place every buffer not pinned at `opIdx`: those pinned at `pinnedFirstAt` first (so
     // they take the extremes and leave the middle contiguous), then largest first. A buffer
@@ -515,8 +520,16 @@ class PlacementSimulation {
 
 } // namespace
 
-void PlacementSimulation::scheduleSpill(BufferIdx idx, OpIdx opIdx) {
-    schedule_[opIdx].push_back({Swap::Kind::Spill, {buffers_[idx].value}, {}});
+void PlacementSimulation::swapOut(BufferIdx idx, OpIdx opIdx) {
+    occupancy_.release(idx);
+    schedule_[opIdx].push_back({Swap::Kind::Out, buffers_[idx].value});
+}
+
+void PlacementSimulation::scheduleSwapIn(BufferIdx idx, OpIdx opIdx) {
+    schedule_[opIdx].push_back({Swap::Kind::In, buffers_[idx].value, occupancy_.offset(idx)});
+}
+
+void PlacementSimulation::scheduleReload(BufferIdx idx, OpIdx opIdx) {
     OpIdx reloadOpIdx = buffers_[idx].resident.nextAfter(opIdx);
     if (reloadOpIdx != INT_MAX) {
         events_.push({reloadOpIdx, EventKind::Reload, idx});
@@ -524,8 +537,8 @@ void PlacementSimulation::scheduleSpill(BufferIdx idx, OpIdx opIdx) {
 }
 
 void PlacementSimulation::spill(BufferIdx victim, OpIdx opIdx) {
-    occupancy_.release(victim);
-    scheduleSpill(victim, opIdx);
+    swapOut(victim, opIdx);
+    scheduleReload(victim, opIdx);
 }
 
 bool PlacementSimulation::compact(OpIdx opIdx, OpIdx pinnedFirstAt) {
@@ -549,22 +562,17 @@ bool PlacementSimulation::compact(OpIdx opIdx, OpIdx pinnedFirstAt) {
         }
         return a < b;
     });
+    // every moved buffer is out before any comes back, so they land in the freed space
     for (BufferIdx moved : movable) {
-        occupancy_.release(moved);
+        swapOut(moved, opIdx);
     }
-    SmallVector<Value> relocated;
-    SmallVector<int64_t> offsets;
     for (BufferIdx moved : movable) {
-        if (!occupancy_.place(moved)) {
-            scheduleSpill(moved, opIdx);
-            continue;
+        if (occupancy_.place(moved)) {
+            scheduleSwapIn(moved, opIdx);
         }
-        relocated.push_back(buffers_[moved].value);
-        offsets.push_back(occupancy_.offset(moved));
-    }
-    if (!relocated.empty()) {
-        schedule_[opIdx].push_back({Swap::Kind::Relocate, std::move(relocated), std::move(offsets)}
-        );
+        else {
+            scheduleReload(moved, opIdx);
+        }
     }
     return true;
 }
@@ -652,14 +660,10 @@ bool PlacementSimulation::sweep(ArrayRef<ForcedCompaction> forcedCompactions) {
             if (!place(event.buffer, event.opIdx)) {
                 return false;
             }
-            // the spills and relocations place() scheduled at this op come first, so the
-            // walk frees the space before it reloads into it
+            // the swap-outs place() scheduled at this op come first, so the walk frees the
+            // space before it reloads into it
             if (event.kind == EventKind::Reload) {
-                schedule_[event.opIdx].push_back(
-                    {Swap::Kind::Reload,
-                     {buffers_[event.buffer].value},
-                     {occupancy_.offset(event.buffer)}}
-                );
+                scheduleSwapIn(event.buffer, event.opIdx);
             }
         }
     }
@@ -1409,9 +1413,9 @@ std::optional<int64_t> lramSwapBytes(FunctionOpInterface funcOp) {
         planPlacement(collectLramBuffers(funcOp), usable, /*replan=*/false);
     int64_t bytes = 0;
     for (const auto &[opIdx, swaps] : placement->schedule) {
+        // one entry is one DMA, so a relocation counts its buffer out and back in
         for (const Swap &swap : swaps) {
-            for (Value buffer : swap.buffers)
-                bytes += getEncodedTotalSizeBytes(cast<MemRefType>(buffer.getType()));
+            bytes += getEncodedTotalSizeBytes(cast<MemRefType>(swap.buffer.getType()));
         }
     }
     return bytes;

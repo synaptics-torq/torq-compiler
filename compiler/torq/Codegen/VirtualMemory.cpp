@@ -337,53 +337,6 @@ void VirtualBuffer::deallocate(memref::DeallocOp deallocOp, IRRewriter &rewriter
     }
 }
 
-// Collect the buffer accesses `op` may perform, normalized to AsyncAccess.
-static void collectBufferAccesses(Operation *op, SmallVectorImpl<torq_hl::AsyncAccess> &accesses) {
-
-    if (auto asyncAccessOp = dyn_cast<torq_hl::AsyncAccessOpInterface>(op)) {
-        asyncAccessOp.getAsyncAccesses(accesses);
-        return;
-    }
-
-    if (auto memEffectsOp = dyn_cast<MemoryEffectOpInterface>(op)) {
-        SmallVector<MemoryEffects::EffectInstance> effects;
-        memEffectsOp.getEffects(effects);
-
-        // a write effect not attached to a value could touch anything: fall back
-        // to the conservative path below
-        bool hasUnattributedWrite = llvm::any_of(effects, [](const auto &effect) {
-            return isa<MemoryEffects::Write>(effect.getEffect()) && !effect.getValue();
-        });
-
-        if (!hasUnattributedWrite) {
-            SetVector<Value> accessedValues;
-            for (auto &effect : effects) {
-                Value value = effect.getValue();
-                if (value && isa<MemRefType>(value.getType())) {
-                    accessedValues.insert(value);
-                }
-            }
-            for (auto value : accessedValues) {
-                auto access = torq_hl::getValueAccessFromEffects(effects, value);
-                if (access != torq_hl::ArgAccessBitfield::None) {
-                    accesses.push_back({access, cast<TypedValue<MemRefType>>(value)});
-                }
-            }
-            return;
-        }
-    }
-
-    // no usable effect information: assume the op may read and write any operand
-    for (auto operand : op->getOperands()) {
-        if (isa<MemRefType>(operand.getType())) {
-            accesses.push_back(
-                {torq_hl::ArgAccessBitfield::Read | torq_hl::ArgAccessBitfield::Write,
-                 cast<TypedValue<MemRefType>>(operand)}
-            );
-        }
-    }
-}
-
 // Precompute, for every allocation in `memorySpace`, the ordered list of the
 // function's accesses to it, so eviction can ask whether any remaining access
 // observes a buffer's current contents.
@@ -396,28 +349,8 @@ static void buildBufferAccessSchedule(
             continue;
         }
 
-        SmallVector<torq_hl::AsyncAccess> accesses;
-        collectBufferAccesses(op, accesses);
-
-        // aggregate per root allocation: the previous contents are discarded
-        // only if the whole allocation is accessed Write-without-Read and no
-        // other access of the op observes it
-        llvm::MapVector<Value, bool> rootDiscards;
-        for (auto &access : accesses) {
-            if (getEncodingMemorySpace(access.buffer.getType()) != memorySpace) {
-                continue;
-            }
-            Value root = getViewBase(access.buffer);
-            bool discards =
-                access.access == torq_hl::ArgAccessBitfield::Write && access.buffer == root;
-            auto [it, inserted] = rootDiscards.try_emplace(root, discards);
-            if (!inserted) {
-                it->second = it->second && discards;
-            }
-        }
-
-        for (auto &[root, discards] : rootDiscards) {
-            schedule[root].emplace_back(index, discards);
+        for (const auto &[root, access] : collectRootAccesses(op, memorySpace)) {
+            schedule[root].emplace_back(index, access == torq_hl::ArgAccessBitfield::Write);
         }
     }
 }
@@ -438,9 +371,7 @@ collectOperationMemoryInfo(Operation *op, torq_hl::MemorySpace memorySpace) {
         }
     }
 
-    SmallVector<torq_hl::AsyncAccess> accesses;
-    collectBufferAccesses(op, accesses);
-    for (auto &access : accesses) {
+    for (auto &access : collectBufferAccesses(op)) {
         if (getEncodingMemorySpace(access.buffer.getType()) == memorySpace) {
             info.accesses.push_back(access);
         }
@@ -549,17 +480,11 @@ static void performScheduledSwaps(
 ) {
     rewriter.setInsertionPoint(op);
     for (const Swap &swap : swaps) {
-        if (swap.kind != Swap::Kind::Reload) {
-            for (Value buffer : swap.buffers) {
-                vm.buffer(buffer).swapOut(rewriter, op->getLoc());
-            }
+        if (swap.kind == Swap::Kind::Out) {
+            vm.buffer(swap.buffer).swapOut(rewriter, op->getLoc());
         }
-        if (swap.kind == Swap::Kind::Spill) {
-            continue;
-        }
-        // relocated buffers swap back in only once all of them are out
-        for (auto [buffer, offset] : llvm::zip_equal(swap.buffers, swap.offsets)) {
-            vm.buffer(buffer).swapIn(rewriter, op->getLoc(), vm.addressBase + offset);
+        else {
+            vm.buffer(swap.buffer).swapIn(rewriter, op->getLoc(), vm.addressBase + swap.offset);
         }
     }
 }

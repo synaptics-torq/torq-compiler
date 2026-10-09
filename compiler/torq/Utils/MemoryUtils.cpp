@@ -10,6 +10,7 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
 namespace mlir::syna {
@@ -380,6 +381,74 @@ void copyAddressAttributes(Operation *srcOp, Operation *dstOp) {
     if (srcOp->getAttr(XRAM_ADDRESS_ATTR_NAME)) {
         dstOp->setAttr(XRAM_ADDRESS_ATTR_NAME, srcOp->getAttr(XRAM_ADDRESS_ATTR_NAME));
     }
+}
+
+SmallVector<torq_hl::AsyncAccess> collectBufferAccesses(Operation *op) {
+    SmallVector<torq_hl::AsyncAccess> accesses;
+
+    if (auto asyncAccessOp = dyn_cast<torq_hl::AsyncAccessOpInterface>(op)) {
+        asyncAccessOp.getAsyncAccesses(accesses);
+        return accesses;
+    }
+
+    if (auto memEffectsOp = dyn_cast<MemoryEffectOpInterface>(op)) {
+        SmallVector<MemoryEffects::EffectInstance> effects;
+        memEffectsOp.getEffects(effects);
+
+        // a write effect not attached to a value could touch anything: fall back
+        // to the conservative path below
+        bool hasUnattributedWrite = llvm::any_of(effects, [](const auto &effect) {
+            return isa<MemoryEffects::Write>(effect.getEffect()) && !effect.getValue();
+        });
+
+        if (!hasUnattributedWrite) {
+            SetVector<Value> accessedValues;
+            for (auto &effect : effects) {
+                Value value = effect.getValue();
+                if (value && isa<MemRefType>(value.getType())) {
+                    accessedValues.insert(value);
+                }
+            }
+            for (auto value : accessedValues) {
+                auto access = torq_hl::getValueAccessFromEffects(effects, value);
+                if (access != torq_hl::ArgAccessBitfield::None) {
+                    accesses.push_back({access, cast<TypedValue<MemRefType>>(value)});
+                }
+            }
+            return accesses;
+        }
+    }
+
+    // no usable effect information: assume the op may read and write any operand
+    for (auto operand : op->getOperands()) {
+        if (isa<MemRefType>(operand.getType())) {
+            accesses.push_back(
+                {torq_hl::ArgAccessBitfield::Read | torq_hl::ArgAccessBitfield::Write,
+                 cast<TypedValue<MemRefType>>(operand)}
+            );
+        }
+    }
+    return accesses;
+}
+
+llvm::MapVector<Value, torq_hl::ArgAccessBitfield>
+collectRootAccesses(Operation *op, torq_hl::MemorySpace memorySpace) {
+    llvm::MapVector<Value, torq_hl::ArgAccessBitfield> rootAccesses;
+    for (auto &access : collectBufferAccesses(op)) {
+        if (getEncodingMemorySpace(access.buffer.getType()) != memorySpace) {
+            continue;
+        }
+        Value root = getViewBase(access.buffer);
+        auto rootAccess = access.access;
+        if (access.buffer != root) {
+            rootAccess = rootAccess | torq_hl::ArgAccessBitfield::Read;
+        }
+        auto [it, inserted] = rootAccesses.try_emplace(root, rootAccess);
+        if (!inserted) {
+            it->second = it->second | rootAccess;
+        }
+    }
+    return rootAccesses;
 }
 
 } // namespace mlir::syna
