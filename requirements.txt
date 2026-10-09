@@ -6,7 +6,8 @@ pytest-xdist==3.4.0
 pytest-json-report==1.5.0
 
 # Connection to huggingface
-huggingface_hub==1.3.2
+huggingface_hub==1.33.0
+transformers==5.17.0
 
 # Used for apps
 streamlit==1.57.0
@@ -26,7 +27,8 @@ onnxscript==0.6.1
 # for python/torq/testing/decoder_components_extractor.py
 onnx_graphsurgeon==0.6.1
 # for torq.lab.quantization.onnx.weights sensitivity analysis (--tokenizer)
-tokenizers==0.22.2
+# (also a transformers dependency: transformers 5.17 requires >=0.23.1,<0.24)
+tokenizers==0.23.2
 
 # torch (used for bf16 reference execution in testing)
 --extra-index-url https://download.pytorch.org/whl/cpu

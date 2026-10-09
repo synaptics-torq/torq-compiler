@@ -60,12 +60,16 @@ def _bfloat16_numpy_workaround():
         torch.Tensor.__array__ = original_array
 
 
-def export_submodule_with_turbine(submodule, example_inputs):
+def export_submodule_with_turbine(submodule, example_inputs, example_kwargs=None):
     """Export a torch.nn.Module to Torch MLIR using IREE Turbine.
 
     Args:
         submodule: The torch.nn.Module to export.
-        example_inputs: A tuple of torch.Tensor example inputs.
+        example_inputs: A tuple of torch.Tensor example positional inputs.
+        example_kwargs: Optional dict of keyword example inputs (tensors or
+            constants).  Tensors become function arguments (after the
+            positional ones, in dict insertion order); constants are baked
+            into the exported graph.
 
     Returns:
         The MLIR module text as a string.
@@ -77,8 +81,23 @@ def export_submodule_with_turbine(submodule, example_inputs):
         ) from _TURBINE_IMPORT_ERR
 
     with _bfloat16_numpy_workaround():
-        export_output = _aot.export(submodule, args=example_inputs)
+        export_output = _aot.export(
+            submodule, args=example_inputs, kwargs=example_kwargs or None
+        )
     return str(export_output.mlir_module)
+
+
+def _rand_tensor_for_spec(spec, default_dtype):
+    """Build a random example tensor from a recorded arg spec (export side)."""
+    dtype = spec.get("dtype")
+    if dtype:
+        dtype = getattr(torch, dtype.split(".", 1)[-1], None)
+    shape = tuple(spec["shape"])
+    if dtype is None:
+        dtype = default_dtype
+    if not dtype.is_floating_point:
+        return torch.randint(-40, 40, shape, dtype=dtype)
+    return torch.randn(*shape, dtype=dtype)
 
 
 @pytest.fixture
@@ -100,6 +119,34 @@ def torch_turbine_layer_model_data(request, case_config):
         if t.is_floating_point():
             target_dtype = t.dtype
             break
+
+    # Traced-model cases (see ``build_traced_torch_cases``) record the full
+    # call signature: tensor args (positional, then kwargs in call order) and
+    # non-tensor args as constants.  Reconstruct the exact call.
+    arg_specs = case_config.get("layer_arg_specs")
+    if arg_specs is not None:
+        kwarg_specs = case_config.get("layer_kwarg_specs", {})
+        example_inputs = []
+        example_kwargs = {}
+        for spec in arg_specs:
+            if spec["kind"] == "tensor":
+                example_inputs.append(_rand_tensor_for_spec(spec, target_dtype))
+            else:
+                example_inputs.append(spec["value"])
+        for name, spec in kwarg_specs.items():
+            if spec["kind"] == "tensor":
+                example_kwargs[name] = _rand_tensor_for_spec(spec, target_dtype)
+            else:
+                example_kwargs[name] = spec["value"]
+        if not example_inputs and not example_kwargs:
+            raise ValueError(f"No input shapes available for layer '{layer_name}'")
+        # torch.export takes tensors as args; constant positional args are
+        # interleaved in the same tuple (they get baked into the graph).
+        mlir_text = export_submodule_with_turbine(
+            submodule, tuple(example_inputs), example_kwargs or None
+        )
+        version = f"torch_turbine_layer_{layer_name}_{type(model).__name__}"
+        return VersionedUncachedData(data=mlir_text, version=version)
 
     # Build random example inputs from recorded shapes using the model's dtype.
     example_inputs = []

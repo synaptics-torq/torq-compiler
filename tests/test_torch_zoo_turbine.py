@@ -4,7 +4,7 @@ import torch
 
 from torq.testing.comparison import compare_test_results
 from torq.testing.torch import (
-    generate_torch_layers_from_model_metadata_cache,
+    generate_traced_torch_model_layers,
     register_torch_model_loader,
     _disable_inplace_ops,
 )
@@ -15,7 +15,10 @@ Test torchvision zoo models using IREE Turbine.
 
 This is the turbine counterpart to tests/test_torch_zoo.py.  It uses the same
 lazy model loading and metadata cache, but exports each layer/full-model with
-iree.turbine.aot instead of the raw FxImporter path.
+iree.turbine.aot instead of the raw FxImporter path.  Layer cases are built
+by the generic full-argument trace (generate_traced_torch_model_layers), so
+modules called with keyword or non-tensor arguments are replayed exactly as
+the model invokes them.
 
 Known failing cases are listed in xfail_tc below and xfail'd.
 Tolerance-sensitive cases are listed in relaxed_tc and run with a relaxed
@@ -115,7 +118,7 @@ for prefix, _version, loader, _inputs in ZOO_MODELS:
 def pytest_generate_tests(metafunc):
     cases = []
     for prefix, model_version, loader, example_inputs in ZOO_MODELS:
-        cases += generate_torch_layers_from_model_metadata_cache(
+        cases += generate_traced_torch_model_layers(
             metafunc.config.cache,
             prefix,
             model_version,
@@ -206,6 +209,8 @@ def case_config(request, chip_config):
         "model_loader_key": case.data["model_loader_key"],
         "is_full_model": case.data["is_full_model"],
         "layer_input_shapes": case.data.get("layer_input_shapes", []),
+        "layer_arg_specs": case.data.get("layer_arg_specs"),
+        "layer_kwarg_specs": case.data.get("layer_kwarg_specs"),
         "torch_model_data": "torch_turbine_layer_model_data",
         "mlir_model_file": "torch_layer_model",
         "input_data": "tweaked_random_input_data",

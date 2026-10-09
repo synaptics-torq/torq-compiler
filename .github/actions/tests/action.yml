@@ -203,6 +203,10 @@ runs:
         $(pwd)/extras/python
         EOF
 
+        # workaround while FPGA image is being re-built
+        pip install huggingface_hub==1.33.0 transformers==5.17.0 tokenizers==0.23.2
+
+
     - name: Download precomputed test cache
       if: ${{ inputs.precomputed_cache != '' }}
       shell: bash
