@@ -480,13 +480,13 @@ static void addHostLoweringPasses(OpPassManager &pipeline) {
         modulePassManager.addNestedPass<func::FuncOp>(createCSEPass());
 
         // the configuration half torq skips today: strategy + lowering configs
-        buildLLVMCPUCodegenConfigurationPassPipeline(pipeline, CPUCodegenOptions{});
+        buildLLVMCPUCodegenConfigurationPassPipeline(modulePassManager, CPUCodegenOptions{});
 
         pipeline.nest<ModuleOp>().addNestedPass<func::FuncOp>(
             std::make_unique<ZeroDistributionTilesPass>()
         );
 
-        buildLLVMCPUCodegenPassPipeline(pipeline, LLVMCPUPipelineOptions{});
+        buildLLVMCPUCodegenPassPipeline(modulePassManager, LLVMCPUPipelineOptions{});
 
         return;
     }
@@ -507,7 +507,7 @@ static void addHostLoweringPasses(OpPassManager &pipeline) {
     // iree_linalg_ext.map_scatter which is rejected outside workgroups).
     modulePassManager.addNestedPass<func::FuncOp>(createConvertTensorPadToLinalgPass());
 
-    buildLLVMCPUCodegenPassPipeline(pipeline, LLVMCPUPipelineOptions{});
+    buildLLVMCPUCodegenPassPipeline(modulePassManager, LLVMCPUPipelineOptions{});
 }
 
 FailureOr<std::string> CompileCpuProgramsPass::compile(
@@ -531,6 +531,18 @@ FailureOr<std::string> CompileCpuProgramsPass::compile(
     }
 
     /* 2. Translate the llvm_ir dialect to an actual LLVM IR object */
+
+    // iree_codegen.dispatch_config ops are lowering metadata: 3.12 keeps them
+    // legal in ConvertToLLVM, but the MLIR->LLVM translation has no interface
+    // for them, so drop any that survived to this point.
+    SmallVector<Operation *> configOps;
+    variantOp.getInnerModule().walk([&](Operation *op) {
+        if (op->getName().getStringRef() == "iree_codegen.dispatch_config")
+            configOps.push_back(op);
+    });
+    for (Operation *op : configOps) {
+        op->erase();
+    }
 
     llvm::LLVMContext context;
 
