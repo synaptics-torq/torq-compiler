@@ -342,11 +342,13 @@ LogicalResult createTorqCopy(OpBuilder &builder, Location loc, Value from, Value
 }
 
 std::optional<Attribute> getTorqMemSpaceAttr(bufferization::TensorLikeType t) {
+    // Preserve the pre-3.12 contract: an engaged optional wrapping the encoding
+    // (possibly a null attribute = no memory space constraint); the caller
+    // errors out on a disengaged optional.
     if (auto rankedTensorType = dyn_cast<RankedTensorType>(t)) {
-        if (Attribute enc = rankedTensorType.getEncoding())
-            return enc;
+        return std::optional<Attribute>(rankedTensorType.getEncoding());
     }
-    return std::nullopt;
+    return std::optional<Attribute>(Attribute());
 }
 
 FailureOr<Value> createTorqAllocation(
