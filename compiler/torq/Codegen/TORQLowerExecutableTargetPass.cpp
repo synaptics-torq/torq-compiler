@@ -48,8 +48,6 @@ using namespace mlir::iree_compiler;
 
 namespace mlir::syna::torq {
 
-using CodeGenPipeline = IREE::Codegen::DispatchLoweringPassPipeline;
-
 static llvm::cl::opt<bool> clEnableTorqProfiling(
     "torq-enable-profiling", llvm::cl::desc("enable torq profiling"), llvm::cl::init(false)
 );
@@ -613,7 +611,7 @@ struct TORQLowerExecutableTargetPass
                 std::make_unique<torq::ProgressLogger>(dispatchName + "::workgroups")
             );
         }
-        distributeToWorkgroupsPipeline.addPass(createTileAndDistributeToWorkgroupsPass());
+        distributeToWorkgroupsPipeline.addPass(createTileAndDistributeToWorkgroupsUsingForallOpPass());
         distributeToWorkgroupsPipeline.enableTiming(timingScope);
         if (failed(mlir::applyPassManagerCLOptions(distributeToWorkgroupsPipeline)))
             return signalPassFailure();

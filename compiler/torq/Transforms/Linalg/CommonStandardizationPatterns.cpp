@@ -148,7 +148,7 @@ void populateCommonStandardizationPatterns(MLIRContext *context, RewritePatternS
         ReshapeToCollapseExpand<tensor::CollapseShapeOp>,
         ReshapeToCollapseExpand<tensor::ExpandShapeOp>>(context);
     tensor::populateReassociativeReshapeFoldingPatterns(patterns);
-    patterns.add<ComposeExpandOfCollapseOp<tensor::ExpandShapeOp, tensor::CollapseShapeOp>>(context
+    patterns.add<ComposeExpandOfCollapseOp<tensor::ExpandShapeOp, tensor::CollapseShapeOp, tensor::CastOp>>(context
     );
 }
 } // namespace mlir::syna::torq

@@ -242,6 +242,12 @@ namespace {
 template <typename LinalgOpTy>
 struct LinalgOpTilingInterface
     : public TilingInterface::ExternalModel<LinalgOpTilingInterface<LinalgOpTy>, LinalgOpTy> {
+    using Base = TilingInterface::ExternalModel<LinalgOpTilingInterface<LinalgOpTy>, LinalgOpTy>;
+    // Inherit the defaulted hint-bearing overloads (ArrayRef<InnerTileAlignment>);
+    // without these the hint-less overloads below hide them (C++ name hiding) and
+    // the interface fails to compile when it forwards to the hint-bearing form.
+    using Base::generateResultTileValue;
+    using Base::getTiledImplementation;
     /// Return the loop iterator type.
     SmallVector<utils::IteratorType> getLoopIteratorTypes(Operation *op) const {
         LinalgOpTy concreteOp = cast<LinalgOpTy>(op);
@@ -657,6 +663,9 @@ struct LinalgOpPartialReductionInterface
 struct MatMulOpTilingInterface
     : public TilingInterface::ExternalModel<MatMulOpTilingInterface, torq_hl::MatMulOp> {
 
+    using Base = TilingInterface::ExternalModel<MatMulOpTilingInterface, torq_hl::MatMulOp>;
+    using Base::getTiledImplementation; // inherit defaulted hint-bearing overload
+
     SmallVector<utils::IteratorType> getLoopIteratorTypes(Operation *op) const {
         auto mm = cast<torq_hl::MatMulOp>(op);
         int64_t rank = cast<RankedTensorType>(mm.getInit().getType()).getRank();
@@ -765,6 +774,10 @@ struct FullyConnectedOpTilingInterface
     : public TilingInterface::ExternalModel<
           FullyConnectedOpTilingInterface, torq_hl::FullyConnectedOp> {
 
+    using Base = TilingInterface::ExternalModel<
+        FullyConnectedOpTilingInterface, torq_hl::FullyConnectedOp>;
+    using Base::getTiledImplementation; // inherit defaulted hint-bearing overload
+
     SmallVector<utils::IteratorType> getLoopIteratorTypes(Operation *op) const {
         return {utils::IteratorType::parallel, utils::IteratorType::parallel};
     }
@@ -835,6 +848,9 @@ struct FullyConnectedOpTilingInterface
 //===----------------------------------------------------------------------===//
 struct Conv2DOpTilingInterface
     : public TilingInterface::ExternalModel<Conv2DOpTilingInterface, torq_hl::Conv2DOp> {
+
+    using Base = TilingInterface::ExternalModel<Conv2DOpTilingInterface, torq_hl::Conv2DOp>;
+    using Base::getTiledImplementation; // inherit defaulted hint-bearing overload
 
     SmallVector<utils::IteratorType> getLoopIteratorTypes(Operation *op) const {
         return {
