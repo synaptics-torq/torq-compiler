@@ -6,7 +6,7 @@ iree_cc_binary(
     "torq-run-module-main.cpp"
   DEPS
     iree::base
-    iree::base::internal::flags
+    iree::base::tooling::flags
     iree::hal
     iree::io::file_handle
     iree::tooling::context_util
@@ -24,7 +24,7 @@ iree_cc_binary(
     "torq-decode-llm.cc"
   DEPS
     iree::base
-    iree::base::internal::flags
+    iree::base::tooling::flags
     iree::hal
     iree::tooling::context_util
     iree::vm

@@ -22,7 +22,7 @@
 #include "torq_device.h"
 
 //#include "iree/hal/pipeline_layout.h"
-#include "iree/base/internal/flags.h"
+#include "iree/base/tooling/flags.h"
 
 #include <unistd.h>
 

@@ -17,7 +17,7 @@
 
 #ifndef RT_BUILD
 
-#include "iree/base/internal/flags.h"
+#include "iree/base/tooling/flags.h"
 
 IREE_FLAG(bool, torq_mpact_verbose, 0, "Enable verbose logs for Coral CSS simulation")
 IREE_FLAG(int32_t, torq_mpact_debug, 0, "Enable gdb when invoking Coral for CSS emulation")

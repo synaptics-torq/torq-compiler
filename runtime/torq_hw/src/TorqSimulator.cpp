@@ -14,7 +14,7 @@
 #include "reg/torq_regs_host_view.h"
 
 #include "iree/hal/local/executable_library.h"
-#include "iree/base/internal/flags.h"
+#include "iree/base/tooling/flags.h"
 
 #include <cstring>
 #include <iostream>

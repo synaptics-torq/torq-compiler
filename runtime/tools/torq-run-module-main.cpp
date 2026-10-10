@@ -9,7 +9,7 @@
 // from iree/tools/iree-run-module.c and modified to fit the Torq project needs.
 
 #include "iree/base/api.h"
-#include "iree/base/internal/flags.h"
+#include "iree/base/tooling/flags.h"
 #include "iree/base/internal/flatcc/parsing.h"
 #include "iree/io/file_contents.h"
 #include "iree/tooling/context_util.h"

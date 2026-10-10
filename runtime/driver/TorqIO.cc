@@ -8,7 +8,7 @@
 #include "torq_hw/inc/TorqHw.h"
 
 #if IREE_FILE_IO_ENABLE
-#include "iree/base/internal/flags.h"
+#include "iree/base/tooling/flags.h"
 
 #include <cerrno>
 #include <cstring>
