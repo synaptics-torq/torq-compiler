@@ -356,10 +356,9 @@ static void addCssLoweringPasses(OpPassManager &pipeline) {
 
     modulePassManager.addPass(createLowerExecutableUsingTransformDialectPass());
 
-    // Decompose tensor.concat to insert_slice form first, then tie the
-    // resulting tensor chain to the dispatch output buffer.
+    // Decompose tensor.concat to insert_slice form first.
+    // (ConvertToDestinationPassingStylePass was deleted upstream, #23783.)
     modulePassManager.addNestedPass<func::FuncOp>(createDecomposeTensorConcatPass());
-    modulePassManager.addNestedPass<func::FuncOp>(createConvertToDestinationPassingStylePass());
 
     FunctionLikeNest(modulePassManager).addPass(createLLVMCPULowerExecutableTargetPass);
 
@@ -372,7 +371,8 @@ static void addCssLoweringPasses(OpPassManager &pipeline) {
         .addPass(createMemrefCopyToLinalgPass)
         .addPass(createConvertLinalgToLoopsPass)
         .addPass(createConvertBf16ArithToF32Pass)
-        .addPass(createConvertBf16ToUInt16BuffersPass)
+        // bf16 storage goes through natively at 3.12 (the
+        // ConvertBf16ToUInt16Buffers pass was removed upstream)
         .addPass(createCanonicalizerPass)
         .addPass(createCSEPass);
 
@@ -480,13 +480,13 @@ static void addHostLoweringPasses(OpPassManager &pipeline) {
         modulePassManager.addNestedPass<func::FuncOp>(createCSEPass());
 
         // the configuration half torq skips today: strategy + lowering configs
-        buildLLVMCPUCodegenConfigurationPassPipeline(pipeline);
+        buildLLVMCPUCodegenConfigurationPassPipeline(pipeline, CPUCodegenOptions{});
 
         pipeline.nest<ModuleOp>().addNestedPass<func::FuncOp>(
             std::make_unique<ZeroDistributionTilesPass>()
         );
 
-        buildLLVMCPUCodegenPassPipeline(pipeline, false);
+        buildLLVMCPUCodegenPassPipeline(pipeline, LLVMCPUPipelineOptions{});
 
         return;
     }
@@ -507,7 +507,7 @@ static void addHostLoweringPasses(OpPassManager &pipeline) {
     // iree_linalg_ext.map_scatter which is rejected outside workgroups).
     modulePassManager.addNestedPass<func::FuncOp>(createConvertTensorPadToLinalgPass());
 
-    buildLLVMCPUCodegenPassPipeline(pipeline, false);
+    buildLLVMCPUCodegenPassPipeline(pipeline, LLVMCPUPipelineOptions{});
 }
 
 FailureOr<std::string> CompileCpuProgramsPass::compile(
@@ -636,12 +636,15 @@ LogicalResult CompileCpuProgramsPass::compileAndLink(IREE::HAL::ExecutableVarian
                 oldTarget.getBackend(), oldTarget.getFormat(), b.getDictionaryAttr(configItems)
             ));
 
-            // the CPUDefault pinned by OutlineCpuPrograms would make strategy
+            // the default CPU pipeline pinned by OutlineCpuPrograms would make strategy
             // selection skip the function
             variantOp.getInnerModule().walk([](func::FuncOp funcOp) {
                 auto info = getTranslationInfo(funcOp);
-                if (info && info.getDispatchLoweringPassPipeline() ==
-                                IREE::Codegen::DispatchLoweringPassPipeline::CPUDefault) {
+                auto pipelineAttr =
+                    info ? dyn_cast_if_present<IREE::CPU::PipelineAttr>(info.getPassPipeline())
+                         : nullptr;
+                if (pipelineAttr &&
+                    pipelineAttr.getValue() == IREE::CPU::LoweringPipeline::Default) {
                     eraseTranslationInfo(funcOp);
                 }
             });

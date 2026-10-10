@@ -1,5 +1,6 @@
 
 #include "iree/compiler/Codegen/Common/Passes.h"
+#include "iree/compiler/Codegen/Dialect/CPU/IR/IREECPUTypes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenDialect.h"
 #include "iree/compiler/Codegen/LLVMCPU/Passes.h"
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
@@ -21,7 +22,7 @@
 
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
-#include "mlir/Dialect/Affine/Passes.h"
+#include "mlir/Dialect/Affine/Transforms/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
@@ -121,7 +122,11 @@ static FailureOr<IREE::HAL::ExecutableVariantOp> createModule(
 
     auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
         funcOp.getContext(),
-        mlir::iree_compiler::IREE::Codegen::DispatchLoweringPassPipeline::CPUDefault
+        IREE::CPU::PipelineAttr::get(
+            funcOp.getContext(), IREE::CPU::LoweringPipeline::Default
+        ),
+        /*codegenSpec=*/{}, /*workgroupSize=*/{}, /*subgroupSize=*/{},
+        /*configuration=*/{}
     );
 
     succeeded(setTranslationInfo(funcOp, translationInfo));
@@ -237,7 +242,8 @@ static void setupPipeline(PassManager &pm) {
         .addPass(createMemrefCopyToLinalgPass)
         .addPass(createConvertLinalgToLoopsPass)
         .addPass(createConvertBf16ArithToF32Pass)
-        .addPass(createConvertBf16ToUInt16BuffersPass)
+        // bf16 storage goes through natively at 3.12 (the
+        // ConvertBf16ToUInt16Buffers pass was removed upstream)
         .addPass(createCanonicalizerPass)
         .addPass(createCSEPass);
 

@@ -115,7 +115,10 @@ void buildTorchTransformPassPipeline(OpPassManager &passManager) {
 
     passManager.addPass(mlir::torch::Torch::createLowerToBackendContractPass(10, true, true, {}, "")
     );
-    mlir::torch::TorchConversion::createTorchBackendToLinalgOnTensorsBackendPipeline(passManager);
+    mlir::torch::TorchConversion::LinalgOnTensorsBackendPipelineOptions linalgPipelineOptions;
+    mlir::torch::TorchConversion::createTorchBackendToLinalgOnTensorsBackendPipeline(
+        passManager, linalgPipelineOptions
+    );
 
     // Fully unroll static-bounded scf.for loops introduced by torch-mlir (notably
     // the per-timestep loop from onnx.GRU / onnx.LSTM) before dispatch creation.
