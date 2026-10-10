@@ -244,7 +244,7 @@ struct ConvertOpBufferizableOpInterface
         }
 
         auto ret =
-            options.createMemCpy(rewriter, op->getLoc(), *maybeInputBuffer, *maybeOutputBuffer);
+            options.memCpyFn(rewriter, op->getLoc(), *maybeInputBuffer, *maybeOutputBuffer);
 
         if (failed(ret)) {
             return op->emitError("unable to create memcpy from ")

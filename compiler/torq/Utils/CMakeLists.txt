@@ -39,7 +39,6 @@ iree_cc_library(
     TorqMatcherBase.h
   DEPS
     MLIRIR
-    IREEDialectsTransforms
     MLIRExecutionEngine
     iree::target::torq::Codegen::css_bootstrap::torq_kernel_riscv
     iree::target::torq::Conversions::TorqHLToLinalg::TorqHLToLinalg

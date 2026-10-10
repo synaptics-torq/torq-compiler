@@ -45,7 +45,6 @@ set(deps
     MLIRTransformUtils
     MLIRLinalgTransforms
     MLIRTensorTransforms
-    IREEDialectsTransforms
     iree::compiler::Dialect::Util::IR
     iree::target::torq::Dialect::TorqHL::Dialect
     MLIRExecutionEngine

@@ -103,7 +103,6 @@ iree_cc_library(
     iree::compiler::Dialect::LinalgExt::IR
     iree::compiler::Dialect::LinalgExt::Transforms
     iree::compiler::Utils
-    IREELinalgTransformDialectPasses
     iree::compiler::plugins::target::LLVMCPU::LLVMIRPasses
     MLIRFuncDialect
     MLIRFunctionInterfaces

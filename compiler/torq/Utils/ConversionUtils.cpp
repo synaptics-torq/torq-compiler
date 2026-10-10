@@ -745,12 +745,12 @@ Value createClonedBlock(
     return lastV;
 }
 
-DenseIntOrFPElementsAttr returnDenseElementAttr(Value constV) {
+DenseTypedElementsAttr returnDenseElementAttr(Value constV) {
     auto op = constV.getDefiningOp<arith::ConstantOp>();
     if (!op) {
         return nullptr;
     }
-    return mlir::dyn_cast<DenseIntOrFPElementsAttr>(op.getValue());
+    return mlir::dyn_cast<DenseTypedElementsAttr>(op.getValue());
 }
 
 Attribute returnAttr(Value constV) {

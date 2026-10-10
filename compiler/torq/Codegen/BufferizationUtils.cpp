@@ -341,12 +341,12 @@ LogicalResult createTorqCopy(OpBuilder &builder, Location loc, Value from, Value
     }
 }
 
-Attribute getTorqMemSpaceAttr(TensorType t) {
+std::optional<Attribute> getTorqMemSpaceAttr(bufferization::TensorLikeType t) {
     if (auto rankedTensorType = dyn_cast<RankedTensorType>(t)) {
-        Attribute enc = rankedTensorType.getEncoding();
-        return enc;
+        if (Attribute enc = rankedTensorType.getEncoding())
+            return enc;
     }
-    return Attribute();
+    return std::nullopt;
 }
 
 FailureOr<Value> createTorqAllocation(
