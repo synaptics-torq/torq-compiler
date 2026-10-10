@@ -9,7 +9,6 @@
 
 #include "iree/base/api.h"
 #include "iree/hal/api.h"
-#include "iree/task/task.h"
 
 #include "iree/hal/local/executable_library.h"
 
