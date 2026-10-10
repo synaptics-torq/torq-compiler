@@ -196,7 +196,32 @@ iree_status_t iree_hal_torq_native_executable_run(iree_hal_executable_t* base_va
 }
 
 namespace {
+
+// 3.12: executable functions are looked up by name at runtime (function IDs).
+// Each torq executable holds exactly one function (ordinal 0).
+static iree_status_t iree_hal_torq_native_executable_lookup_function_by_name(
+    iree_hal_executable_t* base_executable, iree_string_view_t function_name,
+    iree_hal_executable_function_t* out_function) {
+  iree_hal_torq_native_executable_t* executable =
+      iree_hal_torq_native_executable_cast(base_executable);
+  iree_hal_torq_ExecutableDef_table_t executable_def =
+      iree_hal_torq_ExecutableDef_as_root(executable->program);
+  std::string export_name =
+      iree_hal_torq_ExecutableDef_executable_name_get(executable_def);
+  if (iree_string_view_equal(
+          function_name, iree_make_cstring_view(export_name.c_str()))) {
+    *out_function = iree_hal_executable_function_from_index(0);
+    return iree_ok_status();
+  }
+  return iree_make_status(IREE_STATUS_NOT_FOUND,
+                          "no function '%.*s' in torq executable '%s'",
+                          (int)function_name.size, function_name.data,
+                          export_name.c_str());
+}
+
 const iree_hal_executable_vtable_t iree_hal_torq_native_executable_vtable = {
-    /*.destroy=*/iree_hal_torq_native_executable_destroy,
+    .destroy = iree_hal_torq_native_executable_destroy,
+    .lookup_function_by_name =
+        iree_hal_torq_native_executable_lookup_function_by_name,
 };
 }  // namespace
