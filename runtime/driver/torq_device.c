@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "iree/async/frontier_tracker.h"
 #include "iree/async/semaphore.h"
 #include "iree/async/util/proactor_pool.h"
 #include "iree/base/internal/arena.h"
@@ -47,11 +48,16 @@ typedef struct iree_hal_torq_device_t {
   iree_async_proactor_pool_t* proactor_pool;
   iree_async_proactor_t* proactor;
 
+  // Topology info assigned by the device group (3.12). Standalone torq devices
+  // only ever see the trivial single-device topology.
+  iree_hal_device_topology_info_t topology_info;
+
   iree_host_size_t loader_count;
   iree_hal_executable_loader_t* loaders[];
 } iree_hal_torq_device_t;
 
 static const iree_hal_device_vtable_t iree_hal_torq_device_vtable;
+static void iree_hal_torq_device_clear_topology_info(iree_hal_torq_device_t* device);
 
 static iree_hal_torq_device_t* iree_hal_torq_device_cast(
     iree_hal_device_t* base_value) {
@@ -156,6 +162,7 @@ static void iree_hal_torq_device_destroy(iree_hal_device_t* base_device) {
 
   // The pool owns the proactor and must be released only after every resource
   // that could reference it (semaphores) is gone.
+  iree_hal_torq_device_clear_topology_info(device);
   if (device->proactor_pool) {
     iree_async_proactor_pool_release(device->proactor_pool);
   }
@@ -243,6 +250,50 @@ static iree_status_t iree_hal_torq_device_query_i64(
       IREE_STATUS_NOT_FOUND,
       "unknown device configuration key value '%.*s :: %.*s'",
       (int)category.size, category.data, (int)key.size, key.data);
+}
+
+// 3.12: the HAL device group builder queries capabilities and assigns topology
+// for every device. Torq devices run standalone, so a zeroed capabilities
+// struct and a stored-but-unused topology are sufficient.
+static iree_status_t iree_hal_torq_device_query_capabilities(
+    iree_hal_device_t* base_device,
+    iree_hal_device_capabilities_t* out_capabilities) {
+  memset(out_capabilities, 0, sizeof(*out_capabilities));
+  return iree_ok_status();
+}
+
+static const iree_hal_device_topology_info_t* iree_hal_torq_device_topology_info(
+    iree_hal_device_t* base_device) {
+  iree_hal_torq_device_t* device = iree_hal_torq_device_cast(base_device);
+  return &device->topology_info;
+}
+
+static iree_status_t iree_hal_torq_device_refine_topology_edge(
+    iree_hal_device_t* src_device, iree_hal_device_t* dst_device,
+    iree_hal_topology_edge_t* edge) {
+  return iree_ok_status();
+}
+
+static void iree_hal_torq_device_clear_topology_info(iree_hal_torq_device_t* device) {
+  if (device->topology_info.frontier.tracker) {
+    iree_async_frontier_tracker_release(device->topology_info.frontier.tracker);
+  }
+  memset(&device->topology_info, 0, sizeof(device->topology_info));
+}
+
+static iree_status_t iree_hal_torq_device_assign_topology_info(
+    iree_hal_device_t* base_device,
+    const iree_hal_device_topology_info_t* topology_info) {
+  iree_hal_torq_device_t* device = iree_hal_torq_device_cast(base_device);
+  iree_hal_torq_device_clear_topology_info(device);
+  if (!topology_info) {
+    return iree_ok_status();
+  }
+  device->topology_info = *topology_info;
+  if (device->topology_info.frontier.tracker) {
+    iree_async_frontier_tracker_retain(device->topology_info.frontier.tracker);
+  }
+  return iree_ok_status();
 }
 
 static iree_status_t iree_hal_torq_device_create_channel(
@@ -573,6 +624,10 @@ static const iree_hal_device_vtable_t iree_hal_torq_device_vtable = {
     .replace_channel_provider = iree_hal_torq_replace_channel_provider,
     .trim = iree_hal_torq_device_trim,
     .query_i64 = iree_hal_torq_device_query_i64,
+    .query_capabilities = iree_hal_torq_device_query_capabilities,
+    .topology_info = iree_hal_torq_device_topology_info,
+    .refine_topology_edge = iree_hal_torq_device_refine_topology_edge,
+    .assign_topology_info = iree_hal_torq_device_assign_topology_info,
     .create_channel = iree_hal_torq_device_create_channel,
     .create_command_buffer = iree_hal_torq_device_create_command_buffer,
     .create_event = iree_hal_torq_device_create_event,
