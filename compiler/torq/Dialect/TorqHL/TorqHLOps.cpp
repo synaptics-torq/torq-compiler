@@ -1027,8 +1027,8 @@ class CommuteBitcastThroughExtractSlice : public OpRewritePattern<BitcastOp> {
         if (!sourceTensorType || !resultTensorType)
             return failure();
 
-        Value whole = rewriter.create<BitcastOp>(
-            op.getLoc(),
+        Value whole = BitcastOp::create(
+            rewriter, op.getLoc(),
             RankedTensorType::get(
                 sourceTensorType.getShape(), resultTensorType.getElementType(),
                 sourceTensorType.getEncoding()

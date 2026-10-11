@@ -722,7 +722,7 @@ struct SinglePointConv1DtoMatmulPattern : public OpRewritePattern<linalg::Conv1D
         // transpose into the weight constant when the filter is a constant.
         auto transTy = RankedTensorType::get({C, kL, O}, filterTy.getElementType());
         Value transInit =
-            rewriter.create<tensor::EmptyOp>(info.loc, transTy, ValueRange{}).getResult();
+            tensor::EmptyOp::create(rewriter, info.loc, transTy, ValueRange{}).getResult();
         Value trans = linalg::TransposeOp::create(
                           rewriter, info.loc, info.filter, transInit, ArrayRef<int64_t>{1, 2, 0}
         )
@@ -737,7 +737,7 @@ struct SinglePointConv1DtoMatmulPattern : public OpRewritePattern<linalg::Conv1D
         // semantics explicit for the downstream patterns).
         auto mmTy = RankedTensorType::get({N, O}, outTy.getElementType());
         Value mmInitEmpty =
-            rewriter.create<tensor::EmptyOp>(info.loc, mmTy, ValueRange{}).getResult();
+            tensor::EmptyOp::create(rewriter, info.loc, mmTy, ValueRange{}).getResult();
         Value mmInit =
             linalg::FillOp::create(
                 rewriter, info.loc, createZeroConstant(rewriter, info.loc, mmTy.getElementType()),
