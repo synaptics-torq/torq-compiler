@@ -292,6 +292,43 @@ static LogicalResult matchZpSubtractedOperand(
     return success();
 }
 
+// Peel a compile-time i32 constant back to i8. Constant folding can collapse
+// the whole zp-subtract + widening chain (always for a zero weight zero point),
+// leaving a plain i32 `arith.constant` where the chain would otherwise show a
+// bare widening generic or a zp-subtracted pair. The folded values are already
+// zp-corrected, so this reads as w_zp = 0. Signedness comes from the value
+// range: [-128,127] is an si8 weight, [0,255] a ui8 one; anything wider means
+// the fold baked in a non-trivial zero point we cannot recover -- no match.
+// Sets `isUnsigned` accordingly. Null when `v` is not such a constant.
+static Value peelFoldedWideConstant(Value v, bool &isUnsigned) {
+    auto cst = v.getDefiningOp<arith::ConstantOp>();
+    if (!cst)
+        return nullptr;
+    auto ty = dyn_cast<RankedTensorType>(v.getType());
+    auto dense = dyn_cast_or_null<DenseIntElementsAttr>(cst.getValue());
+    if (!ty || !dense || !ty.getElementType().isInteger(32))
+        return nullptr;
+    bool fitsSigned = true, fitsUnsigned = true;
+    for (const APInt &val : dense.getValues<APInt>()) {
+        int64_t sext = val.getSExtValue();
+        fitsSigned &= sext >= -128 && sext <= 127;
+        fitsUnsigned &= sext >= 0 && sext <= 255;
+    }
+    if (!fitsSigned && !fitsUnsigned)
+        return nullptr;
+    isUnsigned = !fitsSigned;
+    SmallVector<APInt> vals;
+    vals.reserve(dense.getNumElements());
+    for (const APInt &val : dense.getValues<APInt>())
+        vals.push_back(APInt(8, val.getSExtValue() & 0xFF));
+    auto i8Ty = RankedTensorType::get(ty.getShape(), IntegerType::get(v.getContext(), 8));
+    OpBuilder builder(cst);
+    return arith::ConstantOp::create(
+               builder, v.getLoc(), i8Ty, DenseIntElementsAttr::get(i8Ty, vals)
+    )
+        .getResult();
+}
+
 // Extract a scalar float constant.
 static std::optional<APFloat> getScalarFloatConst(Value v) {
     auto cst = v.getDefiningOp<arith::ConstantOp>();
@@ -495,6 +532,8 @@ class RaiseMatMulInteger : public OpRewritePattern<linalg::GenericOp> {
                 wBareExtension = true;
                 wUnsigned = true;
             }
+            else if ((W = peelFoldedWideConstant(weightOperand, wUnsigned)))
+                wBareExtension = true;
             else if (failed(matchZpSubtractedOperand(
                          weightOperand, /*isUnsigned=*/false, W, wZpNarrow, wZpWide, true
                      ))) {
@@ -507,6 +546,8 @@ class RaiseMatMulInteger : public OpRewritePattern<linalg::GenericOp> {
                     );
             }
         }
+        else if ((W = peelFoldedWideConstant(weightOperand, wUnsigned)))
+            wBareExtension = true;
         else if (failed(matchZpSubtractedOperand(
                      weightOperand, /*isUnsigned=*/false, W, wZpNarrow, wZpWide, true
                  ))) {
