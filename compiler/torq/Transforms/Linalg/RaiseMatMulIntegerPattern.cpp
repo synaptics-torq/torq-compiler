@@ -484,9 +484,27 @@ class RaiseMatMulInteger : public OpRewritePattern<linalg::GenericOp> {
         }
         if (slicedBeforeCast ? !allUsersAreColumnSlices(matmulResult) : !matmulResult.hasOneUse())
             return rewriter.notifyMatchFailure(op, "matmul is shared by other consumers");
+        // A unit batch may have been collapsed away ahead of this pass: an
+        // expand_shape then sits between the rank-2 matmul and the cast, and the
+        // activation arrives through the matching collapse_shape. Peel the expand
+        // here (the collapse is peeled where the lhs is matched below) and treat
+        // the chain as the rank-2 matmul it now is.
+        bool peeledUnitBatch = false;
+        if (batched && !depthwise) {
+            if (auto expand = matmulResult.getDefiningOp<tensor::ExpandShapeOp>()) {
+                auto srcTy = dyn_cast<RankedTensorType>(expand.getSrcType());
+                if (srcTy && srcTy.getRank() == 2) {
+                    matmulResult = expand.getSrc();
+                    peeledUnitBatch = true;
+                }
+            }
+        }
         Operation *matmulDef = matmulResult.getDefiningOp();
-        if (batched ? !isa_and_nonnull<linalg::BatchMatmulOp>(matmulDef)
-                    : !isa_and_nonnull<linalg::MatmulOp>(matmulDef))
+        bool isExpectedMatmul =
+            batched ? (peeledUnitBatch ? isa_and_nonnull<linalg::MatmulOp>(matmulDef)
+                                       : isa_and_nonnull<linalg::BatchMatmulOp>(matmulDef))
+                    : isa_and_nonnull<linalg::MatmulOp>(matmulDef);
+        if (!isExpectedMatmul)
             return rewriter.notifyMatchFailure(op, "cast input is not an i32 matmul");
         auto matmulOutTy = dyn_cast<RankedTensorType>(matmulDef->getResult(0).getType());
         if (!matmulOutTy || !matmulOutTy.getElementType().isInteger(32))
@@ -497,16 +515,22 @@ class RaiseMatMulInteger : public OpRewritePattern<linalg::GenericOp> {
         // The dequant has to cover exactly this branch, so that replacing it with an
         // epilogue built over [M, colWidth] is shape-for-shape what was there.
         const bool shapeMatches =
-            rankReduced ? (matmulOutTy.getShape()[0] == 1 && outType.getShape()[0] == colWidth)
-                        : (outType.getShape().drop_back() == matmulOutTy.getShape().drop_back() &&
-                           outType.getShape().back() == colWidth);
+            rankReduced
+                ? (matmulOutTy.getShape()[0] == 1 && outType.getShape()[0] == colWidth)
+                : peeledUnitBatch
+                      ? (matmulOutTy.getRank() == 2 && outType.getShape()[0] == 1 &&
+                         outType.getShape()[1] == matmulOutTy.getShape()[0] &&
+                         outType.getShape()[2] == colWidth &&
+                         matmulOutTy.getShape().back() == colWidth)
+                      : (outType.getShape().drop_back() == matmulOutTy.getShape().drop_back() &&
+                         outType.getShape().back() == colWidth);
         if (!shapeMatches)
             return rewriter.notifyMatchFailure(op, "dequant shape is not the matmul branch");
 
         // ---- peel the zero-point-subtracted operands ----
         SmallVector<Value> matmulInputs = cast<linalg::LinalgOp>(matmulDef).getDpsInputs();
         Value weightOperand = matmulInputs[1];
-        if (batched && !depthwise) {
+        if (batched && !depthwise && !peeledUnitBatch) {
             // The weight is the same [K,N] constant for every batch, wrapped in the unit
             // batch the batch matmul's operand rank needs.
             weightOperand = peelUnitBatchExpand(weightOperand);
@@ -515,8 +539,18 @@ class RaiseMatMulInteger : public OpRewritePattern<linalg::GenericOp> {
         }
 
         Value A, aZpNarrow, aZp, W, wZpNarrow, wZpWide;
+        Value lhsOperand = matmulInputs[0];
+        if (peeledUnitBatch) {
+            // The rank-2 matmul's lhs is the unit-batch collapse of the [1,M,K]
+            // zp-subtracted activation; peel it to reach the pair the matcher reads.
+            if (auto collapse = lhsOperand.getDefiningOp<tensor::CollapseShapeOp>()) {
+                auto srcTy = dyn_cast<RankedTensorType>(collapse.getSrcType());
+                if (srcTy && srcTy.getRank() == 3 && srcTy.getShape()[0] == 1)
+                    lhsOperand = collapse.getSrc();
+            }
+        }
         if (failed(matchZpSubtractedOperand(
-                matmulInputs[0], /*isUnsigned=*/true, A, aZpNarrow, aZp, false
+                lhsOperand, /*isUnsigned=*/true, A, aZpNarrow, aZp, false
             )))
             return rewriter.notifyMatchFailure(op, "lhs is not a zp-subtracted u8 activation");
         // ONNX lets B be int8 or uint8, and the front end widens it with the matching
@@ -650,7 +684,7 @@ class RaiseMatMulInteger : public OpRewritePattern<linalg::GenericOp> {
         Location loc = op.getLoc();
         MLIRContext *ctx = rewriter.getContext();
         auto bf16 = rewriter.getBF16Type();
-        int64_t M = matmulOutTy.getShape()[batched ? 1 : 0];
+        int64_t M = matmulOutTy.getShape()[(batched && !peeledUnitBatch) ? 1 : 0];
         // N is this branch's width, which is the whole matmul when it was not sliced.
         int64_t N = colWidth;
         // The depthwise GEMV keeps its per-channel batch: raw is [C, 1, 1].
