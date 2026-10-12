@@ -348,8 +348,13 @@ static void replaceStackAllocationsWithMalloc(IREE::HAL::ExecutableVariantOp evO
 
         auto llvmI64Type = builder.getIntegerType(64);
 
-        // compute the size of the allocation
-        auto elementSize = allocaOp.getElemType().getIntOrFloatBitWidth() / 8;
+        // compute the size of the allocation; skip non-numeric aggregates
+        // (e.g. llvm.array) — the stack-overflow concern is large numeric buffers
+        auto elemType = allocaOp.getElemType();
+        if (!elemType.isIntOrFloat()) {
+            return;
+        }
+        auto elementSize = elemType.getIntOrFloatBitWidth() / 8;
         assert(elementSize > 0);
 
         Value sizeValue = LLVM::ConstantOp::create(
