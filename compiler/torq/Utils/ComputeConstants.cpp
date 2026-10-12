@@ -122,9 +122,7 @@ static FailureOr<IREE::HAL::ExecutableVariantOp> createModule(
 
     auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
         funcOp.getContext(),
-        IREE::CPU::PipelineAttr::get(
-            funcOp.getContext(), IREE::CPU::LoweringPipeline::Default
-        ),
+        IREE::CPU::PipelineAttr::get(funcOp.getContext(), IREE::CPU::LoweringPipeline::Default),
         /*codegenSpec=*/{}, /*workgroupSize=*/{}, /*subgroupSize=*/{},
         /*configuration=*/{}
     );
@@ -348,33 +346,27 @@ static void replaceStackAllocationsWithMalloc(IREE::HAL::ExecutableVariantOp evO
 
         auto llvmI64Type = builder.getIntegerType(64);
 
-        // compute the size of the allocation; skip non-numeric aggregates
-        // (e.g. llvm.array) — the stack-overflow concern is large numeric buffers
-        auto elemType = allocaOp.getElemType();
-        if (!elemType.isIntOrFloat()) {
-            return;
+        // number of elements requested by the alloca
+        Value arraySize = allocaOp.getArraySize();
+        if (!arraySize) {
+            arraySize = LLVM::ConstantOp::create(
+                builder, allocaOp.getLoc(), llvmI64Type, builder.getIntegerAttr(llvmI64Type, 1)
+            );
         }
-        auto elementSize = elemType.getIntOrFloatBitWidth() / 8;
-        assert(elementSize > 0);
+        else if (arraySize.getType().getIntOrFloatBitWidth() < 64) {
+            arraySize = LLVM::ZExtOp::create(builder, allocaOp.getLoc(), llvmI64Type, arraySize);
+        }
 
-        Value sizeValue = LLVM::ConstantOp::create(
-            builder, allocaOp.getLoc(), llvmI64Type,
-            builder.getIntegerAttr(llvmI64Type, elementSize)
+        // compute the allocation size in bytes with the classic sizeof idiom
+        // ptrtoint(gep(null, count)): works for aggregate element types too
+        // (e.g. !llvm.array<N x i32>, which is how static buffers are emitted)
+        Value nullPtr = LLVM::ZeroOp::create(builder, allocaOp.getLoc(), llvmPtrType);
+        Value sizePtr = LLVM::GEPOp::create(
+            builder, allocaOp.getLoc(), llvmPtrType, allocaOp.getElemType(), nullPtr,
+            ValueRange{arraySize}
         );
-
-        if (allocaOp.getArraySize()) {
-
-            Value arraySize = allocaOp.getArraySize();
-
-            // convert the array size to i64 if it's not already
-            if (arraySize.getType().getIntOrFloatBitWidth() < 64) {
-                arraySize =
-                    LLVM::ZExtOp::create(builder, allocaOp.getLoc(), llvmI64Type, arraySize);
-            }
-
-            // multiply by the array size
-            sizeValue = LLVM::MulOp::create(builder, allocaOp.getLoc(), sizeValue, arraySize);
-        }
+        Value sizeValue =
+            LLVM::PtrToIntOp::create(builder, allocaOp.getLoc(), llvmI64Type, sizePtr);
 
         // create the malloc call
         auto mallocCall =

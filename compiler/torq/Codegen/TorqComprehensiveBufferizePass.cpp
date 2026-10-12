@@ -158,9 +158,9 @@ static IREEOneShotBufferizationOptions getBufferizationOptions() {
 
     // This type converter converts tensor types to memref types when no exact
     // memref type can be inferred from the context.
-    options.unknownTypeConverterFn =
-        [](bufferization::TensorLikeType tensorType, Attribute memorySpace,
-           const BufferizationOptions &options) -> bufferization::BufferLikeType {
+    options.unknownTypeConverterFn = [](bufferization::TensorLikeType tensorType,
+                                        Attribute memorySpace, const BufferizationOptions &options
+                                     ) -> bufferization::BufferLikeType {
         auto tensorTy = cast<TensorType>(tensorType);
         if (tensorTy.hasStaticShape()) {
             return cast<bufferization::BufferLikeType>(

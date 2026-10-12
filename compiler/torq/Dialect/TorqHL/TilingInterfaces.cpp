@@ -774,8 +774,8 @@ struct FullyConnectedOpTilingInterface
     : public TilingInterface::ExternalModel<
           FullyConnectedOpTilingInterface, torq_hl::FullyConnectedOp> {
 
-    using Base = TilingInterface::ExternalModel<
-        FullyConnectedOpTilingInterface, torq_hl::FullyConnectedOp>;
+    using Base =
+        TilingInterface::ExternalModel<FullyConnectedOpTilingInterface, torq_hl::FullyConnectedOp>;
     using Base::getTiledImplementation; // inherit defaulted hint-bearing overload
 
     SmallVector<utils::IteratorType> getLoopIteratorTypes(Operation *op) const {

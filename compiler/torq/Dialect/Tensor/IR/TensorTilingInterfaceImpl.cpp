@@ -46,8 +46,8 @@ struct CollapseShapeOpTilingInterface
     : public TilingInterface::ExternalModel<
           CollapseShapeOpTilingInterface, tensor::CollapseShapeOp> {
 
-    using Base = TilingInterface::ExternalModel<
-        CollapseShapeOpTilingInterface, tensor::CollapseShapeOp>;
+    using Base =
+        TilingInterface::ExternalModel<CollapseShapeOpTilingInterface, tensor::CollapseShapeOp>;
     // Inherit the defaulted hint-bearing overloads (ArrayRef<InnerTileAlignment>);
     // this op does not consult the hint. Without these using declarations the
     // hint-less overloads below hide them (C++ name hiding) and the interface
@@ -164,7 +164,8 @@ Value makeTiledExpandSrcShape(
 struct ExpandShapeOpTilingInterface
     : public TilingInterface::ExternalModel<ExpandShapeOpTilingInterface, tensor::ExpandShapeOp> {
 
-    using Base = TilingInterface::ExternalModel<ExpandShapeOpTilingInterface, tensor::ExpandShapeOp>;
+    using Base =
+        TilingInterface::ExternalModel<ExpandShapeOpTilingInterface, tensor::ExpandShapeOp>;
     // Inherit the defaulted hint-bearing overloads (ArrayRef<InnerTileAlignment>);
     // see CollapseShapeOpTilingInterface above.
     using Base::generateResultTileValue;

@@ -20,8 +20,8 @@
 #include "torq/Utils/TorqHw.h"
 #include "torq/Utils/TorqUtils.h"
 
-#include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/Common/PassUtils.h"
+#include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
@@ -642,7 +642,8 @@ struct TORQLowerExecutableTargetPass
                 std::make_unique<torq::ProgressLogger>(dispatchName + "::workgroups")
             );
         }
-        distributeToWorkgroupsPipeline.addPass(createTileAndDistributeToWorkgroupsUsingForallOpPass());
+        distributeToWorkgroupsPipeline.addPass(createTileAndDistributeToWorkgroupsUsingForallOpPass(
+        ));
         distributeToWorkgroupsPipeline.enableTiming(timingScope);
         if (failed(mlir::applyPassManagerCLOptions(distributeToWorkgroupsPipeline)))
             return signalPassFailure();

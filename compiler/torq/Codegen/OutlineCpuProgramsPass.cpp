@@ -83,9 +83,7 @@ static Operation *outlineCpuProgramIntoExecutable(
     // FIXME: we should probably run the configuration pipeline instead
     auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
         funcOp.getContext(),
-        IREE::CPU::PipelineAttr::get(
-            funcOp.getContext(), IREE::CPU::LoweringPipeline::Default
-        ),
+        IREE::CPU::PipelineAttr::get(funcOp.getContext(), IREE::CPU::LoweringPipeline::Default),
         /*codegenSpec=*/{}, /*workgroupSize=*/{}, /*subgroupSize=*/{},
         /*configuration=*/{}
     );
