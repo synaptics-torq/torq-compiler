@@ -194,10 +194,12 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
         else if (isa<arith::MinimumFOp>(op) || isa<arith::MinSIOp>(op) || isa<arith::MinUIOp>(op) ||
                  isa<arith::MinNumFOp>(op)) {
             opType = torq_hl::ElementwiseOpEnum::MINIMUM;
+            isUnsigned = isa<arith::MinUIOp>(op);
         }
         else if (isa<arith::MaximumFOp>(op) || isa<arith::MaxSIOp>(op) || isa<arith::MaxUIOp>(op) ||
                  isa<arith::MaxNumFOp>(op)) {
             opType = torq_hl::ElementwiseOpEnum::MAXIMUM;
+            isUnsigned = isa<arith::MaxUIOp>(op);
         }
         else if (isa<arith::CmpFOp>(op)) {
             auto cmpFOp = dyn_cast<arith::CmpFOp>(op);

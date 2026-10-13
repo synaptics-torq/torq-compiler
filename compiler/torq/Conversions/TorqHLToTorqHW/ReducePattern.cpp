@@ -124,10 +124,10 @@ LogicalResult ReducePattern::transform(torq_hl::ReduceOp op, PatternRewriter &re
     if (opName == "reduce_sum") {
         hwOp1Mode = torq_hw::ALUOp1Mode::ACC;
     }
-    else if (opName == "reduce_max") {
+    else if (opName == "reduce_max" || opName == "reduce_umax") {
         hwOp1Mode = torq_hw::ALUOp1Mode::MAX;
     }
-    else if (opName == "reduce_min") {
+    else if (opName == "reduce_min" || opName == "reduce_umin") {
         hwOp1Mode = torq_hw::ALUOp1Mode::MIN;
     }
     else if (opName == "reduce_and") {
@@ -151,6 +151,10 @@ LogicalResult ReducePattern::transform(torq_hl::ReduceOp op, PatternRewriter &re
     // Setup input and output tensors
     LData input(op.getInput());
     LData output(op.getInit());
+    // Unsigned max/min: compare the input as unsigned, like ElementWiseBinaryPattern.
+    if (opName == "reduce_umax" || opName == "reduce_umin") {
+        input.bitCast(toUnsigned(input.elementType()));
+    }
 
     // A fused per-channel bias (e.g. a conv1d bias absorbed into the reduce) is
     // signalled by an fp32 scale_bias operand. The default reduce uses an i32

@@ -949,13 +949,18 @@ static FailureOr<std::string> getReduceOpName(Operation *reduceBodyOp) {
     if (isa<arith::AddIOp>(reduceBodyOp) || isa<arith::AddFOp>(reduceBodyOp)) {
         return std::string("reduce_sum");
     }
-    if (isa<arith::MaxSIOp>(reduceBodyOp) || isa<arith::MaxUIOp>(reduceBodyOp) ||
-        isa<arith::MaximumFOp>(reduceBodyOp)) {
+    if (isa<arith::MaxSIOp>(reduceBodyOp) || isa<arith::MaximumFOp>(reduceBodyOp)) {
         return std::string("reduce_max");
     }
-    if (isa<arith::MinSIOp>(reduceBodyOp) || isa<arith::MinUIOp>(reduceBodyOp) ||
-        isa<arith::MinimumFOp>(reduceBodyOp)) {
+    if (isa<arith::MinSIOp>(reduceBodyOp) || isa<arith::MinimumFOp>(reduceBodyOp)) {
         return std::string("reduce_min");
+    }
+    // Unsigned max/min compare the input as unsigned (see ReducePattern).
+    if (isa<arith::MaxUIOp>(reduceBodyOp)) {
+        return std::string("reduce_umax");
+    }
+    if (isa<arith::MinUIOp>(reduceBodyOp)) {
+        return std::string("reduce_umin");
     }
     if (isa<arith::OrIOp>(reduceBodyOp)) {
         return std::string("reduce_or");
@@ -1073,6 +1078,16 @@ static FailureOr<Value> mergeReductionPartial(
         return makeElementWiseBinary(
             srcOp, rewriter, init, partial, torq_hl::ElementwiseOpEnum::MINIMUM
         );
+    }
+    if (opName == "reduce_umax" || opName == "reduce_umin") {
+        auto type = cast<RankedTensorType>(init.getType());
+        auto opType = opName == "reduce_umax" ? torq_hl::ElementwiseOpEnum::MAXIMUM
+                                              : torq_hl::ElementwiseOpEnum::MINIMUM;
+        return torq_hl::ElementWiseBinaryOp::create(
+                   rewriter, srcOp.getLoc(), type, createInitTensor(srcOp, rewriter, type), opType,
+                   init, partial, /*isUnsigned=*/true
+        )
+            .getOutput();
     }
     return addInitToResult(init, partial, rewriter);
 }
