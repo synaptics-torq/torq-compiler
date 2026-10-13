@@ -28,9 +28,6 @@ namespace mlir::syna {
 
 namespace torq {
 
-/// Per-output-channel fp32 bias folded into linalg.reduce_sum (OptimizeConv1DPattern).
-inline constexpr llvm::StringLiteral kReducePerChannelBiasAttr{"torq.reduce_per_channel_bias"};
-
 /// @return dividend / divisor rounded upward
 constexpr uint32_t div_ceil(uint32_t dividend, uint32_t divisor) {
     return (dividend + divisor - 1) / divisor;

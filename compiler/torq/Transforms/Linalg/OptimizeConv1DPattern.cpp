@@ -11,7 +11,6 @@
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
-#include "torq/Utils/TorqHw.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "algorithm"
@@ -29,52 +28,11 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/Twine.h"
-#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-optimize-conv1d-pattern"
 
 namespace mlir::syna::torq {
-
-llvm::cl::opt<bool> clConv1dAsMatmul(
-    "torq-convert-conv1d-to-matmul", llvm::cl::desc("Convert conv1d to imToCol + matmul"),
-    llvm::cl::init(false)
-);
-
-llvm::cl::opt<bool> clConv1dToGenericConv1D(
-    "torq-convert-conv1d-to-generic",
-    llvm::cl::desc("Convert conv1d to generic conv1d (5D output with preserved kernel dim)"),
-    llvm::cl::init(false)
-);
-
-llvm::cl::opt<bool> clConv1dToConv2D(
-    "torq-convert-conv1d-to-conv2d", llvm::cl::desc("Convert conv1d to conv2d"),
-    llvm::cl::init(false)
-);
-
-llvm::cl::opt<bool> clConv1dTruncateForReduce(
-    "torq-conv1d-truncate-for-reduce",
-    llvm::cl::desc("Truncate conv1d output to bf16 before reduce sum to save memory bandwidth. "
-                   "When false (default): conv1d outputs f32 directly to reduce (accurate). "
-                   "When true: insert truncf between conv1d and reduce (memory efficient)."),
-    llvm::cl::init(false)
-);
-
-// LRAM budget for a single non-tileable op: total LRAM minus 14k headroom for descriptors
-// (used to be TorqHw::get().getAvailableLramSize()).
-static int64_t getLramTilingBudget() {
-    return static_cast<int64_t>(TorqHw::get().getLramSize() - 14 * 1024);
-}
-
-static int64_t elemTypeBytes(Type elemType) { return (elemType.getIntOrFloatBitWidth() + 7) / 8; }
-
-// The conv1d im2col materialises the collapsed input and the unfolded [Ow, C*Kw] result as a
-// single non-tileable torq_hl.im2col op. Returns false when both buffers exceed the tiling budget.
-static bool im2ColFitsInLram(int64_t C, int64_t W, int64_t Ow, int64_t Kw, Type elemType) {
-    int64_t elemBytes = elemTypeBytes(elemType);
-    int64_t bytes = (C * W) * elemBytes + (Ow * C * Kw) * elemBytes;
-    return bytes <= getLramTilingBudget();
-}
 
 // Elementwise f32 -> bf16 truncf as a parallel linalg.generic; rank is taken from `value`.
 static Value emitTruncfToBF16(PatternRewriter &rewriter, Location loc, Value value) {
@@ -143,268 +101,6 @@ static Value emitIm2Col(
     );
 
     return im2col.getResult(0);
-}
-
-// Largest output-column block whose windowed im2col (sliced input window + unfolded patches)
-// stays within the LRAM tiling budget. torq_hl.im2col is not tileable, so tiling along the
-// output width keeps each unfold LRAM-resident. Returns 0 when even one column does not fit
-// (pathological; caller falls back to the host im2col).
-static int64_t computeIm2ColBlockOw(
-    int64_t C, int64_t W, int64_t Ow, int64_t Kw, int64_t stride, int64_t dilation, Type elemType
-) {
-    int64_t K = C * Kw;
-    int64_t elemBytes = elemTypeBytes(elemType);
-    int64_t budget = getLramTilingBudget();
-
-    // A block of bOw output columns reads windowW input columns; offsets are window-relative,
-    // and valid-conv output sizing guarantees windowW <= W.
-    auto blockFits = [&](int64_t bOw) {
-        int64_t windowW = (bOw - 1) * stride + (Kw - 1) * dilation + 1;
-        int64_t bytes = (C * windowW) * elemBytes + (bOw * K) * elemBytes;
-        return bytes <= budget;
-    };
-
-    int64_t lo = 1, hi = Ow, best = 0;
-    while (lo <= hi) {
-        int64_t mid = lo + (hi - lo) / 2;
-        if (blockFits(mid)) {
-            best = mid;
-            lo = mid + 1;
-        }
-        else {
-            hi = mid - 1;
-        }
-    }
-    return best;
-}
-
-// LRAM estimate for one native-conv1d Ow block. The block runs as two sequential
-// LRAM-resident stages that reuse the same budget, so size it by the larger stage:
-//   - generic: sliced input window + full filter + [N,F,1,bOw,Kw] output
-//   - kw reduce: [N,F,1,bOw,Kw] input + [N,F,1,bOw] output + per-channel f32 bias
-// Accounting for the reduce stage matters because a conv bias folds into the reduce
-// (FoldConvBiasIntoReducePattern): if the reduce stage overflows LRAM a later pass
-// channel-splits it, and the per-channel bias (sized to full F) no longer matches the
-// split reduce output.
-static int64_t genericConv1dBlockBytes(
-    int64_t N, int64_t C, int64_t F, int64_t bOw, int64_t Kw, int64_t stride, int64_t dilation,
-    Type inputElemType, Type filterElemType, Type outputElemType
-) {
-    int64_t windowW = (bOw - 1) * stride + (Kw - 1) * dilation + 1;
-    int64_t inBytes = N * C * windowW * elemTypeBytes(inputElemType);
-    int64_t filterBytes = F * C * Kw * elemTypeBytes(filterElemType);
-    int64_t genericOutBytes = N * F * bOw * Kw * elemTypeBytes(outputElemType);
-    int64_t reduceOutBytes = N * F * bOw * elemTypeBytes(outputElemType);
-    int64_t biasBytes = F * elemTypeBytes(outputElemType);
-
-    int64_t genericStageBytes = inBytes + filterBytes + genericOutBytes;
-    int64_t reduceStageBytes = genericOutBytes + reduceOutBytes + biasBytes;
-    return std::max(genericStageBytes, reduceStageBytes);
-}
-
-// Largest Ow block for native conv1d generic + kw reduce that stays LRAM-resident.
-// Returns 0 when even one output column does not fit (caller falls back to im2col).
-static int64_t computeGenericConv1dBlockOw(
-    int64_t N, int64_t C, int64_t F, int64_t Ow, int64_t Kw, int64_t stride, int64_t dilation,
-    Type inputElemType, Type filterElemType, Type outputElemType
-) {
-    int64_t budget = getLramTilingBudget();
-
-    auto blockFits = [&](int64_t bOw) {
-        return genericConv1dBlockBytes(
-                   N, C, F, bOw, Kw, stride, dilation, inputElemType, filterElemType, outputElemType
-               ) <= budget;
-    };
-
-    int64_t lo = 1, hi = Ow, best = 0;
-    while (lo <= hi) {
-        int64_t mid = lo + (hi - lo) / 2;
-        if (blockFits(mid)) {
-            best = mid;
-            lo = mid + 1;
-        }
-        else {
-            hi = mid - 1;
-        }
-    }
-    return best;
-}
-
-// linalg.generic conv1d multiply-accumulate; output [N,F,1,Ow,Kw] f32. Multi-channel convs add a
-// trailing reduction over C; a single-channel conv stays all-parallel (channel index folded to 0)
-// so downstream tile-and-fuse tiles the parallel output dims instead of a trivial C reduction.
-static Value emitGenericConv1dBlock(
-    PatternRewriter &rewriter, Location loc, Value input4D, Value filter4D, int64_t N, int64_t F,
-    int64_t Ow, int64_t Kw, int64_t stride, int64_t dilation
-) {
-    Type computeElemType = rewriter.getF32Type();
-    int64_t C = cast<RankedTensorType>(input4D.getType()).getDimSize(1);
-    bool reduceC = C > 1;
-    unsigned numDims = reduceC ? 6 : 5;
-
-    SmallVector<int64_t> output5DShape = {N, F, 1, Ow, Kw};
-    auto output5DType = RankedTensorType::get(output5DShape, computeElemType);
-    auto output5DInit =
-        linalg::FillOp::create(
-            rewriter, loc, ValueRange{createZeroConstant(rewriter, loc, computeElemType)},
-            ValueRange{tensor::EmptyOp::create(rewriter, loc, output5DShape, computeElemType)}
-        )
-            .result();
-
-    auto n = rewriter.getAffineDimExpr(0);
-    auto f = rewriter.getAffineDimExpr(1);
-    auto kh = rewriter.getAffineDimExpr(2);
-    auto ow = rewriter.getAffineDimExpr(3);
-    auto kw = rewriter.getAffineDimExpr(4);
-    AffineExpr c = reduceC ? rewriter.getAffineDimExpr(5) : rewriter.getAffineConstantExpr(0);
-
-    SmallVector<AffineExpr> inputMapExprs = {
-        n, c, kh,
-        ow * rewriter.getAffineConstantExpr(stride) + kw * rewriter.getAffineConstantExpr(dilation)
-    };
-    auto inputMap = AffineMap::get(numDims, 0, inputMapExprs, rewriter.getContext());
-
-    SmallVector<AffineExpr> filterMapExprs = {f, c, kh, kw};
-    auto filterMap = AffineMap::get(numDims, 0, filterMapExprs, rewriter.getContext());
-
-    SmallVector<AffineExpr> outputMapExprs = {n, f, kh, ow, kw};
-    auto outputMap = AffineMap::get(numDims, 0, outputMapExprs, rewriter.getContext());
-
-    SmallVector<utils::IteratorType> iteratorTypes(5, utils::IteratorType::parallel);
-    if (reduceC) {
-        iteratorTypes.push_back(utils::IteratorType::reduction);
-    }
-
-    auto generic = linalg::GenericOp::create(
-        rewriter, loc, TypeRange{output5DType}, ValueRange{input4D, filter4D},
-        ValueRange{output5DInit}, ArrayRef<AffineMap>{inputMap, filterMap, outputMap},
-        iteratorTypes,
-        [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange blockArgs) {
-            Value inputVal = blockArgs[0];
-            Value filterVal = blockArgs[1];
-            Value accum = blockArgs[2];
-
-            if (inputVal.getType() != computeElemType) {
-                inputVal =
-                    arith::ExtFOp::create(nestedBuilder, nestedLoc, computeElemType, inputVal);
-            }
-            if (filterVal.getType() != computeElemType) {
-                filterVal =
-                    arith::ExtFOp::create(nestedBuilder, nestedLoc, computeElemType, filterVal);
-            }
-            if (accum.getType() != computeElemType) {
-                accum = arith::ExtFOp::create(nestedBuilder, nestedLoc, computeElemType, accum);
-            }
-
-            auto mul = arith::MulFOp::create(nestedBuilder, nestedLoc, inputVal, filterVal);
-            auto add = arith::AddFOp::create(nestedBuilder, nestedLoc, mul, accum);
-            linalg::YieldOp::create(nestedBuilder, nestedLoc, add.getResult());
-        }
-    );
-    return generic.getResult(0);
-}
-
-// Reduce kw on [N,F,1,Ow,Kw] -> [N,F,1,Ow] f32.
-static Value emitKwReduceBlock(
-    PatternRewriter &rewriter, Location loc, Value generic5D, int64_t N, int64_t F, int64_t Ow
-) {
-    Type reduceOutputType = rewriter.getF32Type();
-    SmallVector<int64_t> reducedShape = {N, F, 1, Ow};
-    Value zeroValue = createZeroConstant(rewriter, loc, reduceOutputType);
-    auto reduceInit = tensor::EmptyOp::create(rewriter, loc, reducedShape, reduceOutputType);
-    Value zeroTensor =
-        linalg::FillOp::create(rewriter, loc, ValueRange{zeroValue}, ValueRange{reduceInit})
-            .result();
-
-    auto reduceOp = linalg::ReduceOp::create(
-        rewriter, loc, ValueRange{generic5D}, ValueRange{zeroTensor}, 4,
-        [&](OpBuilder &b, Location l, ValueRange args) {
-            Value lhs = args[0];
-            Value rhs = args[1];
-            if (lhs.getType() != reduceOutputType) {
-                lhs = arith::ExtFOp::create(b, l, reduceOutputType, lhs);
-            }
-            if (rhs.getType() != reduceOutputType) {
-                rhs = arith::ExtFOp::create(b, l, reduceOutputType, rhs);
-            }
-            auto sum = arith::AddFOp::create(b, l, lhs, rhs);
-            linalg::YieldOp::create(b, l, ValueRange{sum});
-        }
-    );
-    return reduceOp.getResults()[0];
-}
-
-// Build [N,F,1,Ow] by tiling native conv1d generic + kw reduce along output width.
-static Value emitTiledNativeConv1d(
-    PatternRewriter &rewriter, Location loc, Value input, Value filter4D, int64_t N, int64_t C,
-    int64_t F, int64_t Ow, int64_t Kw, int64_t stride, int64_t dilation, int64_t blockOw,
-    Type inputElemType
-) {
-    Type reduceOutputType = rewriter.getF32Type();
-    Value result =
-        tensor::EmptyOp::create(rewriter, loc, ArrayRef<int64_t>{N, F, 1, Ow}, reduceOutputType)
-            .getResult();
-    result = linalg::FillOp::create(
-                 rewriter, loc, ValueRange{createZeroConstant(rewriter, loc, reduceOutputType)},
-                 ValueRange{result}
-    )
-                 .result();
-
-    SmallVector<ReassociationIndices> inputReassoc = {{0}, {1}, {2, 3}};
-
-    for (int64_t ow0 = 0; ow0 < Ow; ow0 += blockOw) {
-        int64_t curOw = std::min(blockOw, Ow - ow0);
-        int64_t w0 = ow0 * stride;
-        int64_t windowW = (curOw - 1) * stride + (Kw - 1) * dilation + 1;
-
-        auto sliceType = RankedTensorType::get({N, C, windowW}, inputElemType);
-        Value inputSlice = tensor::ExtractSliceOp::create(
-            rewriter, loc, sliceType, input,
-            SmallVector<OpFoldResult>{
-                rewriter.getIndexAttr(0), rewriter.getIndexAttr(0), rewriter.getIndexAttr(w0)
-            },
-            SmallVector<OpFoldResult>{
-                rewriter.getIndexAttr(N), rewriter.getIndexAttr(C), rewriter.getIndexAttr(windowW)
-            },
-            SmallVector<OpFoldResult>{
-                rewriter.getIndexAttr(1), rewriter.getIndexAttr(1), rewriter.getIndexAttr(1)
-            }
-        );
-
-        auto input4DType = RankedTensorType::get({N, C, 1, windowW}, inputElemType);
-        Value input4D =
-            tensor::ExpandShapeOp::create(rewriter, loc, input4DType, inputSlice, inputReassoc);
-
-        Value block5D = emitGenericConv1dBlock(
-            rewriter, loc, input4D, filter4D, N, F, curOw, Kw, stride, dilation
-        );
-        Value block4D = emitKwReduceBlock(rewriter, loc, block5D, N, F, curOw);
-
-        result = tensor::InsertSliceOp::create(
-            rewriter, loc, block4D, result,
-            SmallVector<OpFoldResult>{
-                rewriter.getIndexAttr(0), rewriter.getIndexAttr(0), rewriter.getIndexAttr(0),
-                rewriter.getIndexAttr(ow0)
-            },
-            SmallVector<OpFoldResult>{
-                rewriter.getIndexAttr(N), rewriter.getIndexAttr(F), rewriter.getIndexAttr(1),
-                rewriter.getIndexAttr(curOw)
-            },
-            SmallVector<OpFoldResult>{
-                rewriter.getIndexAttr(1), rewriter.getIndexAttr(1), rewriter.getIndexAttr(1),
-                rewriter.getIndexAttr(1)
-            }
-        );
-    }
-    return result;
-}
-
-// Reroute a fused f32->bf16 truncf generic's users back to its f32 input and erase it, so a
-// later stage re-materialises the cast where it belongs. Clears `truncfOp` so it can't be reused.
-static void dropTruncf(PatternRewriter &rewriter, linalg::GenericOp &truncfOp) {
-    truncfOp->replaceAllUsesWith(ValueRange{truncfOp->getOperand(0)});
-    rewriter.eraseOp(truncfOp);
-    truncfOp = nullptr;
 }
 
 /// Optimization pattern for linalg.conv_1d operation.
@@ -797,282 +493,6 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
     }
 };
 
-/// Lowers linalg.conv_1d_ncw_fcw to a native torq_hl.conv1d via a 6D linalg.generic.
-///
-/// Shapes: input [N,C,W] -> [N,C,1,W], filter [F,C,Kw] -> [F,C,1,Kw]. The generic computes the
-/// per-(n,f,ow,kw) products in f32 with c as the reduction, producing [N,F,1,Ow,Kw]; a kw reduce
-/// then sums to [N,F,1,Ow] (kept f32 for accurate accumulation) and collapses to [N,F,Ow]. The
-/// preserved Kw lets LinalgGenericConv1DToTorqHLConv1DPattern match torq_hl.conv1d downstream.
-///
-/// truncf: an f32 output (or a following bf16 truncf generic) gets a final f32->bf16 cast. With
-/// --torq-conv1d-truncate-for-reduce the cast is moved before the reduce to save bandwidth at a
-/// small precision cost; the default keeps the reduce input in f32.
-///
-/// When the full [N,F,1,Ow,Kw] generic exceeds LRAM the pattern tiles along Ow (see
-/// emitTiledNativeConv1d), matching the im2col path's strategy.
-struct Conv1DNcwFcwToGenericConv1DPattern : public OpRewritePattern<linalg::Conv1DNcwFcwOp> {
-    // When `onlyNonPointwise` is set the pattern skips pointwise convs (Kw == 1),
-    // which lower more efficiently through the matmul -> fully_connected path.
-    Conv1DNcwFcwToGenericConv1DPattern(
-        MLIRContext *context, PatternBenefit benefit = 1, bool onlyNonPointwise = false
-    )
-        : OpRewritePattern(context, benefit), onlyNonPointwise(onlyNonPointwise) {}
-
-    LogicalResult
-    matchAndRewrite(linalg::Conv1DNcwFcwOp convOp, PatternRewriter &rewriter) const override {
-        auto loc = convOp.getLoc();
-
-        // Get operands
-        Value input = convOp.getInputs()[0];   // [N, C, W]
-        Value filter = convOp.getInputs()[1];  // [F, C, Kw]
-        Value output = convOp.getOutputs()[0]; // [N, F, Ow]
-
-        // Get types and shapes
-        auto inputType = cast<RankedTensorType>(input.getType());
-        auto filterType = cast<RankedTensorType>(filter.getType());
-        auto outputType = cast<RankedTensorType>(output.getType());
-
-        // The native torq_hl.conv1d HW lowering (transformWithReduce) only supports bf16
-        // data and weights. Routing any other element type (e.g. f32) to the native path
-        // would hit an unsupported-dtype error in the HW lowering, so bail here and let the
-        // im2col/matmul path handle (or cleanly reject) it instead.
-        if (!inputType.getElementType().isBF16() || !filterType.getElementType().isBF16()) {
-            return rewriter.notifyMatchFailure(
-                convOp, "native conv1d requires bf16 data and weights"
-            );
-        }
-
-        ArrayRef<int64_t> inputShape = inputType.getShape();
-        ArrayRef<int64_t> filterShape = filterType.getShape();
-        ArrayRef<int64_t> outputShape = outputType.getShape();
-
-        int64_t N = inputShape[0];
-        int64_t C = inputShape[1];
-        int64_t F = filterShape[0];
-        int64_t Kw = filterShape[2];
-        int64_t Ow = outputShape[2];
-
-        int64_t W = inputShape[2];
-        auto elemType = inputType.getElementType();
-        auto filterElemType = filterType.getElementType();
-
-        SmallVector<int64_t> strides = llvm::to_vector<4>(
-            llvm::map_range(convOp.getStrides(), [](APInt v) { return v.getSExtValue(); })
-        );
-        SmallVector<int64_t> dilations = llvm::to_vector<4>(
-            llvm::map_range(convOp.getDilations(), [](APInt v) { return v.getSExtValue(); })
-        );
-
-        int64_t stride = strides[0];
-        int64_t dilation = dilations[0];
-
-        // Pointwise convs lower to a fully_connected that runs efficiently on the
-        // NPU, so leave them to the matmul path when only non-pointwise convs were
-        // requested (see populateOptimizeConv1DPatterns).
-        if (stride > 2 || dilation > 1 || Kw > 7) {
-            return rewriter.notifyMatchFailure(
-                convOp, "Condition handled by matmul path: stride > 2 || dilation > 1 || Kw > 7"
-            );
-        }
-
-        // A single-channel conv lowers to an all-parallel generic that downstream tile-and-fuse
-        // can tile at any size, so emit it untiled and skip Ow tiling: for a large Ow/Kw the
-        // per-block budget would otherwise force a tiny blockOw and explode into thousands of
-        // conv1d blocks, stalling compilation. A multi-channel conv needs the C reduction, whose
-        // untiled intermediate cannot be tiled downstream, so it keeps the LRAM-aware Ow tiling
-        // (the matmul path can't take over either: its C*Kw contraction overflows the HW
-        // accumulate block).
-
-        auto outputElemType = outputType.getElementType();
-
-        // Detect if there's a truncf generic following the conv1d.
-        auto convResult = convOp.getResult(0);
-        linalg::GenericOp truncfGenericOp = nullptr;
-        if (convResult.hasOneUse()) {
-            auto userOp = convResult.use_begin()->getOwner();
-            if (auto truncfOp = llvm::dyn_cast<linalg::GenericOp>(userOp)) {
-                if (truncfOp.getNumResults() == 1 &&
-                    cast<RankedTensorType>(truncfOp.getResult(0).getType())
-                        .getElementType()
-                        .isBF16() &&
-                    cast<RankedTensorType>(convResult.getType()).getElementType().isF32()) {
-                    truncfGenericOp = truncfOp;
-                }
-            }
-        }
-        bool needsBF16Output = outputElemType.isBF16() || truncfGenericOp;
-
-        // Expand filter from [F, C, Kw] to [F, C, 1, Kw] (add height dimension)
-        auto filter4DType = RankedTensorType::get({F, C, 1, Kw}, filterElemType);
-        SmallVector<ReassociationIndices> filterReassoc = {{0}, {1}, {2, 3}};
-        Value filter4D =
-            tensor::ExpandShapeOp::create(rewriter, loc, filter4DType, filter, filterReassoc);
-
-        SmallVector<ReassociationIndices> inputReassoc = {{0}, {1}, {2, 3}};
-        Value reduced4D;
-
-        // Single LRAM-resident generic + kw reduce.
-        auto input4DType = RankedTensorType::get({N, C, 1, W}, elemType);
-        Value input4D =
-            tensor::ExpandShapeOp::create(rewriter, loc, input4DType, input, inputReassoc);
-
-        Value genericResult = emitGenericConv1dBlock(
-            rewriter, loc, input4D, filter4D, N, F, Ow, Kw, stride, dilation
-        );
-
-        Value reduceInput = genericResult;
-        // Memory-optimized: truncate the [N,F,1,Ow,Kw] generic to bf16 before the reduce.
-        if (clConv1dTruncateForReduce && truncfGenericOp) {
-            reduceInput = emitTruncfToBF16(rewriter, loc, genericResult);
-        }
-        if (truncfGenericOp) {
-            dropTruncf(rewriter, truncfGenericOp);
-        }
-
-        reduced4D = emitKwReduceBlock(rewriter, loc, reduceInput, N, F, Ow);
-
-        // Collapse [N, F, 1, Ow] -> [N, F, Ow]
-        Type reduceOutputType = rewriter.getF32Type();
-        SmallVector<int64_t> collapsedShape = {N, F, Ow};
-        auto collapsedType = RankedTensorType::get(collapsedShape, reduceOutputType);
-        SmallVector<ReassociationIndices> collapseReassoc = {{0}, {1}, {2, 3}};
-        Value collapsedResult = tensor::CollapseShapeOp::create(
-                                    rewriter, loc, collapsedType, reduced4D, collapseReassoc
-        )
-                                    .getResult();
-
-        Value finalResult = collapsedResult;
-        if (needsBF16Output) {
-            finalResult = emitTruncfToBF16(rewriter, loc, collapsedResult);
-        }
-
-        rewriter.replaceOp(convOp, finalResult);
-        return success();
-    }
-
-    bool onlyNonPointwise;
-};
-
-// Find the collapse_shape that assembles the native conv1d reduce output into [N,F,Ow].
-// Untiled: the reduce result feeds the collapse directly. Ow-tiled (emitTiledNativeConv1d):
-// each block reduce feeds an insert_slice tree whose root is collapsed, so walk the chain
-// forward to the collapse. Returns null if the chain isn't this conv1d reduce->collapse shape.
-static tensor::CollapseShapeOp findConvReduceCollapse(Value reduceResult) {
-    Operation *user = getSingleUser(reduceResult);
-    if (!user) {
-        return nullptr;
-    }
-    if (auto collapse = dyn_cast<tensor::CollapseShapeOp>(user)) {
-        return collapse;
-    }
-    auto insert = dyn_cast<tensor::InsertSliceOp>(user);
-    if (!insert || insert.getSource() != reduceResult) {
-        return nullptr;
-    }
-    for (Value cur = insert.getResult(); Operation *next = getSingleUser(cur);) {
-        if (auto collapse = dyn_cast<tensor::CollapseShapeOp>(next)) {
-            return collapse;
-        }
-        auto nextInsert = dyn_cast<tensor::InsertSliceOp>(next);
-        if (!nextInsert || nextInsert.getDest() != cur) {
-            return nullptr;
-        }
-        cur = nextInsert.getResult();
-    }
-    return nullptr;
-}
-
-// Collect every block reduce feeding the assembled tensor that `collapse` consumes: one
-// reduce for the untiled path, one per Ow block (via the insert_slice tree) for the tiled path.
-static void collectConvBlockReduces(
-    tensor::CollapseShapeOp collapse, SmallVectorImpl<linalg::ReduceOp> &reduces
-) {
-    Value cur = collapse.getSrc();
-    while (auto insert = cur.getDefiningOp<tensor::InsertSliceOp>()) {
-        if (auto red = insert.getSource().getDefiningOp<linalg::ReduceOp>()) {
-            reduces.push_back(red);
-        }
-        cur = insert.getDest();
-    }
-    if (auto red = cur.getDefiningOp<linalg::ReduceOp>()) {
-        reduces.push_back(red);
-    }
-}
-
-/// Fold a per-channel bias add that follows the conv1d reduce_sum into the
-/// reduce itself. The native conv1d path lowers to:
-///   conv1d(mul) -> reduce_sum(f32) -> collapse -> addf(bias) -> truncf(bf16)
-/// and, when the [N,F,1,Ow,Kw] generic exceeds LRAM, to a per-Ow-block reduce assembled
-/// by an insert_slice tree before the collapse (emitTiledNativeConv1d).
-/// The fp32 bias add has no NSS lowering, so when Host fallback is disabled it
-/// cannot run anywhere. Attaching the per-channel bias to the reduce(s) lets the
-/// reduce's activation stage apply it in fp32 (see ReduceOpConversion and the
-/// reduce HW kernel), which is bit-exact with `round_bf16(sum_f32 + bias_f32)`.
-struct FoldConvBiasIntoReducePattern : public OpRewritePattern<linalg::ReduceOp> {
-    using OpRewritePattern::OpRewritePattern;
-
-    LogicalResult
-    matchAndRewrite(linalg::ReduceOp reduceOp, PatternRewriter &rewriter) const override {
-        if (reduceOp->hasAttr(kReducePerChannelBiasAttr) || reduceOp.getNumResults() != 1) {
-            return failure();
-        }
-
-        // Only an fp32 reduce result can carry an fp32 per-channel bias.
-        auto reduceResult = reduceOp.getResult(0);
-        auto reduceType = dyn_cast<RankedTensorType>(reduceResult.getType());
-        if (!reduceType || !reduceType.getElementType().isF32()) {
-            return failure();
-        }
-
-        // reduce -> [insert_slice tree ->] collapse_shape -> per-channel bias add (+ truncf)
-        auto collapseOp = findConvReduceCollapse(reduceResult);
-        if (!collapseOp) {
-            return failure();
-        }
-        Value collapseResult = collapseOp.getResult();
-        auto collapseType = dyn_cast<RankedTensorType>(collapseResult.getType());
-
-        // Channel dimension is dim 1 (NCHW) for the conv1d generic path.
-        constexpr int channelDim = 1;
-        if (!collapseType || collapseType.getRank() <= channelDim) {
-            return failure();
-        }
-        const int64_t numChannels = collapseType.getDimSize(channelDim);
-        if (numChannels <= 0) {
-            return failure();
-        }
-
-        VectorIntOrFloat biasVec(numChannels, /*isInt=*/false);
-        Value folded = collapseResult;
-        if (!foldForwardPerChannelAdd(folded, channelDim, biasVec)) {
-            return failure();
-        }
-        Operation *addOp = folded.getDefiningOp();
-        if (!addOp) {
-            return failure();
-        }
-
-        // The Ow-tiled path assembles several block reduces before the collapse; the same
-        // per-channel bias applies to each (the blocks partition the output width).
-        SmallVector<linalg::ReduceOp> blockReduces;
-        collectConvBlockReduces(collapseOp, blockReduces);
-        if (blockReduces.empty()) {
-            return failure();
-        }
-
-        auto biasType = RankedTensorType::get({numChannels}, rewriter.getF32Type());
-        auto biasAttr = DenseFPElementsAttr::get(biasType, biasVec.floats);
-        for (linalg::ReduceOp red : blockReduces) {
-            rewriter.modifyOpInPlace(red, [&]() {
-                red->setAttr(kReducePerChannelBiasAttr, biasAttr);
-            });
-        }
-        // Drop the folded bias add, rerouting its users back to the collapse result.
-        rewriter.replaceOp(addOp, collapseResult);
-        return success();
-    }
-};
-
 /// Sink a static tensor.extract_slice past an elementwise linalg.generic whose every
 /// input is an identically-parameterised extract_slice, i.e. rewrite
 ///   elementwise(slice(a), slice(b), ...) -> slice(elementwise(a, b, ...)).
@@ -1082,7 +502,7 @@ struct FoldConvBiasIntoReducePattern : public OpRewritePattern<linalg::ReduceOp>
 /// The crop drops the extra ConvTranspose columns and may also absorb a downstream slice the
 /// compiler folded in here, so it can shrink the width by more than one element. That slice
 /// between the conv result and the bias add stops the bias/truncf from fusing into the conv
-/// epilogue (matmul or native conv1d), leaving an fp32 add with no NPU lowering that is illegal
+/// epilogue (matmul or conv2d), leaving an fp32 add with no NPU lowering that is illegal
 /// under --torq-disable-host. Slicing commutes with positional elementwise ops, so moving it
 /// below the add/truncf makes the conv->add->truncf chain contiguous again for the downstream
 /// epilogue fusion.
@@ -1248,36 +668,29 @@ struct SinkExtractSliceThroughElementwisePattern : public OpRewritePattern<linal
 
 void populateOptimizeConv1DPatterns(MLIRContext *context, RewritePatternSet &patterns) {
     // Move the ConvTranspose trailing-column slice below its elementwise bias/truncf epilogue
-    // so the bias fuses into the conv (needed for both the matmul and native conv1d paths).
+    // so the bias fuses into the conv.
     patterns.insert<SinkExtractSliceThroughElementwisePattern>(context);
 
     // Raise 1x1 matmul-as-conv to linalg.matmul before the NHWC->NCHW pass.
     patterns.insert<Conv2D1x1NhwcHwcfToMatmulPattern>(context);
 
-    // We have multiple ways of lowering conv1d.
-    // If none explicitly enabled, default to the matmul path.
-    // Later we can enable multiple paths and pick the best one for each conv1d
-    if (!clConv1dAsMatmul && !clConv1dToGenericConv1D && !clConv1dToConv2D) {
-        // Automatic selection of the best lowering path for conv1d
-        // Always use the matmul path for now
-        clConv1dAsMatmul = true;
-    }
-
-    if (clConv1dToGenericConv1D) {
-        patterns.insert<Conv1DNcwFcwToGenericConv1DPattern>(context);
-    }
-
-    // A non-pointwise (Kw > 1) conv1d that the matmul/im2col path cannot lower on-NPU --
-    // e.g. a biased conv (the matmul pattern bails on the non-zero init) or a wide kernel
-    // whose C*Kw reduction overflows the matmul block -- must still compile under NSS-only.
-    // Route those convs through the native generic path at a higher benefit so it wins over
-    // the matmul pattern above, and fold the per-channel bias into the reduce, avoiding the
-    // fp32 host bias-add. Pointwise convs already lower to an efficient fully_connected, so
-    // they keep the path selected above. The native path only matches bf16 data/weights (see
-    // Conv1DNcwFcwToGenericConv1DPattern); other dtypes fall back to the matmul/im2col path.
+    // Conv1d lowering strategy. Three algorithms were tried:
+    //   1. rank-4 conv2d form (height-1 conv2d; stride <= 2, dilation 1): the common
+    //      case; carries a conv bias in the init.
+    //   2. im2col + matmul (fully-connected form): what the conv2d form cannot express --
+    //      stride >= 3 or dilation > 1, with an all-zero init. The im2col unfold is
+    //      torq_hl.im2col (NDL window read); when it does not fit LRAM, im2col + matmul
+    //      are tiled along the output width, and only a pathological conv whose
+    //      single-column unfold still overflows LRAM falls back to a host-marked generic.
+    //   3. native 5D linalg.generic with the kernel dim preserved, lowered to
+    //      torq_hl.conv1d (see LinalgGenericConv1DToTorqHLConv1DPattern), with Ow-tiling
+    //      to fit LRAM and the per-channel bias folded into the following reduce
+    //      (FoldConvBiasIntoReducePattern). It matched bf16 data/weights only and was an
+    //      NPU-only escape hatch for the convs (2) bails on (e.g. biased convs); gated
+    //      behind --torq-convert-conv1d-to-generic since 54c9058d and never enabled by
+    //      any test, script or model, so it is removed.
     patterns.insert<Conv1DNcwFcwToLinalgMatmulPattern>(context);
     patterns.insert<Conv1DNcwFcwToLinalgConv2DPattern>(context);
-    patterns.insert<FoldConvBiasIntoReducePattern>(context);
 }
 
 } // namespace mlir::syna::torq

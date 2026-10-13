@@ -7,8 +7,8 @@ from torq.testing.cases import get_test_cases_from_files
 
 
 @pytest.fixture
-def comparison_config_for_conv_truncf(request):
-    """Comparison config for conv1d with truncf before reduce (memory-optimized mode)."""
+def comparison_config_for_encoder_conv(request):
+    """Looser comparison for the encoder conv1d (runs with host/CSS fallback enabled)."""
     return {"fp_avg_tol": 0.2, "fp_max_tol": 1.0}
 
 @pytest.fixture
@@ -157,11 +157,11 @@ def case_config(request, runtime_hw_type, chip_config):
             "--torq-disable-host", "--torq-disable-css",
         ])
 
-    # Option Test for conv1d with truncf before reduce (memory-optimized mode) to maintain easily
-    # This enables --torq-conv1d-truncate-for-reduce to test bf16 reduce input
+    # The encoder conv1d runs through the host/CSS fallback: keep host/CSS enabled
+    # (drop the default --torq-disable-host/--torq-disable-css) and compare loosely.
     if 'encoder.mlir.230.Conv_0_small.mlir' in request.param.data.name:
-        extra_args["torq_compiler_options"] = ["--torq-conv1d-truncate-for-reduce=true"]
-        extra_args["comparison_config"] = "comparison_config_for_conv_truncf"
+        extra_args["torq_compiler_options"] = []
+        extra_args["comparison_config"] = "comparison_config_for_encoder_conv"
 
     if 'localavgpool.mlir' in request.param.data.name:
         extra_args["comparison_config"] = "comparison_config_for_localavgpool"

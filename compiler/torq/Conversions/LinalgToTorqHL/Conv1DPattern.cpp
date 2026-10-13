@@ -40,9 +40,9 @@ namespace mlir::syna::torq {
 
 /// Lowers linalg::GenericOp (from Conv1D with preserved kernel dim) to torq_hl::Conv1DOp.
 ///
-/// This pattern matches a linalg.generic op (5 or 6 loop dims) produced by
-/// Conv1DNcwFcwToGenericConv1DPattern and lowers it directly to torq_hl.conv1d. Output tensor
-/// shape [N, F, 1, Ow, Kw] is preserved for downstream kernel reduction.
+/// This pattern matches a linalg.generic op (5 or 6 loop dims) in the native 5D conv1d
+/// form and lowers it directly to torq_hl.conv1d. Output tensor shape [N, F, 1, Ow, Kw]
+/// is preserved for downstream kernel reduction.
 ///
 /// Input/Output Shapes (NCHW layout):
 ///   - Input: [N, C, 1, W] (4D)
@@ -328,7 +328,7 @@ struct LinalgGenericConv1DToTorqHLConv1DPattern : public OpRewritePattern<linalg
 void populateLinalgConv2DToTorqHLConv1DPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
-    // Generic 5D conv1d pattern (from Conv1DNcwFcwToGenericConv1DPattern)
+    // Generic 5D conv1d pattern (matches the native 5D conv1d linalg.generic form)
     patterns.insert<LinalgGenericConv1DToTorqHLConv1DPattern>(context, 28, 12, markFuseGroups);
 }
 
