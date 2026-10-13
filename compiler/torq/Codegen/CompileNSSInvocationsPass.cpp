@@ -29,6 +29,8 @@ using namespace mlir::iree_compiler;
 
 namespace mlir::syna::torq {
 
+// Defined in Serialization.cpp; selects synchronous (wait-after-start) slice
+// emission for HW test-vector generation.
 extern llvm::cl::opt<bool> clDisableAsyncSliceWait;
 
 llvm::cl::opt<unsigned> clDmaInMtu(

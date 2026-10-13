@@ -5,7 +5,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "Passes.h"
-#include "OpPatternOptions.h"
 #include "PassesDetail.h"
 #include "PatternUtils.h"
 #include "Patterns.h"
@@ -470,10 +469,6 @@ static bool isArithToTorqHLTarget(linalg::GenericOp op) {
         if (isa<arith::AndIOp, arith::OrIOp, arith::XOrIOp, arith::MinimumFOp, arith::MinSIOp,
                 arith::MinUIOp, arith::MinNumFOp, arith::MaximumFOp, arith::MaxSIOp, arith::MaxUIOp,
                 arith::MaxNumFOp, arith::CmpFOp, arith::CmpIOp>(binaryOp))
-            return true;
-        if (clACTBasedSub && isa<arith::SubIOp>(binaryOp))
-            return true;
-        if (clACTBasedAdd && isa<arith::AddIOp>(binaryOp))
             return true;
     }
 

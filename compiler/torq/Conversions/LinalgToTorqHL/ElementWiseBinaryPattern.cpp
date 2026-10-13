@@ -4,7 +4,6 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "OpPatternOptions.h"
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
@@ -604,21 +603,11 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         auto opName = "add"; // Default operation name is "add" (for decoration purposes)
         switch (_opType) {
         case ADD_OP:
-            if (clACTBasedAdd) {
-                return rewriter.notifyMatchFailure(
-                    eltOp, "ACT-based add enabled; ALU-based AddOp not expected"
-                );
-            }
             if (!dyn_cast<arith::AddIOp>(binaryOp)) {
                 return rewriter.notifyMatchFailure(eltOp, "Expected arith.addi");
             }
             break;
         case SUB_OP:
-            if (clACTBasedSub) {
-                return rewriter.notifyMatchFailure(
-                    eltOp, "ACT-based sub enabled; ALU-based SubOp not expected"
-                );
-            }
             if (!dyn_cast<arith::SubIOp>(binaryOp)) {
                 return rewriter.notifyMatchFailure(eltOp, "Expected arith.subi");
             }

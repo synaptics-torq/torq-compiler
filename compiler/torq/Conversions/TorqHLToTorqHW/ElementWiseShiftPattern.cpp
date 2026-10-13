@@ -15,11 +15,6 @@ using namespace mlir::syna::torq_hw;
 
 namespace mlir::syna::torq {
 
-static llvm::cl::opt<bool> clRelaxInpuStrideCheck(
-    "torq-ews-relax-input-stride-check",
-    llvm::cl::desc("Relax ElementWiseShift input stride check"), llvm::cl::init(false)
-);
-
 template <>
 LogicalResult ElementWiseShiftPattern::transform(
     torq_hl::ElementWiseShiftOp op, PatternRewriter &rewriter
@@ -56,12 +51,10 @@ LogicalResult ElementWiseShiftPattern::transform(
     assert(type1.getShape() == type2.getShape() && "Input shapes must match");
 
     auto inputStrides = getEncodedStridesElements(type1);
-    if (!clRelaxInpuStrideCheck) {
-        // TODO: relax check input strides for logical left shift
-        if (inputStrides != getEncodedStridesElements(type2)) {
-            return op.emitError() << "Input strides must match: Input1: " << type1
-                                  << ", Input2: " << type2;
-        }
+    // TODO: relax check input strides for logical left shift
+    if (inputStrides != getEncodedStridesElements(type2)) {
+        return op.emitError() << "Input strides must match: Input1: " << type1
+                              << ", Input2: " << type2;
     }
 
     // The difference between the two input addresses is used as offset in DEDR to fetch the data

@@ -4,11 +4,9 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "OpPatternOptions.h"
-
+#include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "torq/Conversions/LinalgToTorqHL/MatchingFunctions.h"
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
-#include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ComputeConstants.h"
 #include "torq/Utils/ConversionUtils.h"

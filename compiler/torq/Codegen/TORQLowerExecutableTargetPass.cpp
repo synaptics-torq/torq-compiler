@@ -73,6 +73,9 @@ llvm::cl::opt<bool> clDisableHost(
     llvm::cl::init(false)
 );
 
+// Kept as a flag for debugging/testing: compiles inputs that are already bufferized (memrefs
+// instead of tensors), skipping the bufferization, allocation and map-bindings passes. Off by
+// default; the normal pipeline is unaffected.
 static llvm::cl::opt<bool> clFromPreBufferizedIR(
     "torq-from-prebufferized-ir",
     llvm::cl::desc("Compile pre-bufferized MLIR inputs (used for testing)"), llvm::cl::init(false)

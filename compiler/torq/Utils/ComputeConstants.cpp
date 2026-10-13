@@ -47,6 +47,9 @@ using namespace mlir::linalg;
 
 namespace mlir::syna::torq {
 
+// Kept for debugging the JIT-computed constants: dump the IR used to compute
+// them to a directory, and/or insert a trap + debug info so a breakpoint can be
+// set on the generated code. Both are no-ops unless explicitly set.
 llvm::cl::opt<std::string> clDumpComputeConstantsIR(
     "torq-dump-compute-constants-ir",
     llvm::cl::desc("Dump IR used to compute constants to a directory"), llvm::cl::init("")
@@ -190,6 +193,7 @@ static FailureOr<IREE::HAL::ExecutableVariantOp> createModule(
 
 static void setupPipeline(PassManager &pm) {
 
+    // Debug aid (--torq-dump-compute-constants-ir): record every pass's IR to a tree.
     if (!clDumpComputeConstantsIR.empty()) {
         llvm::sys::fs::create_directories(clDumpComputeConstantsIR);
         pm.enableIRPrintingToFileTree(
@@ -281,6 +285,8 @@ static void setupPipeline(PassManager &pm) {
     modulePassManager.addNestedPass<LLVM::LLVMFuncOp>(createAddFastMathFlagsPass());
 }
 
+// Debug aid (--torq-insert-debug-trap-in-compute-constants): import llvm.debugtrap and
+// call it at the top of the constants "main" so the JIT'd code breaks on entry.
 static void insertDebugTrap(IREE::HAL::ExecutableVariantOp evOp) {
 
     // import llvm.debugtrap() in the module

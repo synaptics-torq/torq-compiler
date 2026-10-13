@@ -557,17 +557,8 @@ std::vector<int8_t> genD2SWeights(size_t result_size) {
     return result;
 }
 
-llvm::cl::opt<bool> clLowerDWUsingNdlKernel(
-    "torq-dw-ndl", llvm::cl::desc("Lower depthwise using NDL kenels"), llvm::cl::init(false)
-);
-
 // Check if the Conv2DOp can be lowered using EK kernel
 bool hasEkLoweringConv(mlir::syna::torq_hl::Conv2DOp op) {
-    if (clLowerDWUsingNdlKernel) {
-        llvm::errs() << "Warning: lowering DW using NDL kernel!\n";
-        return false;
-    }
-
     auto weightShape = cast<ShapedType>(op.getWeights().getType()).getShape();
     int kh = weightShape[2];
     int kw = weightShape[3];
@@ -590,10 +581,6 @@ bool hasEkLoweringConv(mlir::syna::torq_hl::Conv2DOp op) {
 bool hasEkLoweringConv(mlir::syna::torq_hl::DepthwiseConv2DOp op) {
     if (op.getIsDw1dStride1()) {
         return true;
-    }
-    if (clLowerDWUsingNdlKernel) {
-        llvm::errs() << "Warning: lowering DW using NDL kernel!\n";
-        return false;
     }
     auto weightShape = cast<ShapedType>(op.getWeights().getType()).getShape();
 

@@ -39,10 +39,6 @@ static torq_hw::ALUOp1Mode opTypeToAluOpMode(torq_hl::ElementwiseOpEnum opType) 
         return torq_hw::ALUOp1Mode::OR;
     case torq_hl::ElementwiseOpEnum::LOGICAL_XOR:
         return torq_hw::ALUOp1Mode::XOR;
-    case torq_hl::ElementwiseOpEnum::SUB:
-        return torq_hw::ALUOp1Mode::SACC;
-    case torq_hl::ElementwiseOpEnum::ADD:
-        return torq_hw::ALUOp1Mode::ACC;
     case torq_hl::ElementwiseOpEnum::BITWISE_NOT:
         break;
     case torq_hl::ElementwiseOpEnum::LOGICAL_NOT:

@@ -38,6 +38,10 @@
 //
 // The percentage is for the chip we tuned on. A smaller LRAM gets a smaller share. See
 // kSwapExtractAndConvertTunedLramSize.
+//
+// Tuning: 12 is safe on every model we measured but not the best for all of them (yolo_pose was
+// best at 24). Use --torq-swap-extract-convert-max-waste-percent to tune a specific model or to
+// compare performance; it is kept as a flag (not a constant) for that reason.
 static llvm::cl::opt<int64_t> clSwapExtractAndConvertMaxWastePercent(
     "torq-swap-extract-convert-max-waste-percent",
     llvm::cl::desc("Max extra LRAM residency the SwapExtractAndConvert pattern may add, as a "

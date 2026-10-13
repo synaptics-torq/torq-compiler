@@ -29,6 +29,9 @@
 
 namespace mlir::syna::torq {
 
+// TorqHLTileLargeInputsPass is intentionally kept (though disabled by default: both thresholds
+// are 0) because it exercises the TorqHL TilingInterface that we plan to enable for general
+// large-input tiling later. Set both flags to turn it on.
 static llvm::cl::opt<int64_t> clTorqHLTileInputSizeThreshold(
     "torq-hl-tile-input-size-threshold",
     llvm::cl::desc("Tile TorqHL ops whose any single input tensor element count exceeds this "

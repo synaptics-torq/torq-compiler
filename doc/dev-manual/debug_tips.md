@@ -123,6 +123,46 @@
 
   - To disable the fusion of all operators into one single dispatch use the option ``--torq-disable-dispatch-fusion``
 
+  - ``--torq-create-css-symbols=<DIR>``: dump each CSS program as a standalone ``.elf`` under
+    ``DIR/<dispatch>/<program>.elf`` so a linked kernel can be inspected or run in isolation.
+    Debug aid; no effect on the compiled model unless the directory is set.
+
+  - ``--torq-vm-print-statistics``: print the LRAM/XRAM swap-in/swap-out statistics collected
+    while materializing buffers (swap-outs, stores/loads skipped, bytes dropped/stored/loaded).
+    Useful to see how much spill traffic a model generates. Debug aid; does not change codegen.
+
+  - ``--torq-dump-compute-constants-ir=<DIR>``: dump the IR of every pass run to JIT-compute
+    compile-time constants into a file tree under ``DIR``. Debug aid.
+
+  - ``--torq-insert-debug-trap-in-compute-constants``: insert a ``llvm.debugtrap`` (plus debug
+    info) at the entry of the JIT'd constants-computation code so a breakpoint can be set on it.
+    Debug aid; does not change the computed values.
+
+  - ``--torq-disable-async-slice-wait``: disable the asynchronous slice wait, i.e. emit an
+    explicit wait after each slice start. Used to generate deterministic HW test vectors for the
+    HW team. Off by default (async wait).
+
+  - ``--torq-nss-block-size=<N>`` (default 4): max number of operations in an NSS program block.
+    Changing it re-partitions work across slices; useful for debugging codegen structure.
+
+  - ``--torq-fallback-f32-to-host`` (default on): route every f32 operation to the host executor.
+    Keep on for correctness; turn off to measure how much f32 work an NPU lowering would take
+    (performance comparison).
+
+  - ``--torq-from-prebufferized-ir``: compile already-bufferized (memref) inputs, skipping the
+    bufferization, allocation and map-bindings passes. Debug/test aid; off by default.
+
+  - ``--torq-hl-tile-input-size-threshold=<N>`` and ``--torq-hl-tile-dim-size=<S>``: together
+    enable ``TorqHLTileLargeInputs``, which tiles TorqHL ops (conv/matmul/pool) whose single
+    input exceeds ``N`` elements using a fixed tile of ``S`` per parallel domain. Both default to
+    0 (disabled). The pass is kept because it exercises the TorqHL TilingInterface we plan to
+    enable for general large-input tiling.
+
+  - ``--torq-swap-extract-convert-max-waste-percent=<N>`` (default 12): the most extra LRAM, in
+    percent of LRAM, that SwapExtractAndConvert may keep live. 12 is safe on every model we
+    measured but not the best for all of them (yolo_pose was best at 24). Use it to tune a model
+    or to compare performance.
+
   - To see all supported Torq flags, run:
 
     ```{code} shell

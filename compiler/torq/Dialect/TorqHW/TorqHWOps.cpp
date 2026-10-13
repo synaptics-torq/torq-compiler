@@ -51,11 +51,6 @@ using namespace mlir::syna::torq_hw;
 
 namespace mlir::syna::torq_hw {
 
-static llvm::cl::opt<bool> clEnableDeqwVerify(
-    "torq-enable-deqw-verify", llvm::cl::desc("Enable bound checking for DEQW"),
-    llvm::cl::init(true)
-);
-
 void SliceTaskOp::build(
     ::mlir::OpBuilder &odsBuilder, ::mlir::OperationState &odsState, StringRef op_name, Value d,
     Value w, Value b, Value q, SliceCFGAttr slice_cfg_attr, Ndls ndls
@@ -256,10 +251,6 @@ LogicalResult SliceTaskOp::verify() {
 
     if (deqwMemNdls.size() != getQ().size()) {
         return emitOpError("Q values do not match DEQW NDLs number");
-    }
-
-    if (!clEnableDeqwVerify) {
-        return success();
     }
 
     for (auto pair : llvm::zip(deqwMemNdls, getQ())) {

@@ -252,9 +252,7 @@ def TorqHL_ElementwiseOpEnum : I32EnumAttr<"ElementwiseOpEnum", "Type of element
   I32EnumAttrCase<"LOGICAL_AND",       9>,
   I32EnumAttrCase<"LOGICAL_OR",        10>,
   I32EnumAttrCase<"LOGICAL_XOR",       11>,
-  I32EnumAttrCase<"LOGICAL_NOT",       12>,
-  I32EnumAttrCase<"SUB",               13>,
-  I32EnumAttrCase<"ADD",               14>
+  I32EnumAttrCase<"LOGICAL_NOT",       12>
 ]> {
   let cppNamespace = "::mlir::syna::torq_hl";
 }

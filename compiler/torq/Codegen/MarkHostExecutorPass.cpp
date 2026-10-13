@@ -23,6 +23,9 @@ namespace mlir::syna::torq {
 
 extern llvm::cl::opt<bool> clDisableHost;
 
+// Kept as a flag: routing all f32 operations to the host is on by default, but turning it off
+// is useful for performance comparison (measuring how much f32 work an NPU lowering would take
+// vs. the host fallback).
 llvm::cl::opt<bool> clFallbackF32ToHost(
     "torq-fallback-f32-to-host",
     llvm::cl::desc("Fallback to host execution of any operation that uses f32"),

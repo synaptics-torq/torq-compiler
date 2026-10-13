@@ -4,7 +4,6 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "OpPatternOptions.h"
 #include "mlir/Interfaces/SubsetOpInterface.h"
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Conversions/LinalgToTorqHL/Patterns.h"
@@ -417,51 +416,6 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
         );
     }
 
-    // Lower a constant i8 LUT to GatherOp when `clTableAsGather` is set.
-    // Rotates the table by 128 positions so that signed i8 indices [-128,127]
-    // map to unsigned GatherOp indices [0,255].
-    void rewriteTableAsGather(
-        linalg::GenericOp srcOp, Value input, Value cstData, PatternRewriter &rewriter
-    ) const {
-        // Rotate by 128: move entries [128,255] to the front, [0,127] to the back,
-        // so signed i8 indices [-128,127] map to unsigned [0,255].
-        Location loc = srcOp.getLoc();
-        auto cstType = cast<RankedTensorType>(cstData.getType());
-        Type elemTy = cstType.getElementType();
-        constexpr int64_t half = 128;
-        auto halfType = RankedTensorType::get({half}, elemTy);
-        auto mkIdx = [&](int64_t v) -> OpFoldResult { return rewriter.getIndexAttr(v); };
-
-        Value upperHalf = tensor::ExtractSliceOp::create(
-                              rewriter, loc, halfType, cstData, ArrayRef<OpFoldResult>{mkIdx(half)},
-                              ArrayRef<OpFoldResult>{mkIdx(half)}, ArrayRef<OpFoldResult>{mkIdx(1)}
-        )
-                              .getResult();
-        Value lowerHalf = tensor::ExtractSliceOp::create(
-                              rewriter, loc, halfType, cstData, ArrayRef<OpFoldResult>{mkIdx(0)},
-                              ArrayRef<OpFoldResult>{mkIdx(half)}, ArrayRef<OpFoldResult>{mkIdx(1)}
-        )
-                              .getResult();
-        Value rotated =
-            tensor::EmptyOp::create(rewriter, loc, cstType.getShape(), elemTy).getResult();
-        rotated = tensor::InsertSliceOp::create(
-                      rewriter, loc, upperHalf, rotated, ArrayRef<OpFoldResult>{mkIdx(0)},
-                      ArrayRef<OpFoldResult>{mkIdx(half)}, ArrayRef<OpFoldResult>{mkIdx(1)}
-        )
-                      .getResult();
-        rotated = tensor::InsertSliceOp::create(
-                      rewriter, loc, lowerHalf, rotated, ArrayRef<OpFoldResult>{mkIdx(half)},
-                      ArrayRef<OpFoldResult>{mkIdx(half)}, ArrayRef<OpFoldResult>{mkIdx(1)}
-        )
-                      .getResult();
-
-        rotated = createCompileTimeConstOp(rotated.getDefiningOp(), rewriter).value_or(rotated);
-        auto outType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
-        rewriter.replaceOpWithNewOp<syna::torq_hl::GatherOp>(
-            srcOp, outType, createInitTensor(srcOp, rewriter, outType), rotated, input
-        );
-    }
-
     // Lower a plain constant values tensor to GatherOp.
     // Rank-2 outer-dim indices are rescaled by the trailing slice stride.
     LogicalResult rewriteAsConstantGather(
@@ -549,14 +503,9 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
             );
         }
 
-        if (isTableOp && !clTableAsGather) {
+        if (isTableOp) {
             LLVM_DEBUG(llvm::dbgs() << "[ExtractOpPattern] -> rewriteAsTableOp\n");
             rewriteAsTableOp(srcOp, input, valuesTensor, rewriter);
-            return success();
-        }
-        if (isTableOp) { // clTableAsGather == true: emit the LUT as a rotated GatherOp
-            LLVM_DEBUG(llvm::dbgs() << "[ExtractOpPattern] -> rewriteTableAsGather\n");
-            rewriteTableAsGather(srcOp, input, valuesTensor, rewriter);
             return success();
         }
         LLVM_DEBUG(llvm::dbgs() << "[ExtractOpPattern] -> rewriteAsConstantGather\n");

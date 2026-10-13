@@ -15,6 +15,8 @@ namespace mlir::syna::torq {
 
 namespace {
 
+// Kept for debugging: print the LRAM/XRAM swap-in/swap-out statistics collected
+// during convertVirtualToPhysicalMemRefs (see SwapStatistics below).
 static llvm::cl::opt<bool> clPrintStatistics(
     "torq-vm-print-statistics", llvm::cl::desc("Print virtual memory statistics"),
     llvm::cl::init(false)
@@ -155,6 +157,9 @@ void VirtualObject::invalidateAliases() {
     }
 }
 
+// Swap traffic accounting for the LRAM/XRAM spill buffers, printed by
+// printStatistics when --torq-vm-print-statistics is set. Debugging only; does not
+// affect codegen.
 struct SwapStatistics {
     int swapOuts = 0;
     int storesSkipped = 0;
@@ -296,6 +301,7 @@ void VirtualBuffer::swapOut(IRRewriter &rewriter, Location loc) {
         vm().stats.storesSkipped++;
     }
     else {
+        // otherwise create the swap copy (an existing one is still up to date and kept as is)
         auto physicalType = cast<MemRefType>(value().getType());
         auto swappedOutType = createMemRefTypeWithEncoding(
             physicalType,
@@ -489,6 +495,8 @@ static void performScheduledSwaps(
     }
 }
 
+// Debug aid (--torq-vm-print-statistics): summarize the spill traffic the scheduler
+// generated, to see how much LRAM pressure a model puts on the swap space.
 static void printStatistics(const SwapStatistics &stats) {
     if (!clPrintStatistics) {
         return;

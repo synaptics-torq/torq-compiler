@@ -52,13 +52,9 @@ using namespace mlir::syna::torq_hw;
 
 namespace mlir::syna::torq {
 
-static llvm::cl::opt<std::string> clTorqDescriptorDumpDir(
-    "torq-dump-descriptors-dir",
-    llvm::cl::desc("dump Torq API descriptors to the specified directory"), llvm::cl::init("")
-);
-
-// Shared with CompileNSSInvocationsPass, which uses the same flag to decide
-// whether to emit slice wait instructions.
+// Kept to generate HW test vectors: disables the asynchronous slice wait so the
+// emitted NSS program inserts an explicit wait after each slice start. Shared with
+// CompileNSSInvocationsPass, which reads the same flag to decide wait emission.
 llvm::cl::opt<bool> clDisableAsyncSliceWait(
     "torq-disable-async-slice-wait", llvm::cl::desc("Disable Asynchronous Slice Wait"),
     llvm::cl::init(false)
@@ -99,7 +95,7 @@ static void packSubByteIntegerValue(
 /// TorqHW serialization class
 class Serializer {
   public:
-    Serializer(iree_compiler::FlatbufferBuilder &builder, string dump_path);
+    Serializer(iree_compiler::FlatbufferBuilder &builder);
 
     LogicalResult serializeFunction(mlir::FunctionOpInterface funcOp);
 
@@ -138,29 +134,12 @@ class Serializer {
 
     flatbuffers_vec_ref_t createBuffersDebugInfoVector(mlir::FunctionOpInterface funcOp);
 
-    // add the given segment to the segments loaded by jobX in the hardware test vector dump
-    // this is required to ensure all buffers (including constants and code segments) required by
-    // the program are correctly loaded (torq_api will only dump things in the current job)
-    LogicalResult dumpSegmentDescriptor(
-        int jobId, bool xram, int address, const void *data, int size, bool isCode
-    );
-
     iree_compiler::FlatbufferBuilder &_builder;
     SmallVector<iree_hal_torq_Segment_ref_t> _segments;
     AddressResolver _addressResolver;
 
     int _nssBlockSize = 0;
     int _nssProgramCount = 0;
-
-    std::string _dump_path;
-
-    /// next id to use when dumping segment descriptors
-    int _codeSegmentDumpId{0};
-    int _constantSegmentDumpId{0};
-
-    /// temporary location where we store stuff that goes into job0/tv.init.mem.lst while
-    /// the file is still open by torq_api
-    std::string _segmentDumpInfo{};
 
     template <typename T>
     LogicalResult createISegment(
@@ -175,11 +154,6 @@ class Serializer {
         dataRef = flatbuffers_uint8_vec_create(
             builder, (const uint8_t *)dataVec.data(), data.getNumElements() * byteWidth
         );
-        if (!succeeded(dumpSegmentDescriptor(
-                0, true, xramAddress, dataVec.data(), data.getNumElements() * byteWidth, false
-            ))) {
-            return failure();
-        }
         return success();
     }
 
@@ -229,11 +203,6 @@ class Serializer {
         }
 
         dataRef = flatbuffers_uint8_vec_create(builder, dataVec.data(), dataVec.size());
-        if (!succeeded(
-                dumpSegmentDescriptor(0, true, xramAddress, dataVec.data(), dataVec.size(), false)
-            )) {
-            return failure();
-        }
         return success();
     }
 
@@ -248,11 +217,6 @@ class Serializer {
         vector<T> dataVec(totalSize);
         std::fill(dataVec.begin(), dataVec.end(), value);
         dataRef = flatbuffers_uint8_vec_create(builder, (const uint8_t *)dataVec.data(), totalSize);
-        if (!succeeded(dumpSegmentDescriptor(
-                0, true, xramAddress, (const uint8_t *)dataVec.data(), totalSize, false
-            ))) {
-            return failure();
-        }
         return success();
     }
 };
@@ -269,13 +233,6 @@ LogicalResult serializeTorqHW(mlir::ModuleOp moduleOp, DenseIntElementsAttr &bin
 
     auto dispatchName = getDispatchName(moduleOp);
 
-    std::string dump_path = "";
-
-    if (clTorqDescriptorDumpDir != "") {
-        std::filesystem::create_directory(clTorqDescriptorDumpDir.getValue());
-        dump_path = clTorqDescriptorDumpDir + "/" + dispatchName;
-    }
-
     if (clDisableAsyncSliceWait) {
         llvm::dbgs() << "\n***** Asynchronous Slice Wait is disabled *****\n\n";
     }
@@ -284,7 +241,7 @@ LogicalResult serializeTorqHW(mlir::ModuleOp moduleOp, DenseIntElementsAttr &bin
 
     iree_compiler::FlatbufferBuilder builder;
 
-    Serializer serializer(builder, dump_path);
+    Serializer serializer(builder);
 
     auto funcOps = llvm::to_vector(moduleOp.getOps<mlir::FunctionOpInterface>());
 
@@ -304,8 +261,7 @@ LogicalResult serializeTorqHW(mlir::ModuleOp moduleOp, DenseIntElementsAttr &bin
     return success();
 }
 
-Serializer::Serializer(iree_compiler::FlatbufferBuilder &builder, std::string dump_path)
-    : _builder(builder), _dump_path(dump_path) {}
+Serializer::Serializer(iree_compiler::FlatbufferBuilder &builder) : _builder(builder) {}
 
 LogicalResult Serializer::processGlobalOp(memref::GlobalOp &globalOp) {
 
@@ -413,12 +369,6 @@ Serializer::addSegment(uint32_t xramAddress, mlir::DenseIntOrFPElementsAttr data
                             ? computePackedSubByteIntegerSize(data.getNumElements(), bitWidth)
                             : torq::div_ceil(bitWidth, 8) * data.getNumElements();
 
-        if (!succeeded(dumpSegmentDescriptor(
-                0, true, xramAddress, data.getRawData().data(), dataSize, isCode
-            ))) {
-            return failure();
-        };
-
         _segments.push_back(iree_hal_torq_Segment_create(_builder, xramAddress, dataSize, dataRef));
 
         return success();
@@ -435,12 +385,6 @@ Serializer::addSegment(uint32_t xramAddress, mlir::DenseIntOrFPElementsAttr data
 
             auto size = computePackedSubByteIntegerSize(data.getNumElements(), bitWidth);
 
-            if (!succeeded(dumpSegmentDescriptor(
-                    0, true, xramAddress, data.getRawData().data(), size, isCode
-                ))) {
-                return failure();
-            };
-
             _segments.push_back(iree_hal_torq_Segment_create(_builder, xramAddress, size, dataRef));
             return success();
         }
@@ -449,12 +393,6 @@ Serializer::addSegment(uint32_t xramAddress, mlir::DenseIntOrFPElementsAttr data
 
         auto dataRef =
             flatbuffers_uint8_vec_create(_builder, (const uint8_t *)data.getRawData().data(), size);
-
-        if (!succeeded(
-                dumpSegmentDescriptor(0, true, xramAddress, data.getRawData().data(), size, isCode)
-            )) {
-            return failure();
-        };
 
         _segments.push_back(iree_hal_torq_Segment_create(_builder, xramAddress, size, dataRef));
 
@@ -636,75 +574,6 @@ LogicalResult Serializer::serializeDescriptor(torq_hl::DescriptorOp descriptorOp
     _segments.push_back(
         iree_hal_torq_Segment_create(_builder, codeAddr, codeDataRef.size(), dataRef)
     );
-
-    if (!_dump_path.empty()) {
-        if (!succeeded(dumpSegmentDescriptor(
-                0, true, codeAddr, codeDataRef.data(), codeDataRef.size(), true
-            ))) {
-            return failure();
-        }
-    }
-
-    return success();
-}
-
-LogicalResult Serializer::dumpSegmentDescriptor(
-    int jobId, bool xram, int address, const void *data, int size, bool isCode
-) {
-
-    if (_dump_path.empty())
-        return success();
-
-    std::string dump_dir = _dump_path + "/job" + std::to_string(jobId) + "/";
-
-    if (!std::filesystem::exists(dump_dir)) {
-        if (!std::filesystem::create_directory(dump_dir)) {
-            llvm::errs() << "Failed to create directory: " << dump_dir << "\n";
-            return failure();
-        }
-    }
-
-    std::string filename;
-
-    if (isCode) {
-        filename += "code." + std::to_string(_codeSegmentDumpId) + ".txt";
-        _codeSegmentDumpId++;
-    }
-    else {
-        filename += "constant." + std::to_string(_constantSegmentDumpId) + ".txt";
-        _constantSegmentDumpId++;
-    }
-
-    // dump the data as hex
-    std::ofstream wf(dump_dir + filename);
-    if (!wf.good()) {
-        return failure();
-    }
-
-    if (data) {
-        for (size_t i = 0; i < size; i++) {
-            wf << std::hex << std::setw(2) << std::setfill('0') << (int)((uint8_t *)data)[i]
-               << '\n';
-        }
-    }
-
-    wf.close();
-    if (!wf.good()) {
-        return failure();
-    }
-
-    // append the file name to the list of files in the corresponding mem.lst file
-    // we store it in a temporary variable because the dump file is still open by
-    // torq_api
-
-    std::ostringstream memListFile;
-
-    memListFile << (xram ? "xload" : "load");
-    memListFile << "  0x" << std::hex << std::setw(8) << std::setfill('0') << address;
-    memListFile << " " << std::dec << std::setw(10) << std::setfill(' ') << size;
-    memListFile << "   1  hex  " << filename << "\n";
-
-    _segmentDumpInfo += memListFile.str();
 
     return success();
 }
@@ -904,12 +773,6 @@ Serializer::serializeHostCode(mlir::FunctionOpInterface funcOp) {
     // no host code in this dispatch
     if (!hostCodeExecutableOp) {
         return flatbuffers_uint8_vec_create(_builder, nullptr, 0);
-    }
-
-    if (clTorqDescriptorDumpDir != "") {
-        llvm::errs(
-        ) << "This model requires host programs that are not supported in descriptor dumps\n";
-        return failure();
     }
 
     auto hostCodeExecutableBinaryOp =
@@ -1321,24 +1184,6 @@ LogicalResult Serializer::serializeFunction(mlir::FunctionOpInterface funcOp) {
             mapBindingOp.getIsWriteOnly()
         ));
     });
-
-    // write out the list of extra segments that need to be loaded in job0
-    if (!_dump_path.empty()) {
-
-        std::ofstream memListFile(_dump_path + "/job0/tv.init.mem.lst", std::ios_base::app);
-
-        if (!memListFile.good()) {
-            return failure();
-        }
-
-        memListFile << _segmentDumpInfo;
-
-        memListFile.close();
-
-        if (!memListFile.good()) {
-            return failure();
-        }
-    }
 
     // creates the top-level object
     auto codeRef =

@@ -4,7 +4,6 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "OpPatternOptions.h"
 #include "torq/Conversions/LinalgToTorqHL/MatchingFunctions.h"
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Conversions/LinalgToTorqHL/Patterns.h"
@@ -199,16 +198,6 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
         else if (isa<arith::MaximumFOp>(op) || isa<arith::MaxSIOp>(op) || isa<arith::MaxUIOp>(op) ||
                  isa<arith::MaxNumFOp>(op)) {
             opType = torq_hl::ElementwiseOpEnum::MAXIMUM;
-        }
-        // act based add/sub doesn't support non-alignment, and it should be conditioned by its cmd
-        // options
-        else if (clACTBasedSub && resultType.getElementType().isInteger(32) &&
-                 isa<arith::SubIOp>(op)) {
-            opType = torq_hl::ElementwiseOpEnum::SUB;
-        }
-        else if (clACTBasedAdd && resultType.getElementType().isInteger(32) &&
-                 isa<arith::AddIOp>(op)) {
-            opType = torq_hl::ElementwiseOpEnum::ADD;
         }
         else if (isa<arith::CmpFOp>(op)) {
             auto cmpFOp = dyn_cast<arith::CmpFOp>(op);

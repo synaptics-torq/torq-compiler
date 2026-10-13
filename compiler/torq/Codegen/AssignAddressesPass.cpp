@@ -58,12 +58,6 @@ static llvm::cl::opt<int> clXramStartAddress(
 // the used slice is resident. Functions that already fit are left untouched (both
 // transforms would split one shared load into more concurrent loads and can make
 // allocation worse).
-static llvm::cl::opt<bool> clFailureDrivenRecovery(
-    "torq-failure-driven-recovery",
-    llvm::cl::desc("In functions whose LRAM allocation would fail, revert load-CSE reuses and "
-                   "narrow read-only weight loads to reduce peak residency"),
-    llvm::cl::init(true)
-);
 
 llvm::cl::opt<int> clMaxNssProgramsSize(
     "torq-max-nss-programs-size", llvm::cl::desc("Size of the XRAM reserved for NSS programs"),
@@ -1447,7 +1441,7 @@ class RecoverLramResidencyPass : public impl::RecoverLramResidencyBase<RecoverLr
     void runOnOperation() override {
         auto funcOp = getOperation();
 
-        if (!clFailureDrivenRecovery || lramAllocationSucceeds(funcOp))
+        if (lramAllocationSucceeds(funcOp))
             return;
 
         revertSharedReadOnlyReuses(funcOp);

@@ -63,11 +63,6 @@
 
 using namespace mlir::iree_compiler;
 
-static llvm::cl::opt<bool> clDisableEliminateRedundantLramLoads(
-    "torq-disable-eliminate-redundant-lram-loads",
-    llvm::cl::desc("Disable the redundant-LRAM-load elimination pass"), llvm::cl::init(false)
-);
-
 namespace mlir::syna::torq {
 
 namespace {
@@ -441,9 +436,6 @@ class EliminateRedundantLramLoadsPass
     EliminateRedundantLramLoadsPass(const EliminateRedundantLramLoadsPass &) {}
 
     void runOnOperation() override {
-        if (clDisableEliminateRedundantLramLoads)
-            return;
-
         // lramSize (usable LRAM) = total LRAM minus the reserved NSS program pool,
         // matching the address allocator (AssignLramAddresses / VirtualMemory).
         int64_t lramSize =

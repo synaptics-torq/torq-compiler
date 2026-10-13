@@ -7,7 +7,6 @@
 #include "PassesDetail.h"
 #include "Patterns.h"
 
-#include "torq/Conversions/LinalgToTorqHL/OpPatternOptions.h"
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -24,11 +23,6 @@
 namespace mlir::syna::torq {
 
 namespace {
-
-static llvm::cl::opt<bool> clConvertMuli32Toi16(
-    "torq-convert-mul-i32-to-i16",
-    llvm::cl::desc("Force conversion of rescale-i32 + mul-i32 to i16"), llvm::cl::init(false)
-);
 
 // Check if a generic op is a mul operation (elementwise)
 static bool isMulOp(linalg::GenericOp genericOp) {
@@ -581,8 +575,7 @@ void convertRescaleI32ToI16ForMul(FunctionOpInterface funcOp, IRRewriter &rewrit
                 return;
             }
             // Verify rescale outputs fit in i16: (int9 × multiplier/shift) <= int16
-            // and proceed only if rescale is within range or if forced by option
-            if (!isRescaleSafeForI16(rescaleOp) && !clConvertMuli32Toi16) {
+            if (!isRescaleSafeForI16(rescaleOp)) {
                 LLVM_DEBUG({ llvm::dbgs() << "Rescale produces values exceeding i16 range\n"; });
                 return;
             }

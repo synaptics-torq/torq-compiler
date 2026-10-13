@@ -21,6 +21,9 @@
 
 namespace mlir::syna::torq {
 
+// Kept as a flag for debugging: bounds the number of operations per NSS program block, which
+// changes how the codegen partitions work across slices. The default (4) is what all normal
+// compiles use.
 static llvm::cl::opt<int> clNssBlockSize(
     "torq-nss-block-size",
     llvm::cl::desc("Select the max size of NSS program block in number of operations"),

@@ -55,17 +55,14 @@ using namespace mlir::iree_compiler;
 
 namespace mlir::syna::torq {
 
-static llvm::cl::opt<bool> clEnableCSSForHost(
-    "torq-css-host", llvm::cl::desc("Create CSS binaries suitable for running on the host"),
-    llvm::cl::init(false)
-);
-
 static llvm::cl::opt<bool> clKeepCssLinkingArtifacts(
     "torq-keep-css-linking-artifacts",
     llvm::cl::desc("Keep the artifacts generated during linking of CSS kernels"),
     llvm::cl::init(false)
 );
 
+// Kept for debugging: dump each CSS program as a standalone .elf so the linked
+// kernel can be inspected or run in isolation. No-op unless the dir is set.
 static llvm::cl::opt<std::string> clCreateCssSymbols(
     "torq-create-css-symbols",
     llvm::cl::desc("Store the symbols for all css programs in the specified directory"),
@@ -578,7 +575,7 @@ LogicalResult CompileCpuProgramsPass::compileAndLink(IREE::HAL::ExecutableVarian
 
     /* 0. Create an LLVM target suitable for the target */
 
-    bool hostBuild = variantOp.getTarget().getBackend() == "llvm-host" || clEnableCSSForHost;
+    bool hostBuild = variantOp.getTarget().getBackend() == "llvm-host";
 
     std::optional<IREE::HAL::LLVMTarget> maybeTarget;
 
@@ -707,6 +704,8 @@ LogicalResult CompileCpuProgramsPass::compileAndLink(IREE::HAL::ExecutableVarian
             return failure();
         }
 
+        // Debug aid: also link each CSS program as a standalone ELF and write it
+        // out so the kernel can be inspected/run in isolation.
         if (clCreateCssSymbols != "") {
 
             std::vector<uint8_t> elfVec;

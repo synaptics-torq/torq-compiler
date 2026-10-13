@@ -168,19 +168,6 @@ static llvm::cl::opt<TileAndFuseProducersFuseMode> clTorqTileAndFuseProducersFus
     llvm::cl::init(TileAndFuseProducersFuseMode::MaxProducers) // Default value
 );
 
-static llvm::cl::opt<unsigned> clTorqTileAndFuseDistanceLimit(
-    "torq-tile-and-fuse-distance-limit",
-    llvm::cl::desc("Limit the (linalg) distance of producers that are fused (use 0 for no limit)."),
-    llvm::cl::init(0) // Default value
-);
-
-static llvm::cl::opt<bool> clDisableFitShrinkReorder(
-    "torq-disable-fit-shrink-reorder",
-    llvm::cl::desc("Disable memory-aware domain ordering in fitTileToMemory's shrink pass "
-                   "(fall back to legacy tilingOrder shrinking)"),
-    llvm::cl::init(false) // Default value
-);
-
 const std::string TORQ_TNF_DISTANCE = "torq-tnf-distance";
 
 void setSourcesDistance(Operation *op, std::optional<int64_t> distance) {
@@ -1235,11 +1222,6 @@ TileFit TileAndFusePass::fitTileToMemory(
     ArrayRef<int64_t> iterDomainSizes, MutableArrayRef<OpFoldResult> offsets,
     MutableArrayRef<OpFoldResult> sizes
 ) {
-    if (clDisableFitShrinkReorder)
-        return fitTileToMemoryWithOrder(
-            consumerOp, producerOps, tilingInfo, iterDomainSizes, offsets, sizes, std::nullopt
-        );
-
     std::optional<SmallVector<int64_t>> channelFirstOrder =
         computeChannelFirstShrinkOrder(consumerOp, producerOps, tilingInfo, iterDomainSizes);
     if (!channelFirstOrder)
@@ -1336,7 +1318,6 @@ TileFit TileAndFusePass::fitTileToMemoryWithOrder(
     // Domain order: weight-bearing principals prioritize domains indexing the
     // larger of their activation and weight operands. Other matmul groups pick
     // the domain whose shrink removes the most group operand bytes first.
-    // --torq-disable-fit-shrink-reorder restores tilingOrder.
     //
     // The fallback pass continues from the first pass's all-minSize tile rather
     // than restarting from the full domain: that tile is already known not to
@@ -1353,7 +1334,7 @@ TileFit TileAndFusePass::fitTileToMemoryWithOrder(
         else {
             order.assign(tilingInfo.tilingOrder.begin(), tilingInfo.tilingOrder.end());
         }
-        if (!forcedShrinkOrder && !clDisableFitShrinkReorder) {
+        if (!forcedShrinkOrder) {
             if (std::optional<SmallVector<int64_t>> reordered = computeShrinkOrderByReduction(
                     consumerOp, producerOps, tilingInfo, iterDomainSizes, sizes, fallback
                 ))
@@ -1953,10 +1934,6 @@ FailureOr<scf::SCFTileAndFuseResult> TileAndFusePass::tileAndFuseToSize(
 
     options.setFusionControlFn(fusionControlFn);
     addTileAndFuseCleanupPatterns(&getContext(), options);
-
-    if (clTorqTileAndFuseDistanceLimit.getValue() != 0) {
-        setSourcesDistance(tilingInterfaceOp, clTorqTileAndFuseDistanceLimit.getValue());
-    }
 
     return scf::tileConsumerAndFuseProducersUsingSCF(rewriter, tilingInterfaceOp, options);
 }

@@ -68,7 +68,6 @@ iree_cc_library(
     Passes.h
     Passes.h.inc
     Patterns.h
-    OpPatternOptions.h
     QuantPatternUtils.h
   SRCS
     ${sources}
