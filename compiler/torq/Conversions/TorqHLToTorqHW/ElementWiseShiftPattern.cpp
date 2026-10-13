@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "Patterns.h"
+#include "torq/Utils/Kernel.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "llvm/Support/Debug.h"
@@ -60,7 +61,7 @@ LogicalResult ElementWiseShiftPattern::transform(
     // The difference between the two input addresses is used as offset in DEDR to fetch the data
     auto input1Address = GetAddressOp::create(rewriter, loc, op.getInput1()).getAddress();
     auto input2Address = GetAddressOp::create(rewriter, loc, op.getInput2()).getAddress();
-    auto inputDiff = getAffineDimExpr(1, ctx) - getAffineDimExpr(0, ctx);
+    auto inputDiff = startAddressDistance(ctx, op.getInput1(), op.getInput2());
 
     torq_hw::ACTMode actMode = torq_hw::ACTMode::ACT;
     torq_hw::RoundingMode rounding_mode = RoundingMode::OFF;

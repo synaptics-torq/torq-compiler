@@ -1088,7 +1088,7 @@ LData LData::stack(OpBuilder &builder, const LData &first, const LData &second, 
 
     auto ctx = builder.getContext();
     auto loc = builder.getUnknownLoc();
-    auto inputDiff = getAffineDimExpr(1, ctx) - getAffineDimExpr(0, ctx);
+    auto inputDiff = startAddressDistance(ctx, first.value(), second.value());
     LData stacked(first);
 
     // Add an additional dimension of size 2 at the beginning to represent the 2 input tensors
@@ -3951,6 +3951,12 @@ reshapeDim(LData &data, int dimIndex, const std::vector<int> &sizes, bool allowN
     }
 
     data.setShape(shape);
+}
+
+AffineExpr startAddressDistance(MLIRContext *ctx, Value first, Value second) {
+    int64_t offsetDiff = getMemRefTypeOffsetBytes(cast<MemRefType>(second.getType())) -
+                         getMemRefTypeOffsetBytes(cast<MemRefType>(first.getType()));
+    return getAffineDimExpr(1, ctx) - getAffineDimExpr(0, ctx) + offsetDiff;
 }
 
 GLData stack(OpBuilder &builder, const LData &first, LData &second, int axis) {

@@ -57,7 +57,7 @@ LogicalResult SelectPattern::transform(torq_hl::SelectOp op, PatternRewriter &re
 
     // Add an additional dimension of size 2 at the beginning to represent the 2 input tensors
     // The difference between the two input addresses is used as offset to fetch the data
-    auto inputDiff = getAffineDimExpr(1, ctx) - getAffineDimExpr(0, ctx);
+    auto inputDiff = startAddressDistance(ctx, op.getInput2(), op.getInput3());
     input.insertDim(In::InputTensors, {2, Stride(inputDiff)});
 
     int denseDims = std::min(input.denseDims(), output.denseDims());

@@ -1024,6 +1024,12 @@ int elementCount(const Shape &shape);
 // Return the largest exact divisor of value which is less than or equal to limit
 int maxDivisor(int value, int limit);
 
+// Returns the byte distance from the start of buffer `first` to the start of buffer `second`,
+// as an affine expression of their base addresses (d0 for `first`, d1 for `second`, from
+// torq_hw.get_address). The start of a memref view is its base address plus the offset of its
+// layout, so views with different offsets need the offset difference too.
+AffineExpr startAddressDistance(MLIRContext *ctx, Value first, Value second);
+
 // Join two data tensors along a new axis. Same as numpy.stack
 // The axis parameter specifies the index of the new axis in the dimensions of the result.
 // The operation is virtual in the sense that no data is actually moved
