@@ -168,6 +168,32 @@ static llvm::cl::opt<TileAndFuseProducersFuseMode> clTorqTileAndFuseProducersFus
     llvm::cl::init(TileAndFuseProducersFuseMode::MaxProducers) // Default value
 );
 
+// A relocation stores LRAM buffers to XRAM and loads them straight back. The
+// tile-fit probe accepts it, so it can choose a tile that fits only with that DMA.
+static llvm::cl::opt<bool> clProbeAvoidRelocation(
+    "torq-probe-avoid-relocation",
+    llvm::cl::desc("Prefer a tile whose LRAM plan does not relocate buffers when it needs "
+                   "only a few more tiles"),
+    llvm::cl::init(true)
+);
+
+// An extra tile costs a few kernel tasks. Relocating 6 KB per tile in the resnet50
+// conv5_block1_0_conv group on SL2610 costs less than that; the MobileNetV2 and YOLO groups
+// that gain on SR200 relocate 105 KB to 190 KB per tile.
+static llvm::cl::opt<unsigned> clProbeRelocationMinBytes(
+    "torq-probe-relocation-min-bytes",
+    llvm::cl::desc("Least bytes a tile must relocate before the probe looks for a tile that "
+                   "does not relocate"),
+    llvm::cl::init(32 * 1024)
+);
+
+static llvm::cl::opt<unsigned> clProbeRelocationMaxTileGrowth(
+    "torq-probe-relocation-max-tile-growth",
+    llvm::cl::desc("Most additional tiles, in percent, worth a tile whose LRAM plan does not "
+                   "relocate buffers"),
+    llvm::cl::init(25)
+);
+
 const std::string TORQ_TNF_DISTANCE = "torq-tnf-distance";
 
 void setSourcesDistance(Operation *op, std::optional<int64_t> distance) {
@@ -710,6 +736,12 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
     std::unique_ptr<PassManager> assignAddressesPipelineSharedSlices_;
     bool probeWithSharedSliceBuffers_ = false;
 
+    // Set while findRelocationFreeTile probes; the LRAM plan must not relocate.
+    bool probeRejectsRelocation_ = false;
+
+    // Bytes the LRAM plan of the last tile the probe accepted relocates.
+    int64_t lastFitRelocatedBytes_ = 0;
+
     // Holds all the untiled ops we have already tiled, so we don't tile them
     // again.
     llvm::DenseSet<Operation *> untiledTiledOps_;
@@ -768,6 +800,24 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
     );
 
     TileFit fitTileToMemory(
+        Operation *consumerOp, const SetVector<Operation *> &producerOps,
+        const TilingInfo &tilingInfo, ArrayRef<int64_t> iterDomainSizes,
+        MutableArrayRef<OpFoldResult> offsets, MutableArrayRef<OpFoldResult> sizes
+    );
+
+    FailureOr<std::optional<int64_t>> cutDomainWithoutRelocation(
+        ModuleOp moduleOp, const TilingInfo &tilingInfo, ArrayRef<int64_t> iterDomainSizes,
+        ArrayRef<OpFoldResult> offsets, SmallVectorImpl<OpFoldResult> &sizes, int64_t domain,
+        int64_t maxCount
+    );
+
+    FailureOr<std::optional<int64_t>> findRelocationFreeTile(
+        Operation *consumerOp, const SetVector<Operation *> &producerOps,
+        const TilingInfo &tilingInfo, ArrayRef<int64_t> iterDomainSizes,
+        ArrayRef<OpFoldResult> offsets, SmallVectorImpl<OpFoldResult> &sizes, int64_t maxCount
+    );
+
+    TileFit fitTileToMemoryAnyPlan(
         Operation *consumerOp, const SetVector<Operation *> &producerOps,
         const TilingInfo &tilingInfo, ArrayRef<int64_t> iterDomainSizes,
         MutableArrayRef<OpFoldResult> offsets, MutableArrayRef<OpFoldResult> sizes
@@ -851,9 +901,25 @@ TileAndFusePass::runAssignAddressesPipeline(ModuleOp moduleOp, bool optimizeForT
     return result;
 }
 
+// Bytes the LRAM plans of the functions in `moduleOp` relocate.
+static int64_t relocatedBytes(ModuleOp moduleOp) {
+    int64_t bytes = 0;
+    moduleOp.walk([&](FunctionOpInterface funcOp) {
+        if (auto attr = funcOp->getAttrOfType<IntegerAttr>(kLramPlanRelocatesAttr))
+            bytes += attr.getInt();
+    });
+    return bytes;
+}
+
 // NB: moduleOp is mutated by this function, and can't be used again.
 llvm::FailureOr<bool>
 TileAndFusePass::checkModuleFitsInMemory(ModuleOp moduleOp, bool optimizeForTileAndFuse) {
+    // Mark the module as a probe, so that AssignLramAddresses reports the bytes it
+    // relocates and, in a strict probe, rejects a plan that relocates.
+    moduleOp->setAttr(
+        kTileFitProbeAttr, BoolAttr::get(moduleOp->getContext(), probeRejectsRelocation_)
+    );
+
     bool failure = false;
     bool memoryOverflow = false;
 
@@ -921,6 +987,7 @@ TileAndFusePass::checkModuleFitsInMemory(ModuleOp moduleOp, bool optimizeForTile
 
     assert(!memoryOverflow && "this should have been captured above");
 
+    lastFitRelocatedBytes_ = relocatedBytes(moduleOp);
     return true;
 }
 
@@ -1213,11 +1280,234 @@ static int64_t countTiles(
     return count;
 }
 
+// The most tiles worth a tile whose LRAM plan does not relocate, for a tile of
+// `count` tiles that relocates. A relocation moves a whole tile buffer to XRAM and
+// back, so a few more tiles with their halo and weight reads cost less. Many more
+// tiles do not. 7 -> 8 tiles in the MobileNetV2 block 1 group on SR200 is worth it.
+// 14 -> 64 tiles in google_proxy_modelA on SR200 is not. The result rounds down, so
+// with the default 25% a tiling of 1 to 3 tiles keeps its relocation.
+static int64_t maxRelocationFreeTiles(int64_t count) {
+    return count * (100 + clProbeRelocationMaxTileGrowth) / 100;
+}
+
+// The size of `domain` that splits it into `factor` tiles, or 0 when none does.
+static int64_t tileSizeForFactor(
+    const TilingInfo &tilingInfo, int64_t domain, int64_t domainSize, int64_t factor
+) {
+    return tilingInfo.adjustSize[domain](div_ceil(domainSize, factor));
+}
+
+// The alignment worth keeping for a tile of `size`: the largest power of 2 that divides
+// it, up to 4. Kernels process rows in blocks of 4 (the WRAM transpose height) and
+// handle a remainder with an extra, slower task in every tile.
+static int64_t tileAlignment(int64_t size) { return std::min<int64_t>(4, size & -size); }
+
+// The sizes to try for a tile count whose smallest size is `smallest`: first the
+// smallest size with `alignment` that gives the same count, then `smallest` itself.
+static SmallVector<int64_t, 2> candidateTileSizes(
+    const TilingInfo &tilingInfo, int64_t domain, int64_t domainSize, int64_t smallest,
+    int64_t alignment
+) {
+    int64_t aligned = div_ceil(smallest, alignment) * alignment;
+    bool sameCount = div_ceil(domainSize, aligned) == div_ceil(domainSize, smallest);
+    if (aligned != smallest && sameCount && tilingInfo.adjustSize[domain](aligned) == aligned)
+        return {aligned, smallest};
+    return {smallest};
+}
+
+// The sizes to try for `domain` of `sizes`, largest first: for 1, 2, ... more tiles in
+// that domain, the candidates of candidateTileSizes, while the whole tiling has at most
+// `maxCount` tiles. A larger size never has more tiles, so the order is also by tile count,
+// and for one count the aligned size comes first.
+static SmallVector<int64_t> relocationFreeCandidateSizes(
+    const TilingInfo &tilingInfo, ArrayRef<int64_t> iterDomainSizes, ArrayRef<OpFoldResult> sizes,
+    int64_t domain, int64_t maxCount
+) {
+    std::optional<int64_t> constSize = getConstantIntValue(sizes[domain]);
+    assert(constSize && *constSize > 0 && "a fitted tile has a positive constant size");
+    int64_t size = *constSize;
+    int64_t domainSize = iterDomainSizes[domain];
+    // Tiles in the other domains: the whole tiling has this many times the tiles of `domain`.
+    int64_t otherTiles = countTiles(TileFit::FitsShrunk, sizes, tilingInfo, iterDomainSizes) /
+                         div_ceil(domainSize, size);
+
+    SmallVector<int64_t> candidates;
+    // adjustSize rounds down, so several factors can give the same size, one after the
+    // other. Probe each size once.
+    int64_t previous = 0;
+    for (int64_t factor = div_ceil(domainSize, size) + 1; factor <= domainSize; ++factor) {
+        int64_t smallest = tileSizeForFactor(tilingInfo, domain, domainSize, factor);
+        if (smallest == 0 || smallest >= size || smallest == previous)
+            continue;
+        previous = smallest;
+        // candidateTileSizes keeps the count of `smallest`, so this bounds every candidate.
+        if (otherTiles * div_ceil(domainSize, smallest) > maxCount)
+            break;
+        llvm::append_range(
+            candidates,
+            candidateTileSizes(tilingInfo, domain, domainSize, smallest, tileAlignment(size))
+        );
+    }
+    // adjustSize can round the sizes of two factors out of order; the binary search in
+    // cutDomainWithoutRelocation needs them sorted.
+    llvm::sort(candidates, std::greater<int64_t>());
+    candidates.erase(llvm::unique(candidates), candidates.end());
+    return candidates;
+}
+
+// Cut `domain` of `sizes` into more tiles, as few as possible, until the probe
+// places the tile without relocating buffers. Stop at `maxCount` tiles. Return the
+// tile count, nullopt when no such tile fits, or failure when the probe breaks.
+// `sizes` holds the tile on success.
+//
+// A smaller tile needs less LRAM, so whether a tile fits without relocation is
+// (almost) monotonic in its size. Binary search the largest candidate that fits: about
+// log2 probes instead of one per candidate, which matters when the tiling has many
+// tiles. Where it is not monotonic, the search can return a tile with more tiles than
+// needed, but always one that the strict probe accepted.
+FailureOr<std::optional<int64_t>> TileAndFusePass::cutDomainWithoutRelocation(
+    ModuleOp moduleOp, const TilingInfo &tilingInfo, ArrayRef<int64_t> iterDomainSizes,
+    ArrayRef<OpFoldResult> offsets, SmallVectorImpl<OpFoldResult> &sizes, int64_t domain,
+    int64_t maxCount
+) {
+    SmallVector<int64_t> candidates =
+        relocationFreeCandidateSizes(tilingInfo, iterDomainSizes, sizes, domain, maxCount);
+    if (candidates.empty())
+        return std::optional<int64_t>();
+
+    Builder builder(moduleOp->getContext());
+    auto fitsWithoutRelocation = [&](size_t index) {
+        sizes[domain] = builder.getIndexAttr(candidates[index]);
+        return checkTileFitsInMemory(moduleOp, tilingInfo, offsets, sizes);
+    };
+
+    // The smallest candidate first: when it does not fit, no candidate does.
+    size_t low = 0;
+    size_t high = candidates.size() - 1;
+    FailureOr<bool> fits = fitsWithoutRelocation(high);
+    if (failed(fits))
+        return failure();
+    if (!*fits)
+        return std::optional<int64_t>();
+
+    // candidates[high] fits; the candidates before `low` do not.
+    while (low < high) {
+        size_t mid = low + (high - low) / 2;
+        fits = fitsWithoutRelocation(mid);
+        if (failed(fits))
+            return failure();
+        if (*fits)
+            high = mid;
+        else
+            low = mid + 1;
+    }
+    sizes[domain] = builder.getIndexAttr(candidates[high]);
+    return std::optional<int64_t>(
+        countTiles(TileFit::FitsShrunk, sizes, tilingInfo, iterDomainSizes)
+    );
+}
+
+// The domains the relocation-free search may cut: the tiled domains except the output
+// channels of the group's weight-bearing principal op. A channel tile reads the whole
+// activation again and leaves a partial channel vector in every tile. Empty when the
+// channel domain is ambiguous, so that no channel is cut.
+static SmallVector<int64_t> relocationFreeSearchDomains(
+    Operation *consumerOp, const SetVector<Operation *> &producerOps, const TilingInfo &tilingInfo,
+    ArrayRef<int64_t> iterDomainSizes
+) {
+    FailureOr<std::optional<int64_t>> channel =
+        findPrincipalChannelDomain(consumerOp, producerOps, tilingInfo, iterDomainSizes);
+    if (failed(channel))
+        return {};
+    // nullopt when the group has no output-channel domain to skip
+    std::optional<int64_t> channelDomain = *channel;
+    SmallVector<int64_t> domains;
+    for (int64_t domain : tilingInfo.tilingOrder)
+        if (domain != channelDomain)
+            domains.push_back(domain);
+    return domains;
+}
+
+// Find the tile with the fewest tiles, at most `maxCount`, that cuts one domain of
+// `sizes` further and that the probe places without relocating buffers. Return the
+// tile count, nullopt when there is none, or failure when the probe breaks. `sizes`
+// holds the tile on success.
+FailureOr<std::optional<int64_t>> TileAndFusePass::findRelocationFreeTile(
+    Operation *consumerOp, const SetVector<Operation *> &producerOps, const TilingInfo &tilingInfo,
+    ArrayRef<int64_t> iterDomainSizes, ArrayRef<OpFoldResult> offsets,
+    SmallVectorImpl<OpFoldResult> &sizes, int64_t maxCount
+) {
+    OwningOpRef<ModuleOp> moduleOp = extractOpsForMemoryCheck(
+        "fit_tile_to_memory", cast<TilingInterface>(consumerOp), tilingInfo, producerOps
+    );
+    if (failed(tileModuleForMemoryCheck(*moduleOp, tilingInfo, iterDomainSizes.size())))
+        return failure();
+    probeRejectsRelocation_ = true;
+    llvm::scope_exit allowRelocation([&] { probeRejectsRelocation_ = false; });
+
+    std::optional<int64_t> bestCount;
+    SmallVector<OpFoldResult> bestSizes;
+    for (int64_t domain :
+         relocationFreeSearchDomains(consumerOp, producerOps, tilingInfo, iterDomainSizes)) {
+        SmallVector<OpFoldResult> candidate(sizes.begin(), sizes.end());
+        FailureOr<std::optional<int64_t>> count = cutDomainWithoutRelocation(
+            *moduleOp, tilingInfo, iterDomainSizes, offsets, candidate, domain,
+            bestCount ? *bestCount - 1 : maxCount
+        );
+        if (failed(count))
+            return failure();
+        if (!*count)
+            continue;
+        bestCount = *count;
+        bestSizes = std::move(candidate);
+    }
+    if (bestCount)
+        llvm::copy(bestSizes, sizes.begin());
+    return bestCount;
+}
+
+// Find a tile for `consumerOp` that the memory probe accepts, and write it to
+// `sizes`. Prefer a tile whose LRAM plan does not relocate buffers, if it needs
+// only a few more tiles than the largest tile the probe accepts.
+TileFit TileAndFusePass::fitTileToMemory(
+    Operation *consumerOp, const SetVector<Operation *> &producerOps, const TilingInfo &tilingInfo,
+    ArrayRef<int64_t> iterDomainSizes, MutableArrayRef<OpFoldResult> offsets,
+    MutableArrayRef<OpFoldResult> sizes
+) {
+    TileFit fit = fitTileToMemoryAnyPlan(
+        consumerOp, producerOps, tilingInfo, iterDomainSizes, offsets, sizes
+    );
+    // The returned tile is the last one the probe accepted.
+    // A small relocation costs less than the extra tile, see clProbeRelocationMinBytes.
+    if (!clProbeAvoidRelocation || fit != TileFit::FitsShrunk || lastFitRelocatedBytes_ == 0 ||
+        lastFitRelocatedBytes_ < clProbeRelocationMinBytes)
+        return fit;
+
+    int64_t count = countTiles(fit, sizes, tilingInfo, iterDomainSizes);
+    SmallVector<OpFoldResult> strictSizes(sizes.begin(), sizes.end());
+    FailureOr<std::optional<int64_t>> strictCount = findRelocationFreeTile(
+        consumerOp, producerOps, tilingInfo, iterDomainSizes, offsets, strictSizes,
+        maxRelocationFreeTiles(count)
+    );
+    // The relocating tile is valid, so a broken strict probe keeps it.
+    if (failed(strictCount)) {
+        LLVM_DEBUG(llvm::dbgs() << "relocation-free probe failed, keeping the tile\n");
+        return fit;
+    }
+    LLVM_DEBUG({
+        llvm::dbgs() << "relocating tile: " << count << " tiles, relocation-free: "
+                     << (*strictCount ? std::to_string(**strictCount) : "none") << "\n";
+    });
+    if (*strictCount)
+        llvm::copy(strictSizes, sizes.begin());
+    return fit;
+}
+
 // Find a tile for `consumerOp` that the memory probe accepts, and write it to
 // `sizes`. If the first tile is too big, shrink every domain to its minimum,
 // then grow them back with binary search, as far as they still fit. See TileFit
 // for the return values. NoFit is a normal answer, not an error.
-TileFit TileAndFusePass::fitTileToMemory(
+TileFit TileAndFusePass::fitTileToMemoryAnyPlan(
     Operation *consumerOp, const SetVector<Operation *> &producerOps, const TilingInfo &tilingInfo,
     ArrayRef<int64_t> iterDomainSizes, MutableArrayRef<OpFoldResult> offsets,
     MutableArrayRef<OpFoldResult> sizes
@@ -1234,6 +1524,7 @@ TileFit TileAndFusePass::fitTileToMemory(
     TileFit heuristicFit = fitTileToMemoryWithOrder(
         consumerOp, producerOps, tilingInfo, iterDomainSizes, offsets, sizes, std::nullopt
     );
+    int64_t heuristicRelocatedBytes = lastFitRelocatedBytes_;
 
     // Both strategies return the unchanged full tile, so avoid a redundant
     // module clone and memory probe in the common no-tiling case.
@@ -1267,6 +1558,8 @@ TileFit TileAndFusePass::fitTileToMemory(
         llvm::copy(channelSizes, sizes.begin());
         return channelFit;
     }
+    // the channel-first search ran last; report the plan of the heuristic tile
+    lastFitRelocatedBytes_ = heuristicRelocatedBytes;
     return heuristicFit;
 }
 

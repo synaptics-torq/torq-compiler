@@ -87,6 +87,15 @@ std::optional<llvm::SmallVector<int64_t>> computeChannelFirstShrinkOrder(
     const TilingInfo &tilingInfo, llvm::ArrayRef<int64_t> iterDomainSizes
 );
 
+// The root domain of the output channels of the group's weight-bearing principal op,
+// matched by its static extent. nullopt when the group has no such op, or when no root
+// domain has the channel extent. Failure when the channel is ambiguous: several
+// parallel domains index the weight, or several root domains have the channel extent.
+llvm::FailureOr<std::optional<int64_t>> findPrincipalChannelDomain(
+    mlir::Operation *consumerOp, const llvm::SetVector<mlir::Operation *> &producerOps,
+    const TilingInfo &tilingInfo, llvm::ArrayRef<int64_t> iterDomainSizes
+);
+
 // Compute the order in which fitTileToMemory's shrink pass should cut domains.
 // Weight-bearing operations prioritize domains indexing the larger of the
 // principal op's activation and weight operands. Other matmuls prioritize the

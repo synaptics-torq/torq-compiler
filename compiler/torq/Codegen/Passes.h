@@ -20,6 +20,15 @@ namespace mlir::syna::torq {
 // TileAndFusePass as an indicating that a smaller tile is needed.
 extern const std::string OUT_OF_MEMORY_MESSAGE;
 
+// Set by TileAndFusePass on every tile-fit probe module. AssignLramAddressesPass then
+// records the bytes an LRAM plan relocates (kLramPlanRelocatesAttr). When true, it also
+// rejects an LRAM plan that relocates buffers, as if the tile did not fit.
+inline constexpr llvm::StringLiteral kTileFitProbeAttr = "torq.tile_fit_probe";
+
+// Set by AssignLramAddressesPass on a function of a tile-fit probe whose LRAM plan
+// relocates buffers, to the number of bytes it relocates. Never set outside a probe.
+inline constexpr llvm::StringLiteral kLramPlanRelocatesAttr = "torq.lram_plan_relocates";
+
 //===---------------------------------------------------------------------===//
 // TORQ passes
 //===---------------------------------------------------------------------===//

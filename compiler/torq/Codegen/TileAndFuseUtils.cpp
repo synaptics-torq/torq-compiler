@@ -189,6 +189,56 @@ findWeightedPrincipal(Operation *consumerOp, const SetVector<Operation *> &produ
     return principal;
 }
 
+// The parallel domain of `op` that indexes its weight (DPS input 1): nullopt when there
+// is none, failure when there are several.
+static FailureOr<std::optional<int64_t>> weightChannelDomain(linalg::LinalgOp op) {
+    AffineMap weightMap = op.getMatchingIndexingMap(op.getDpsInputOperand(1));
+    std::optional<int64_t> channel;
+    for (auto [domain, iteratorType] : llvm::enumerate(op.getIteratorTypesArray())) {
+        if (iteratorType != utils::IteratorType::parallel)
+            continue;
+        int64_t domainIndex = domain;
+        bool indexesWeight = llvm::any_of(weightMap.getResults(), [&](AffineExpr expr) {
+            return expr.isFunctionOfDim(domainIndex);
+        });
+        if (!indexesWeight)
+            continue;
+        if (channel)
+            return failure();
+        channel = domainIndex;
+    }
+    return channel;
+}
+
+// The domain in `tilingOrder` whose size is `extent`: nullopt when there is none,
+// failure when there are several.
+static FailureOr<std::optional<int64_t>>
+domainWithExtent(const TilingInfo &tilingInfo, ArrayRef<int64_t> iterDomainSizes, int64_t extent) {
+    std::optional<int64_t> match;
+    for (int64_t domain : tilingInfo.tilingOrder) {
+        if (iterDomainSizes[domain] != extent)
+            continue;
+        if (match)
+            return failure();
+        match = domain;
+    }
+    return match;
+}
+
+FailureOr<std::optional<int64_t>> findPrincipalChannelDomain(
+    Operation *consumerOp, const SetVector<Operation *> &producerOps, const TilingInfo &tilingInfo,
+    ArrayRef<int64_t> iterDomainSizes
+) {
+    std::optional<WeightedPrincipal> principal = findWeightedPrincipal(consumerOp, producerOps);
+    if (!principal)
+        return std::optional<int64_t>();
+    FailureOr<std::optional<int64_t>> channel = weightChannelDomain(principal->op);
+    if (failed(channel) || !*channel)
+        return channel;
+    int64_t extent = principal->op.getStaticLoopRanges()[**channel];
+    return domainWithExtent(tilingInfo, iterDomainSizes, extent);
+}
+
 std::optional<SmallVector<int64_t>> computeChannelFirstShrinkOrder(
     Operation *consumerOp, const SetVector<Operation *> &producerOps, const TilingInfo &tilingInfo,
     ArrayRef<int64_t> iterDomainSizes
@@ -199,46 +249,14 @@ std::optional<SmallVector<int64_t>> computeChannelFirstShrinkOrder(
     if (hasBroadcastBatchMatmul(consumerOp, producerOps))
         return std::nullopt;
 
-    std::optional<WeightedPrincipal> principal = findWeightedPrincipal(consumerOp, producerOps);
-    if (!principal)
+    FailureOr<std::optional<int64_t>> rootChannel =
+        findPrincipalChannelDomain(consumerOp, producerOps, tilingInfo, iterDomainSizes);
+    if (failed(rootChannel) || !*rootChannel)
         return std::nullopt;
 
-    SmallVector<int64_t> ranges = principal->op.getStaticLoopRanges();
-    SmallVector<utils::IteratorType> iteratorTypes = principal->op.getIteratorTypesArray();
-    AffineMap weightMap = principal->op.getMatchingIndexingMap(principal->op.getDpsInputOperand(1));
-
-    std::optional<int64_t> principalChannel;
-    for (auto [domain, iteratorType] : llvm::enumerate(iteratorTypes)) {
-        if (iteratorType != utils::IteratorType::parallel)
-            continue;
-        int64_t domainIndex = domain;
-        bool indexesWeight = llvm::any_of(weightMap.getResults(), [&](AffineExpr expr) {
-            return expr.isFunctionOfDim(domainIndex);
-        });
-        if (!indexesWeight)
-            continue;
-        if (principalChannel)
-            return std::nullopt;
-        principalChannel = domain;
-    }
-    if (!principalChannel)
-        return std::nullopt;
-
-    std::optional<int64_t> rootChannel;
-    int64_t channelExtent = ranges[*principalChannel];
-    for (int64_t domain : tilingInfo.tilingOrder) {
-        if (iterDomainSizes[domain] != channelExtent)
-            continue;
-        if (rootChannel)
-            return std::nullopt;
-        rootChannel = domain;
-    }
-    if (!rootChannel)
-        return std::nullopt;
-
-    SmallVector<int64_t> order{*rootChannel};
+    SmallVector<int64_t> order{**rootChannel};
     for (int64_t domain : tilingInfo.tilingOrder)
-        if (domain != *rootChannel)
+        if (domain != **rootChannel)
             order.push_back(domain);
     return order;
 }

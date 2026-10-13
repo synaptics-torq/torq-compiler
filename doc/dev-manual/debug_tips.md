@@ -175,6 +175,18 @@
     tensor, or a single slice of it. This replaces one small strided copy per element with a few
     contiguous copies. Value-preserving; use ``disable`` to compare or to rule the rewrite out.
 
+  - ``--torq-probe-avoid-relocation`` (default on): when the tile that the tile-fit probe picks
+    fits only by relocating LRAM buffers (storing them to XRAM and loading them straight back),
+    look for a slightly smaller tile that needs no relocation. Turn it off to compare with the
+    relocating tile.
+
+  - ``--torq-probe-relocation-min-bytes=<N>`` (default 32768): the least bytes a tile must
+    relocate before that search runs. A smaller relocation costs less than an extra tile.
+
+  - ``--torq-probe-relocation-max-tile-growth=<P>`` (default 25): the most additional tiles, in
+    percent, accepted for a tile without relocation. The limit rounds down, so a tiling of 1 to
+    3 tiles keeps its relocation.
+
   - To see all supported Torq flags, run:
 
     ```{code} shell

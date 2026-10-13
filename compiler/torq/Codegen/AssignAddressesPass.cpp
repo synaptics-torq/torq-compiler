@@ -770,13 +770,44 @@ planPlacement(ArrayRef<LramBuffer> buffers, int64_t usable, bool replan) {
     return std::nullopt;
 }
 
+// Bytes of the buffers that `swaps`, scheduled at one op, swap out and back in there.
+static int64_t bytesSwappedOutAndIn(ArrayRef<Swap> swaps) {
+    llvm::DenseSet<Value> swappedOut;
+    int64_t bytes = 0;
+    for (const Swap &swap : swaps) {
+        if (swap.kind == Swap::Kind::Out)
+            swappedOut.insert(swap.buffer);
+        else if (swappedOut.contains(swap.buffer))
+            bytes += getEncodedTotalSizeBytes(cast<MemRefType>(swap.buffer.getType()));
+    }
+    return bytes;
+}
+
+// Bytes that `schedule` stores to XRAM only to load them straight back, at the same
+// op. A spill reloads its buffer at a later op.
+static int64_t relocatedBytes(const SwapSchedule &schedule) {
+    int64_t bytes = 0;
+    for (const auto &opSwaps : schedule)
+        bytes += bytesSwappedOutAndIn(opSwaps.second);
+    return bytes;
+}
+
+// The tile-fit probe mark of the module of `funcOp`: null outside a probe, true in a
+// strict probe.
+static BoolAttr getTileFitProbeAttr(FunctionOpInterface funcOp) {
+    auto moduleOp = funcOp->getParentOfType<ModuleOp>();
+    return moduleOp ? moduleOp->getAttrOfType<BoolAttr>(kTileFitProbeAttr) : BoolAttr();
+}
+
 // Lay out every LRAM allocation over its whole lifetime; when that does not fit, schedule
 // swaps and perform them with convertVirtualToPhysicalMemRefs, which places the buffers it
 // swaps in where the plan put them. Infeasibility (the buffers pinned at some op cannot
 // coexist) fails without a diagnostic, so runOnOperation emits the OUT_OF_MEMORY_MESSAGE
 // tile-and-fuse's probe shrinks the tile on; any other diagnostic aborts the compile.
-static LogicalResult
-allocateLramAddresses(FunctionOpInterface funcOp, bool replan, int64_t lramSize = 0) {
+// Without `allowRelocation`, a plan that relocates buffers fails the same way.
+static LogicalResult allocateLramAddresses(
+    FunctionOpInterface funcOp, bool replan, bool allowRelocation, int64_t lramSize = 0
+) {
 
     // we reserve space for two NSS programs at the begininng of LRAM
     // (one block for the currently executing program and one for the
@@ -792,6 +823,17 @@ allocateLramAddresses(FunctionOpInterface funcOp, bool replan, int64_t lramSize 
     }
     if (placement->schedule.empty()) {
         return commitLramLayout(funcOp, reservedBase, buffers, placement->birthOffsets);
+    }
+    if (int64_t bytes = relocatedBytes(placement->schedule)) {
+        if (!allowRelocation) {
+            LLVM_DEBUG(llvm::dbgs() << "LRAM plan relocates buffers, rejected\n");
+            return failure();
+        }
+        // tell the tile-fit probe; never mark the IR of a real compile
+        if (getTileFitProbeAttr(funcOp)) {
+            Builder builder(funcOp->getContext());
+            funcOp->setAttr(kLramPlanRelocatesAttr, builder.getI64IntegerAttr(bytes));
+        }
     }
 
     if (failed(convertVirtualToPhysicalMemRefs(
@@ -1353,7 +1395,9 @@ static bool lramAllocationSucceeds(FunctionOpInterface funcOp) {
         );
         // without re-planning, so recovery applies whenever the plain plan fails and
         // re-planning handles what the recovered IR still cannot place
-        ok = succeeded(allocateLramAddresses(cast<FunctionOpInterface>(clone), false));
+        ok = succeeded(allocateLramAddresses(
+            cast<FunctionOpInterface>(clone), /*replan=*/false, /*allowRelocation=*/true
+        ));
     }
     clone->erase();
     return ok;
@@ -1447,7 +1491,10 @@ class AssignLramAddressesPass : public impl::AssignLramAddressesBase<AssignLramA
                 }
             );
 
-            result = allocateLramAddresses(funcOp, replan, lramSize);
+            // only a strict tile-fit probe rejects relocations; it never re-plans
+            BoolAttr probe = getTileFitProbeAttr(funcOp);
+            bool allowRelocation = replan || !probe || !probe.getValue();
+            result = allocateLramAddresses(funcOp, replan, allowRelocation, lramSize);
         } // destruct diagHandler;
 
         if (failed(result)) {
