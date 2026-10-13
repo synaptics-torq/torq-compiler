@@ -7,6 +7,7 @@
 
 #include "PassesDetail.h"
 
+#include "torq/Codegen/LramAddressSpace.h"
 #include "torq/Codegen/LramAllocation.h"
 #include "torq/Codegen/Pool.h"
 #include "torq/Codegen/VirtualMemory.h"
@@ -26,7 +27,6 @@
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/BitVector.h"
-#include "llvm/ADT/IntervalMap.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
@@ -336,65 +336,11 @@ struct ForcedCompaction {
 
 namespace {
 
-// A two-ended address space over [0, usable): blocks smaller than largeBufferBytes place
-// bottom-up and the rest top-down (the Pool allocator's policy), so the small buffers
-// churning between the large ones never fragment the space the large ones need.
-class AddressSpace {
-    static constexpr int64_t largeBufferBytes = 8 * 1024;
-
-    // the free ranges; IntervalMap merges adjacent ones on insert, so release() never has to
-    using FreeRanges = llvm::IntervalMap<int64_t, char, 16, llvm::IntervalMapHalfOpenInfo<int64_t>>;
-    FreeRanges::Allocator allocator_;
-    FreeRanges free_;
-
-    // Remove [offset, offset + size), which lies at one end of `range`, from it.
-    static void claim(FreeRanges::iterator &range, int64_t offset, int64_t size) {
-        if (range.stop() - range.start() == size) {
-            range.erase();
-        }
-        else if (offset == range.start()) {
-            range.setStart(offset + size);
-        }
-        else {
-            range.setStop(offset);
-        }
-    }
-
-  public:
-    explicit AddressSpace(int64_t usable) : free_(allocator_) { free_.insert(0, usable, 0); }
-
-    // Returns the placed offset, or -1 if no free range fits `size`.
-    int64_t allocate(int64_t size) {
-        if (size < largeBufferBytes) {
-            for (auto it = free_.begin(); it != free_.end(); ++it) {
-                if (it.stop() - it.start() >= size) {
-                    int64_t offset = it.start();
-                    claim(it, offset, size);
-                    return offset;
-                }
-            }
-        }
-        else {
-            for (auto it = free_.end(); it != free_.begin();) {
-                --it;
-                if (it.stop() - it.start() >= size) {
-                    int64_t offset = it.stop() - size;
-                    claim(it, offset, size);
-                    return offset;
-                }
-            }
-        }
-        return -1;
-    }
-
-    void release(int64_t offset, int64_t size) { free_.insert(offset, offset + size, 0); }
-};
-
 // The buffers resident in an address space: which ones, at what offset, how many bytes.
 class Occupancy {
     ArrayRef<LramBuffer> buffers_;
     const int64_t usable_;
-    AddressSpace space_;
+    LramAddressSpace space_;
     llvm::BitVector resident_;
     SmallVector<int64_t> offsets_;
     SmallVector<int64_t> birthOffsets_;
@@ -829,13 +775,15 @@ planPlacement(ArrayRef<LramBuffer> buffers, int64_t usable, bool replan) {
 // swaps in where the plan put them. Infeasibility (the buffers pinned at some op cannot
 // coexist) fails without a diagnostic, so runOnOperation emits the OUT_OF_MEMORY_MESSAGE
 // tile-and-fuse's probe shrinks the tile on; any other diagnostic aborts the compile.
-static LogicalResult allocateLramAddresses(FunctionOpInterface funcOp, bool replan) {
+static LogicalResult
+allocateLramAddresses(FunctionOpInterface funcOp, bool replan, int64_t lramSize = 0) {
 
     // we reserve space for two NSS programs at the begininng of LRAM
     // (one block for the currently executing program and one for the
     // next program to be executed that will be loaded by the current one)
     int64_t reservedBase = HwInfo::nss_max_program_size * 2;
-    const int64_t usable = TorqHw::get().getLramSize() - reservedBase;
+    int64_t poolSize = lramSize > 0 ? lramSize : static_cast<int64_t>(TorqHw::get().getLramSize());
+    const int64_t usable = poolSize - reservedBase;
 
     SmallVector<LramBuffer> buffers = collectLramBuffers(funcOp);
     std::optional<Placement> placement = planPlacement(buffers, usable, replan);
@@ -1455,6 +1403,7 @@ class AssignLramAddressesPass : public impl::AssignLramAddressesBase<AssignLramA
     AssignLramAddressesPass(const AssignLramAddressesPass &pass) {}
     AssignLramAddressesPass(const AssignLramAddressesOptions &options) {
         this->replan = options.replan;
+        this->lramSize = options.lramSize;
     }
 
     // TODO(sflur): except for the emitError below, that tile-and-fuse expects,
@@ -1498,7 +1447,7 @@ class AssignLramAddressesPass : public impl::AssignLramAddressesBase<AssignLramA
                 }
             );
 
-            result = allocateLramAddresses(funcOp, replan);
+            result = allocateLramAddresses(funcOp, replan, lramSize);
         } // destruct diagHandler;
 
         if (failed(result)) {
@@ -1554,8 +1503,9 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createRecoverLramResidencyPa
     return std::make_unique<RecoverLramResidencyPass>();
 }
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignLramAddressesPass(bool replan) {
-    return std::make_unique<AssignLramAddressesPass>(AssignLramAddressesOptions{replan});
+std::unique_ptr<InterfacePass<FunctionOpInterface>>
+createAssignLramAddressesPass(bool replan, int64_t lramSize) {
+    return std::make_unique<AssignLramAddressesPass>(AssignLramAddressesOptions{replan, lramSize});
 }
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignDtcmItcmXramAddressesPass() {

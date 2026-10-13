@@ -305,20 +305,7 @@ void addNssUpToAssignLramAddresses(
         }
     }
 
-    if (!clFromPreBufferizedIR) {
-        funcPm.addPass(createAddDeallocationPass());
-    }
-
-    // Only the real pipeline recovers: a probe throws its result away, so the DMA this
-    // costs would buy nothing there and would hide it from the tile choice.
-    if (isRealPipeline) {
-        funcPm.addPass(createRecoverLramResidencyPass());
-        funcPm.addPass(createPrefetchConstantLoadsPass());
-    }
-
-    // assign addresses to all allocations; the probe gets no re-planning for the same
-    // reason it gets no recovery
-    funcPm.addPass(createAssignLramAddressesPass(/*replan=*/isRealPipeline));
+    addNssLramAllocationPasses(funcPm, isRealPipeline);
 }
 
 void addNssPostAssignLramAddressesPasses(OpPassManager &pm) {
@@ -639,6 +626,23 @@ void addPassesPostTileAndFuseUpToAssignLramAddresses(
     }
 
     addNssUpToAssignLramAddresses(pipeline, optimizeForTileAndFuse, isRealPipeline);
+}
+
+void addNssLramAllocationPasses(OpPassManager &funcPm, bool isRealPipeline, int64_t lramSize) {
+    if (!clFromPreBufferizedIR) {
+        funcPm.addPass(createAddDeallocationPass());
+    }
+
+    // Only the real pipeline recovers: a probe throws its result away, so the DMA this
+    // costs would buy nothing there and would hide it from the tile choice.
+    if (isRealPipeline) {
+        funcPm.addPass(createRecoverLramResidencyPass());
+        funcPm.addPass(createPrefetchConstantLoadsPass());
+    }
+
+    // assign addresses to all allocations; the probe gets no re-planning for the same
+    // reason it gets no recovery
+    funcPm.addPass(createAssignLramAddressesPass(/*replan=*/isRealPipeline, lramSize));
 }
 
 std::unique_ptr<OperationPass<ModuleOp>> createTORQLowerExecutableTargetPass() {

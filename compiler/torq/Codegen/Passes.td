@@ -400,7 +400,10 @@ def AssignLramAddresses :
   let options = [
     Option<"replan", "replan", "bool", /*default=*/"false",
            "Re-plan with forced compactions when a pinned buffer fragments LRAM. Real "
-           "pipeline only: the tile-fit probe cannot see the relocation traffic">
+           "pipeline only: the tile-fit probe cannot see the relocation traffic">,
+    Option<"lramSize", "lram-size", "int64_t", /*default=*/"0",
+           "Total LRAM pool size to place into, including the NSS program slots. 0 means "
+           "the whole LRAM">
   ];
 
   let dependentDialects = [

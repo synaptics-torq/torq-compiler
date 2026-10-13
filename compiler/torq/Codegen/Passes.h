@@ -50,7 +50,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createPrefetchConstantLoadsP
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createRecoverLramResidencyPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>>
-createAssignLramAddressesPass(bool replan = false);
+createAssignLramAddressesPass(bool replan = false, int64_t lramSize = 0);
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignDtcmItcmXramAddressesPass();
 
@@ -166,6 +166,12 @@ void addPassesPostTileAndFuseUpToAssignLramAddresses(
     OpPassManager &pipeline, bool optimizeForTileAndFuse = false, bool isRealPipeline = false,
     SliceBufferSharing sliceBufferSharing = SliceBufferSharing::None
 );
+
+// The tail of the NSS pipeline: buffer deallocation, failure-driven LRAM residency
+// recovery, constant-load prefetch, and LRAM address assignment. `funcPm` must already
+// be nested on the function op. `isRealPipeline` as above. `lramSize` is the total LRAM
+// pool the allocator may place into, including the NSS program slots (0 = whole LRAM).
+void addNssLramAllocationPasses(OpPassManager &funcPm, bool isRealPipeline, int64_t lramSize = 0);
 
 //----------------------------------------------------------------------------//
 // Registration

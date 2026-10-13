@@ -33,6 +33,7 @@ set(sources
     MergeEmptyTensorPairsPass.cpp
     FoldConvertPass.cpp
     KernelSelectionPass.cpp
+    LramAddressSpace.cpp
     LinalgSlicingPass.cpp
     LinalgTilePass.cpp
     TorqHLTilePass.cpp
