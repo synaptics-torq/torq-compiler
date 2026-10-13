@@ -515,15 +515,13 @@ class RaiseMatMulInteger : public OpRewritePattern<linalg::GenericOp> {
         // The dequant has to cover exactly this branch, so that replacing it with an
         // epilogue built over [M, colWidth] is shape-for-shape what was there.
         const bool shapeMatches =
-            rankReduced
-                ? (matmulOutTy.getShape()[0] == 1 && outType.getShape()[0] == colWidth)
-                : peeledUnitBatch
-                      ? (matmulOutTy.getRank() == 2 && outType.getShape()[0] == 1 &&
-                         outType.getShape()[1] == matmulOutTy.getShape()[0] &&
-                         outType.getShape()[2] == colWidth &&
-                         matmulOutTy.getShape().back() == colWidth)
-                      : (outType.getShape().drop_back() == matmulOutTy.getShape().drop_back() &&
-                         outType.getShape().back() == colWidth);
+            rankReduced ? (matmulOutTy.getShape()[0] == 1 && outType.getShape()[0] == colWidth)
+            : peeledUnitBatch
+                ? (matmulOutTy.getRank() == 2 && outType.getShape()[0] == 1 &&
+                   outType.getShape()[1] == matmulOutTy.getShape()[0] &&
+                   outType.getShape()[2] == colWidth && matmulOutTy.getShape().back() == colWidth)
+                : (outType.getShape().drop_back() == matmulOutTy.getShape().drop_back() &&
+                   outType.getShape().back() == colWidth);
         if (!shapeMatches)
             return rewriter.notifyMatchFailure(op, "dequant shape is not the matmul branch");
 
@@ -549,9 +547,9 @@ class RaiseMatMulInteger : public OpRewritePattern<linalg::GenericOp> {
                     lhsOperand = collapse.getSrc();
             }
         }
-        if (failed(matchZpSubtractedOperand(
-                lhsOperand, /*isUnsigned=*/true, A, aZpNarrow, aZp, false
-            )))
+        if (failed(
+                matchZpSubtractedOperand(lhsOperand, /*isUnsigned=*/true, A, aZpNarrow, aZp, false)
+            ))
             return rewriter.notifyMatchFailure(op, "lhs is not a zp-subtracted u8 activation");
         // ONNX lets B be int8 or uint8, and the front end widens it with the matching
         // extension, so which one it is is readable off the chain.

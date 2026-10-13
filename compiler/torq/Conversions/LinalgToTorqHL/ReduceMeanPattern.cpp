@@ -111,8 +111,10 @@ struct ReduceMeanPattern : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(srcOp, "Expected div or mul op");
 
         // if output is used by CollapseShape, fold collapseShape op
+        Operation *foldedReshape = nullptr;
         if (Operation *user = getSingleUser(output);
             user && (isa<tensor::CollapseShapeOp>(user) || isCollapseOrExpandShapeGeneric(user))) {
+            foldedReshape = user;
             output = user->getResult(0);
         }
 
@@ -186,10 +188,22 @@ struct ReduceMeanPattern : public OpRewritePattern<linalg::GenericOp> {
 
         auto avgpoolOutType = dyn_cast_or_null<RankedTensorType>(output.getType());
 
-        rewriter.replaceOpWithNewOp<torq_hl::AvgPool2DOp>(
-            srcOp, avgpoolOutType, createInitTensor(reducesumOp, rewriter, avgpoolOutType), 0, 0,
-            0xff800000, 0x7f800000, 0, weights, biasScale, input
+        auto avgpoolOp = torq_hl::AvgPool2DOp::create(
+            rewriter, loc, avgpoolOutType, createInitTensor(reducesumOp, rewriter, avgpoolOutType),
+            0, 0, 0xff800000, 0x7f800000, 0, weights, biasScale, input
         );
+
+        if (foldedReshape) {
+            // The pool produces the reshaped type directly: route it to the
+            // reshape's users, then drop the dead reshape and mean generic.
+            // Replacing srcOp while the reshape still referenced it would
+            // leave a materialization between the reshaped and original types.
+            rewriter.replaceOp(foldedReshape, avgpoolOp.getOutput());
+            rewriter.eraseOp(srcOp);
+        }
+        else {
+            rewriter.replaceOp(srcOp, avgpoolOp.getOutput());
+        }
 
         return success();
     }
