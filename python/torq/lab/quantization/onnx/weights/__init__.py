@@ -8,6 +8,7 @@ from ._analysis import (
     add_weights_analyze_args,
     weights_analyze_from_args,
 )
+from ._gptq import GPTQCheckpoint, load_gptq_weights
 from ._config import (
     LayerQuantConfig,
     QuantizationConfig,
@@ -27,6 +28,8 @@ from ._quantization import (
 )
 
 __all__ = [
+    "GPTQCheckpoint",
+    "load_gptq_weights",
     "LayerQuantConfig",
     "QuantizationConfig",
     "SensitivityResult",

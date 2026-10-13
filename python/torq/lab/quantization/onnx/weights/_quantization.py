@@ -387,12 +387,18 @@ class WeightQuantizer:
         model: onnx.ModelProto,
         matmul_info: list[tuple[onnx.NodeProto, str, onnx.TensorProto]],
         config: QuantizationConfig,
+        precomputed: dict[str, QuantizedWeight] | None = None,
     ) -> None:
         """Replace MatMul weights with DequantizeLinear + MatMul.
 
         Produces int8/int4 weights with bf16 scales.
         bf16 (bits=16) layers are left as-is.
+
+        ``precomputed`` maps MatMul node names to weights that are already
+        quantized, for example by GPTQ (see :mod:`._gptq`). These weights are
+        used instead of round-to-nearest quantization of the fp32 initializer.
         """
+        precomputed = precomputed or {}
         # Ensure opset >= 21 for DequantizeLinear with block_size
         _ensure_opset(model, 21)
         init_map = {i.name: i for i in model.graph.initializer}
@@ -406,9 +412,12 @@ class WeightQuantizer:
                 counts["bf16"] += 1
                 continue
 
-            fp32_w = numpy_helper.to_array(init).astype(np.float32)
-            qw = quantize_weight(fp32_w, layer_cfg.bits, layer_cfg.block_size)
-            tag = "int4" if layer_cfg.bits == 4 else "int8"
+            if node.name in precomputed:
+                qw = precomputed[node.name]
+            else:
+                fp32_w = numpy_helper.to_array(init).astype(np.float32)
+                qw = quantize_weight(fp32_w, layer_cfg.bits, layer_cfg.block_size)
+            tag = "int4" if qw.bits == 4 else "int8"
             counts[tag] += 1
 
             # Create initializer names
@@ -417,7 +426,7 @@ class WeightQuantizer:
             zp_name = f"{weight_name}_zero_points"
 
             # Quantized weight initializer
-            if layer_cfg.bits == 4:
+            if qw.bits == 4:
                 q_init = _make_int4_initializer(q_name, qw.quantized, qw.quantized.shape)
             else:
                 q_init = numpy_helper.from_array(qw.quantized, name=q_name)
@@ -430,7 +439,7 @@ class WeightQuantizer:
             s_init.raw_data = _fp32_to_bf16_raw(qw.scales)
 
             # Zero points
-            if layer_cfg.bits == 4:
+            if qw.bits == 4:
                 zp_init = _make_int4_initializer(zp_name, qw.zero_points, qw.zero_points.shape)
             else:
                 zp_init = numpy_helper.from_array(qw.zero_points, name=zp_name)
