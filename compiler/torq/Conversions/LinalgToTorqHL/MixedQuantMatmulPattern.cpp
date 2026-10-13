@@ -302,19 +302,23 @@ Value padConstToWidth(
     if (c.dense) {
         // Official value-based construction: read through the element
         // iterators, append zero pad columns, let MLIR own the storage.
+        // Copy row by row: row r starts at r * N in the source and at
+        // r * N8 in the padded result.
         Type et = ty.getElementType();
         if (et.isBF16()) {
             SmallVector<APFloat> vals(rows * N8, APFloat(APFloat::BFloat()));
             auto src = c.dense->getValues<APFloat>();
-            for (int64_t i = 0; i < c.count; ++i)
-                vals[i] = *(src.begin() + i);
+            for (int64_t r = 0; r < rows; ++r)
+                for (int64_t col = 0; col < N; ++col)
+                    vals[r * N8 + col] = *(src.begin() + (r * N + col));
             return arith::ConstantOp::create(b, loc, DenseElementsAttr::get(newTy, vals));
         }
         int64_t bw = et.isInteger(4) ? 4 : 8;
         SmallVector<APInt> vals(rows * N8, APInt(bw, 0));
         auto src = c.dense->getValues<APInt>();
-        for (int64_t i = 0; i < c.count; ++i)
-            vals[i] = *(src.begin() + i);
+        for (int64_t r = 0; r < rows; ++r)
+            for (int64_t col = 0; col < N; ++col)
+                vals[r * N8 + col] = *(src.begin() + (r * N + col));
         return arith::ConstantOp::create(b, loc, DenseElementsAttr::get(newTy, vals));
     }
     // Blob: the only access is bytes; the row stride derives from the actual
