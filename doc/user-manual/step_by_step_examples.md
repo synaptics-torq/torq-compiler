@@ -100,7 +100,7 @@ outputs = runner.infer(inputs)
 print(f"Inference took {runner.infer_time_ms} ms")
 ```
 
-The `VMFBInferenceRunner` class supports options such as `function` and `load_method`. See the [Torq Runtime Python API](./torq_runtime.md) page for the full API reference.
+The `VMFBInferenceRunner` class supports options such as `function` and `load_method`. See the [Torq Runtime](./torq_runtime.md) page for the full API reference (Python and C/C++).
 
 ## Compiling for Host (Simulation)
 

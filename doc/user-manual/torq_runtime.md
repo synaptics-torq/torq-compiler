@@ -1,8 +1,12 @@
-# Torq Runtime Python API
+# Torq Runtime
+
+The Torq runtime provides the means for loading and running compiled `.vmfb` models on a Torq device. It is built on top of [IREE](https://iree.dev)'s own runtime: the `torq-runtime` Python package wraps IREE's Python bindings, and C/C++ applications use IREE's public runtime API together with a Torq-specific IREE HAL driver. Pick the section below that matches your language.
+
+## Python API
 
 The `torq-runtime` Python package provides bindings for loading and running compiled `.vmfb` models on a Torq device directly from Python.
 
-## Installation
+### Installation
 
 `torq-runtime` is published on [PyPI](https://pypi.org/project/torq-runtime/):
 
@@ -10,7 +14,7 @@ The `torq-runtime` Python package provides bindings for loading and running comp
 $ pip install torq-runtime
 ```
 
-## Quick Start
+### Quick Start
 
 ```python
 import numpy as np
@@ -27,9 +31,9 @@ outputs = runner.infer([input_data])
 print(f"Inference took {runner.infer_time_ms:.2f} ms")
 ```
 
-## Examples
+### Examples
 
-### Inspecting Model Inputs and Outputs
+#### Inspecting Model Inputs and Outputs
 
 ```python
 from torq.runtime import VMFBInferenceRunner
@@ -45,7 +49,7 @@ if runner.outputs_info:
         print(f"Output {i}: dtype={info.dtype}, shape={info.shape}")
 ```
 
-### Profiling Inference Latency
+#### Profiling Inference Latency
 
 ```python
 from torq.runtime import profile_vmfb_inference_time
@@ -59,7 +63,7 @@ avg_ms = profile_vmfb_inference_time(
 print(f"Average inference time: {avg_ms:.2f} ms")
 ```
 
-### Profiling System Resources
+#### Profiling System Resources
 
 ```python
 from torq.runtime import profile_vmfb_resources
@@ -80,7 +84,7 @@ if stats.avg_npu_load_percent is not None:
     print(f"Average NPU usage: {stats.avg_npu_load_percent:.1f}%")
 ```
 
-### Running with Custom Inputs
+#### Running with Custom Inputs
 
 ```python
 import numpy as np
@@ -93,7 +97,7 @@ input_data = np.load("preprocessed_input.npy")
 outputs = runner.infer([input_data])
 ```
 
-### Zero-Copy Device Outputs
+#### Zero-Copy Device Outputs
 
 When model outputs are fed back as inputs (e.g. KV-cache tensors in autoregressive decoding), use `device_outputs=True` to keep data on the device and avoid unnecessary host transfers:
 
@@ -117,9 +121,9 @@ kv_cache = new_kv
 logits_np = logits.to_host()
 ```
 
-## API Reference
+### API Reference
 
-### `VMFBInferenceRunner`
+#### `VMFBInferenceRunner`
 
 The main class for loading and running `.vmfb` models via the IREE runtime.
 
@@ -165,21 +169,21 @@ VMFBInferenceRunner(
 
 **Methods:**
 
-#### `infer(inputs)`
+##### `infer(inputs)`
 
 Run inference and return the output arrays.
 
 - **inputs** — Either an iterable of NumPy arrays (or `DeviceArray` objects) or a mapping of name to array.
 - **Returns** — A list of NumPy arrays by default. When `device_outputs=True`, returns a list of on-device `DeviceArray` objects instead.
 
-#### `allocate_device_array(array)`
+##### `allocate_device_array(array)`
 
 Allocate a device buffer and copy a host NumPy array into it.
 
 - **array** — A NumPy array to upload to the device.
 - **Returns** — A `DeviceArray` that can be passed directly to `infer()` without further copies.
 
-### `profile_vmfb_inference_time`
+#### `profile_vmfb_inference_time`
 
 Load or reuse a `.vmfb` model and run inference multiple times for profiling.
 
@@ -217,7 +221,7 @@ profile_vmfb_inference_time(
 
 **Returns:** Average wall-clock inference time in milliseconds.
 
-### `profile_vmfb_resources`
+#### `profile_vmfb_resources`
 
 Load or reuse a `.vmfb` model and run inference multiple times, collecting DRAM, CPU, and Torq NPU statistics alongside timing. Requires a Linux target for process statistics (reads from `/proc`). NPU load is reported when `/sys/class/misc/torq/statistics/torq_inference_time` is available.
 
@@ -258,7 +262,7 @@ profile_vmfb_resources(
 
 **Returns:** A `ProfileStats` dataclass (see below).
 
-### `ProfileStats`
+#### `ProfileStats`
 
 Dataclass returned by `profile_vmfb_resources` containing profiling results. All resource metrics are **process-wide** and include overhead from the Python interpreter, the sampling thread, and any other activity in the process.
 
@@ -279,7 +283,7 @@ from torq.runtime.profiling import ProfileStats
 
 **Methods:**
 
-#### `summary()`
+##### `summary()`
 
 Return a human-readable summary string with formatted values (times in ms, memory in MB, CPU as a percentage).
 
@@ -297,7 +301,7 @@ print(stats.summary())
 #   Avg NPU usage:       82.4%
 ```
 
-### `ResourceSampler`
+#### `ResourceSampler`
 
 A reusable background sampler for collecting process-wide DRAM and CPU metrics plus optional Torq NPU load around arbitrary workloads. Used internally by `profile_vmfb_resources` but available for custom profiling scenarios.
 
@@ -323,7 +327,7 @@ from torq.runtime.profiling import ResourceSampler
 | `npu_inference_time_us` | `int \| None` | Torq NPU execution time accumulated while the sampler was running, or `None` when unavailable. |
 | `avg_npu_load_percent` | `float \| None` | Average Torq NPU utilisation while the sampler was running, or `None` when unavailable. |
 
-### `run_vmfb`
+#### `run_vmfb`
 
 Run a `.vmfb` model via the `iree-run-module` CLI and return wall-clock time.
 
@@ -351,7 +355,7 @@ run_vmfb(
 
 **Returns:** Elapsed wall-clock time in milliseconds.
 
-### `TensorInfo`
+#### `TensorInfo`
 
 Dataclass holding dtype and shape metadata for a tensor.
 
@@ -371,11 +375,136 @@ class TensorInfo:
 
 - `is_valid()` — Returns `True` if every dimension is an integer (i.e., no dynamic dimensions).
 
-### Utility Functions
+#### Utility Functions
 
-#### `random_inputs_from_info(inputs_info)`
+##### `random_inputs_from_info(inputs_info)`
 
 Generate random NumPy arrays matching the given tensor metadata. Useful for testing.
 
 - **inputs_info** — Iterable of `TensorInfo`.
 - **Returns** — List of NumPy arrays with appropriate shapes and dtypes.
+
+## C/C++ API
+
+There is no separate Torq-specific application API for C/C++. Instead, C/C++ programs use [IREE](https://iree.dev)'s own public runtime API (`iree_runtime_session_t`, `iree_hal_device_t`, etc.) and simply request the `torq` HAL driver by name — the same driver that the Python `torq.runtime` package requests via `device_uri="torq"`. Torq supplies:
+
+- An IREE HAL driver/device plugin (`runtime/driver/`) that implements the `torq` device, registered as an IREE "external HAL driver".
+- A hardware/simulator backend (`runtime/torq_hw/`), selected with the `--torq_hw_type` flag.
+- The `torq-run-module` CLI tool (`runtime/tools/torq-run-module-main.cpp`), a Torq-flavored fork of IREE's own `iree-run-module`.
+
+### Building with the Torq Driver
+
+Enable the driver when configuring the runtime build:
+
+```bash
+cmake -DIREE_EXTERNAL_HAL_DRIVERS=torq ...
+```
+
+Any binary that links the `driver::registration` target (as `torq-run-module` does) gets the `torq` driver registered into IREE's standard driver registry automatically — no explicit call to `iree_hal_torq_driver_module_register()` is needed in application code as long as the instance is created with `iree_runtime_instance_options_use_all_available_drivers()`.
+
+### Quick Start
+
+#### Running a Model via the CLI
+
+The quickest way to run a `.vmfb` without writing any code is the `torq-run-module` tool built alongside the runtime:
+
+```bash
+torq-run-module \
+    --module=mobilenetv2.vmfb \
+    --device=torq \
+    --input=1x224x224x3xsi8=@input.bin
+```
+
+#### Embedding the Runtime
+
+Applications that embed the runtime directly use IREE's high-level `iree_runtime_session_t` API and request the `"torq"` device by name:
+
+```cpp
+#include "iree/runtime/api.h"
+
+iree_status_t run_inference(const char* vmfb_path) {
+  // Shared across all sessions. Enumerates every driver linked into the
+  // binary, including "torq" once the runtime is built with
+  // -DIREE_EXTERNAL_HAL_DRIVERS=torq.
+  iree_runtime_instance_options_t instance_options;
+  iree_runtime_instance_options_initialize(&instance_options);
+  iree_runtime_instance_options_use_all_available_drivers(&instance_options);
+  iree_runtime_instance_t* instance = NULL;
+  IREE_RETURN_IF_ERROR(iree_runtime_instance_create(
+      &instance_options, iree_allocator_system(), &instance));
+
+  // Equivalent of VMFBInferenceRunner(..., device_uri="torq").
+  iree_hal_device_t* device = NULL;
+  IREE_RETURN_IF_ERROR(iree_runtime_instance_try_create_default_device(
+      instance, iree_make_cstring_view("torq"), &device));
+
+  iree_runtime_session_options_t session_options;
+  iree_runtime_session_options_initialize(&session_options);
+  iree_runtime_session_t* session = NULL;
+  IREE_RETURN_IF_ERROR(iree_runtime_session_create_with_device(
+      instance, &session_options, device,
+      iree_runtime_instance_host_allocator(instance), &session));
+  iree_hal_device_release(device);
+
+  // Equivalent of VMFBInferenceRunner(vmfb_path, ...).
+  IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
+      session, vmfb_path));
+
+  // Equivalent of runner.infer([input_array]). The function name uses the
+  // "<module_name>.<function_name>" form, matching the exported name in the
+  // compiled module (compare to `function="main"` in VMFBInferenceRunner).
+  iree_runtime_call_t call;
+  IREE_RETURN_IF_ERROR(iree_runtime_call_initialize_by_name(
+      session, iree_make_cstring_view("module.main"), &call));
+
+  iree_hal_buffer_view_t* input = NULL;
+  // ... allocate/populate `input`, e.g. with
+  //     iree_hal_buffer_view_allocate_buffer_copy() ...
+  IREE_RETURN_IF_ERROR(
+      iree_runtime_call_inputs_push_back_buffer_view(&call, input));
+  iree_hal_buffer_view_release(input);
+
+  IREE_RETURN_IF_ERROR(iree_runtime_call_invoke(&call, /*flags=*/0));
+
+  iree_hal_buffer_view_t* output = NULL;
+  IREE_RETURN_IF_ERROR(
+      iree_runtime_call_outputs_pop_front_buffer_view(&call, &output));
+  // ... read `output` back to host, e.g. with iree_hal_device_transfer_d2h() ...
+  iree_hal_buffer_view_release(output);
+
+  iree_runtime_call_deinitialize(&call);
+  iree_runtime_session_release(session);
+  iree_runtime_instance_release(instance);
+  return iree_ok_status();
+}
+```
+
+See IREE's own [`hello_world_terse.c`](https://github.com/iree-org/iree/blob/main/runtime/src/iree/runtime/demo/hello_world_terse.c) demo for a complete, runnable version of this pattern, and `runtime/tools/torq-run-module-main.cpp` in this repository for how `torq-run-module` drives the same device through IREE's `iree_tooling_run_module_from_flags()` helper instead of hand-written session code.
+
+### Device Selection
+
+Hardware backend and allocator selection are exposed as process-wide IREE flags rather than constructor parameters:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--torq_hw_type` | `astra_machina` | Torq hardware/simulator backend: `astra_machina` (SoC NPU), `sim` (x86 CModel simulator), `aws_fpga`, etc. — the C/C++ equivalent of the Python `torq_hw_type` parameter. Declared in `runtime/driver/TorqIO.h`. |
+| `--torq_device_allocator` | `auto` | Buffer allocator backing the `torq` device: `auto` (probe for a usable DMA-BUF heap), `cpu`, or `dmabuf`. Declared in `runtime/driver/registration/driver_module.c`. |
+
+Set them on the command line (as with `torq-run-module --torq_hw_type=sim ...`), via a flags file, or by calling IREE's `iree_flags_parse_checked()` yourself before creating the device.
+
+### Profiling
+
+There is no C/C++ equivalent of `infer_time_ms`, `profile_vmfb_inference_time`, or `profile_vmfb_resources`. To reproduce the same measurements in C/C++:
+
+- **Inference latency** — time the call yourself around `iree_runtime_call_invoke()` (e.g. with `iree_time_now()` or `std::chrono`), the same way `infer_time_ms` is computed around `infer()` in Python.
+- **NPU/CPU/DRAM usage** — the raw sources the Python `ResourceSampler` reads are available directly on Linux: process-wide CPU/DRAM from `/proc/<pid>/stat` and `/proc/<pid>/smaps_rollup`, and cumulative Torq NPU execution time from `/sys/class/misc/torq/statistics/torq_inference_time`. The runtime does not provide a reusable C/C++ helper for this; an application needs to read these itself around the inference call.
+
+### Public Headers
+
+| Header | Contents |
+|--------|----------|
+| `runtime/driver/registration/driver_module.h` | `iree_hal_torq_driver_module_register()` — registers the `torq` HAL driver factory. |
+| `runtime/driver/torq_device.h` | `iree_hal_torq_device_params_t`, `iree_hal_torq_device_create()` — device creation, used internally by the driver factory. |
+| `runtime/driver/TorqIO.h` | `FLAG_torq_hw_type` and other Torq runtime flags. |
+
+For everything else — sessions, calls, buffer views, modules — use IREE's own public headers: `iree/runtime/api.h`, `iree/hal/api.h`, and `iree/vm/api.h`.
