@@ -832,6 +832,15 @@ void buildTorqTypeConversionPipeline(OpPassManager &passManager) {
     // Narrow small integer weight constants to packed sub-byte before dispatch
     // formation so the narrowed weight flows into the matmul dispatch.
     passManager.addPass(createTorqNarrowWeightConstPass());
+    // Fold unit-dim reshape round trips around elementwise ops while the IR is still
+    // function-level: after dispatch formation the collapse is absorbed into adjacent slices
+    // and the interface rank is fixed, so the round trip would survive to codegen.
+    passManager.addNestedPass<func::FuncOp>(createFoldUnitExtentWrapperPass(/*restoreRank=*/true));
+    // Collapse high-fan-in concats whose operands are consecutive unit slices of one source
+    // back into the source (or a single extract of the run) while the per-element extracts
+    // are still clean tensor.extract_slice ops; after dispatch formation they are strided
+    // interface loads and the source structure is gone.
+    passManager.addNestedPass<func::FuncOp>(createCollapseUnrolledConcatPass());
 }
 
 } // namespace mlir::syna::torq

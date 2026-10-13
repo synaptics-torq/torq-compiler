@@ -2,6 +2,10 @@ __pycache__
 .pytest_cache
 .vscode
 CMakeLists.txt.user
+# Local agent instruction files
+/AGENTS.md
+/CLAUDE.md
+/GEMINI.md
 /extras
 tmp
 tests/testdata/dev_ops

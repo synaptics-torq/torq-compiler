@@ -25,7 +25,12 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createConvertNhwcOpToNchwPas
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createRaiseResizeNearestNeighborPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldUnitExtentWrapperPass();
+// `restoreRank` also folds collapse -> generic -> expand round trips, rebuilding the generic at
+// the higher rank; only valid before dispatch formation.
+std::unique_ptr<InterfacePass<FunctionOpInterface>>
+createFoldUnitExtentWrapperPass(bool restoreRank = false);
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createCollapseUnrolledConcatPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createOptimizeTransposeLayoutPass();
 

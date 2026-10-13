@@ -40,6 +40,11 @@
 //
 // The fix lives in its own pass on purpose: ConvertNhwcOpToNchwPass keeps its
 // original two-phase code, with no extra per-conv state to track.
+//
+// Before dispatch formation the pass also runs with rank restoration, folding
+// the mirrored collapse -> generic -> expand round trip the importer leaves
+// around a singleton-axis Gather -> unary -> Unsqueeze chain, so the op runs at
+// the rank of its surrounding tensors.
 //===----------------------------------------------------------------------===//
 
 #include "PassesDetail.h"
@@ -61,14 +66,20 @@ namespace mlir::syna::torq {
 
 namespace {
 
-// The three ops IREE adds around a depthwise conv, in data-flow order:
-// `expand` grows the conv result by inserting unit (size-1) dims, `wrappedGeneric`
-// is the wrapped op (e.g. a truncf) that runs at the higher rank, and `collapse`
-// removes those same dims to return to the original rank.
+// A reshape round trip around an elementwise generic, in data-flow order:
+// `inner` reshapes the input by adding or removing unit (size-1) dims,
+// `wrappedGeneric` is the wrapped op (e.g. a truncf), and `outer` restores the
+// original shape. Two orders occur:
+//   - expand -> generic -> collapse: the IREE depthwise wrapper described above;
+//   - collapse -> generic -> expand: the importer's singleton-axis Gather ->
+//     unary -> Unsqueeze chain, which runs the op at a reduced rank. Folding it
+//     restores the rank, so it is only enabled before dispatch formation (see
+//     createFoldUnitExtentWrapperPass): afterwards the per-dispatch collapses
+//     are IREE's own unit-dim folding, which must not be undone.
 struct WrapperChain {
-    tensor::ExpandShapeOp expand;
+    Operation *inner;
     linalg::GenericOp wrappedGeneric;
-    tensor::CollapseShapeOp collapse;
+    Operation *outer;
 };
 
 // True if every indexing map of `generic` is the identity map. We only fold
@@ -83,72 +94,75 @@ bool hasIdentityIndexingMaps(linalg::GenericOp generic) {
     });
 }
 
-// True if `expand` only inserts size-1 dimensions (no real dimension split).
-// computeRankReductionMask returns the dropped indices iff the src shape is the
-// result shape with only size-1 entries erased, and nullopt otherwise. A real
-// split (e.g. 6 -> 2x3) or a multiplier dim (M>1) leaves a non-1 difference, so
-// it returns nullopt and we reject -- we only ever drop dims that hold no data.
-bool expandOnlyInsertsUnitDims(tensor::ExpandShapeOp expand) {
-    return computeRankReductionMask(
-               expand.getResultType().getShape(), expand.getSrcType().getShape()
-    )
-        .has_value();
+// True if the expand/collapse `reshape` only inserts or removes size-1
+// dimensions (no real dimension split or merge). computeRankReductionMask
+// returns the dropped indices iff the smaller shape is the larger one with only
+// size-1 entries erased. A real split (e.g. 6 -> 2x3) or a multiplier dim (M>1)
+// leaves a non-1 difference, so we reject -- we only ever move dims that hold
+// no data.
+bool movesOnlyUnitDims(Operation *reshape) {
+    auto src = cast<RankedTensorType>(reshape->getOperand(0).getType());
+    auto dst = cast<RankedTensorType>(reshape->getResult(0).getType());
+    if (src.getRank() < dst.getRank())
+        std::swap(src, dst);
+    return computeRankReductionMask(src.getShape(), dst.getShape()).has_value();
 }
 
-// Decide whether `generic` is the wrapper described at the top of this file. On
-// a match, return the three ops that form the wrapper; otherwise return nullopt.
-// The checks are ordered cheapest-first so unrelated ops are rejected quickly.
-// The match is rank-agnostic: it does not hard-code rank 4/5, only that the
-// expand/collapse pair adds and removes unit dims around an identity-map generic.
-std::optional<WrapperChain> matchWrapperChain(linalg::GenericOp generic) {
-    // One ranked result, and its maps must be identity so dropping the inserted
-    // size-1 dimensions is safe (a broadcast/permutation map could change it).
+// Decide whether `generic` is wrapped in a unit-dim reshape round trip. On a
+// match, return the three ops; otherwise return nullopt. The checks are ordered
+// cheapest-first so unrelated ops are rejected quickly. The match is
+// rank-agnostic: it only requires the two reshapes to move unit dims and the
+// outer one to restore the original shape.
+std::optional<WrapperChain> matchWrapperChain(linalg::GenericOp generic, bool restoreRank) {
+    // One ranked result, and its maps must be identity so moving the size-1
+    // dimensions is safe (a broadcast/permutation map could change it). The
+    // rebuilt op gets a fresh init and loses its iteration rank, so the body
+    // must not read the init or the loop indices.
     if (generic.getNumResults() != 1)
         return std::nullopt;
     if (!isa<RankedTensorType>(generic.getResult(0).getType()))
         return std::nullopt;
     if (!hasIdentityIndexingMaps(generic))
         return std::nullopt;
-
-    // It reads exactly one input, and that input is an expand_shape.
-    if (generic.getNumDpsInputs() != 1)
-        return std::nullopt;
-    auto expand = generic.getDpsInputs()[0].getDefiningOp<tensor::ExpandShapeOp>();
-    if (!expand)
+    if (generic.getNumDpsInputs() != 1 || generic.hasIndexSemantics() ||
+        generic.payloadUsesValueFromOperand(generic.getDpsInitOperand(0)))
         return std::nullopt;
 
-    // It has exactly one user, and that user is a collapse_shape.
+    // It reads exactly one input, and that input is an expand_shape (or, when
+    // restoring rank, a collapse_shape).
+    Operation *inner = generic.getDpsInputs()[0].getDefiningOp();
+    if (!isa_and_nonnull<tensor::ExpandShapeOp>(inner) &&
+        !(restoreRank && isa_and_nonnull<tensor::CollapseShapeOp>(inner)))
+        return std::nullopt;
+
+    // It has exactly one user, and that user is the opposite reshape.
     if (!generic.getResult(0).hasOneUse())
         return std::nullopt;
-    auto collapse = dyn_cast<tensor::CollapseShapeOp>(*generic.getResult(0).getUsers().begin());
-    if (!collapse)
+    Operation *outer = *generic.getResult(0).getUsers().begin();
+    if (!isa<tensor::ExpandShapeOp, tensor::CollapseShapeOp>(outer) ||
+        outer->getName() == inner->getName())
         return std::nullopt;
 
-    // The expand and collapse must be exact inverses: same grouping, and the
-    // collapse returns to the expand's original rank. Then the only thing the
-    // pair does is add dimensions and remove them again.
-    if (expand.getReassociationIndices() != collapse.getReassociationIndices())
+    // The outer reshape returns to the inner one's source shape and both only
+    // add/remove size-1 dims, so the round trip is a value identity. A real
+    // multiplier dim (M>1) is non-1 and is rejected here.
+    if (cast<RankedTensorType>(outer->getResult(0).getType()).getShape() !=
+        cast<RankedTensorType>(inner->getOperand(0).getType()).getShape())
         return std::nullopt;
-    if (cast<RankedTensorType>(collapse.getResult().getType()).getRank() !=
-        cast<RankedTensorType>(expand.getSrc().getType()).getRank())
-        return std::nullopt;
-
-    // Every dimension the expand adds must be size 1, so dropping them keeps
-    // every value. A real multiplier dim (M>1) is non-1 and is rejected here.
-    if (!expandOnlyInsertsUnitDims(expand))
+    if (!movesOnlyUnitDims(inner) || !movesOnlyUnitDims(outer))
         return std::nullopt;
 
-    return WrapperChain{expand, generic, collapse};
+    return WrapperChain{inner, generic, outer};
 }
 
-// Build the folded replacement generic. It reads the lower-rank value that
-// feeds the expand_shape, writes a fresh tensor the size of the collapse result
-// (same rank), and reuses the body of the original generic unchanged.
+// Build the folded replacement generic. It reads the value that feeds the inner
+// reshape, writes a fresh tensor the type of the outer reshape result, and
+// reuses the body of the original generic unchanged.
 linalg::GenericOp buildFoldedGeneric(WrapperChain chain, OpBuilder &builder) {
     Location loc = chain.wrappedGeneric.getLoc();
     MLIRContext *ctx = builder.getContext();
 
-    auto resultType = cast<RankedTensorType>(chain.collapse.getResult().getType());
+    auto resultType = cast<RankedTensorType>(chain.outer->getResult(0).getType());
     int64_t rank = resultType.getRank();
     Value init =
         tensor::EmptyOp::create(builder, loc, resultType.getShape(), resultType.getElementType())
@@ -160,7 +174,8 @@ linalg::GenericOp buildFoldedGeneric(WrapperChain chain, OpBuilder &builder) {
 
     auto folded = linalg::GenericOp::create(
         builder, loc, /*resultTensorTypes=*/TypeRange{resultType},
-        /*inputs=*/ValueRange{chain.expand.getSrc()}, /*outputs=*/ValueRange{init}, maps, iterators
+        /*inputs=*/ValueRange{chain.inner->getOperand(0)}, /*outputs=*/ValueRange{init}, maps,
+        iterators
     );
 
     // Copy the original op's body (e.g. the truncf) into the new op.
@@ -169,15 +184,16 @@ linalg::GenericOp buildFoldedGeneric(WrapperChain chain, OpBuilder &builder) {
     return folded;
 }
 
-// Rewrite one matched wrapper into a single lower-rank generic. Each match is
-// handled on its own; the narrow match in matchWrapperChain is the only gate,
-// so no group-level bookkeeping is needed.
+// Rewrite one matched wrapper into a single generic at the outer shape. Each
+// match is handled on its own; the narrow match in matchWrapperChain is the
+// only gate, so no group-level bookkeeping is needed.
 struct FoldUnitExtentWrapperPattern : OpRewritePattern<linalg::GenericOp> {
-    using OpRewritePattern::OpRewritePattern;
+    FoldUnitExtentWrapperPattern(MLIRContext *ctx, bool restoreRank)
+        : OpRewritePattern(ctx), restoreRank(restoreRank) {}
 
     LogicalResult
     matchAndRewrite(linalg::GenericOp generic, PatternRewriter &rewriter) const override {
-        std::optional<WrapperChain> chain = matchWrapperChain(generic);
+        std::optional<WrapperChain> chain = matchWrapperChain(generic, restoreRank);
         if (!chain)
             return failure();
 
@@ -185,34 +201,42 @@ struct FoldUnitExtentWrapperPattern : OpRewritePattern<linalg::GenericOp> {
         rewriter.setInsertionPoint(chain->wrappedGeneric);
         linalg::GenericOp folded = buildFoldedGeneric(*chain, rewriter);
 
-        // Point the collapse's users at the new lower-rank op, then delete the
-        // wrapper ops. The expand may feed other ops too, so erase it only when
-        // nothing reads it anymore.
-        rewriter.replaceOp(chain->collapse, folded.getResult(0));
+        // Point the outer reshape's users at the new op, then delete the
+        // wrapper ops. The inner reshape may feed other ops too, so erase it
+        // only when nothing reads it anymore.
+        rewriter.replaceOp(chain->outer, folded.getResult(0));
         rewriter.eraseOp(chain->wrappedGeneric);
-        if (chain->expand.getResult().use_empty())
-            rewriter.eraseOp(chain->expand);
+        if (chain->inner->use_empty())
+            rewriter.eraseOp(chain->inner);
 
         LLVM_DEBUG(
-            llvm::dbgs() << "[fold-unit-extent-wrapper] folded wrapper to lower-rank generic\n"
+            llvm::dbgs() << "[fold-unit-extent-wrapper] folded wrapper to "
+                         << folded.getResult(0).getType() << "\n"
         );
         return success();
     }
+
+    bool restoreRank;
 };
 
 struct FoldUnitExtentWrapperPass : impl::FoldUnitExtentWrapperBase<FoldUnitExtentWrapperPass> {
+    explicit FoldUnitExtentWrapperPass(bool restoreRank) : restoreRank(restoreRank) {}
+
     void runOnOperation() override {
         RewritePatternSet patterns(&getContext());
-        patterns.add<FoldUnitExtentWrapperPattern>(&getContext());
+        patterns.add<FoldUnitExtentWrapperPattern>(&getContext(), restoreRank);
         if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
             signalPassFailure();
     }
+
+    bool restoreRank;
 };
 
 } // namespace
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldUnitExtentWrapperPass() {
-    return std::make_unique<FoldUnitExtentWrapperPass>();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createFoldUnitExtentWrapperPass(bool restoreRank
+) {
+    return std::make_unique<FoldUnitExtentWrapperPass>(restoreRank);
 }
 
 } // namespace mlir::syna::torq

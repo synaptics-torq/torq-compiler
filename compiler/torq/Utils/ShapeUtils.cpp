@@ -497,4 +497,49 @@ bool checkIdentityLikeMaps(linalg::GenericOp op) {
     return true;
 }
 
+namespace {
+
+/// Non-unit dims of `shape`, in order (at least one entry, so an all-unit
+/// shape reduces to [1]).
+SmallVector<int64_t> reducedShape(ArrayRef<int64_t> shape) {
+    SmallVector<int64_t> reduced;
+    for (auto dim : shape)
+        if (dim != 1)
+            reduced.push_back(dim);
+    if (reduced.empty())
+        reduced.push_back(1);
+    return reduced;
+}
+
+} // namespace
+
+Value emitValuePreservingReshape(
+    PatternRewriter &rewriter, Location loc, Value src, RankedTensorType srcTy,
+    RankedTensorType dstTy
+) {
+    if (srcTy == dstTy)
+        return src;
+    if (auto direct = getReassociationIndicesForReshape(srcTy, dstTy)) {
+        if (dstTy.getRank() < srcTy.getRank())
+            return tensor::CollapseShapeOp::create(rewriter, loc, dstTy, src, *direct);
+        return tensor::ExpandShapeOp::create(rewriter, loc, dstTy, src, *direct);
+    }
+
+    // Mid-shape: collapse to a common intermediate, then expand.
+    int64_t numel = 1;
+    for (auto dim : srcTy.getShape())
+        numel *= dim;
+    auto srcReduced = reducedShape(srcTy.getShape());
+    auto dstReduced = reducedShape(dstTy.getShape());
+    SmallVector<int64_t> midShape =
+        (srcReduced == dstReduced) ? srcReduced : SmallVector<int64_t>{numel};
+    auto midTy = RankedTensorType::get(midShape, srcTy.getElementType());
+    auto collapseAssoc = getReassociationIndicesForCollapse(srcTy.getShape(), midShape);
+    auto expandAssoc = getReassociationIndicesForCollapse(dstTy.getShape(), midShape);
+    // Static same-numel shapes always admit both reassociations.
+    assert(collapseAssoc && expandAssoc && "expected valid reassociations");
+    Value mid = tensor::CollapseShapeOp::create(rewriter, loc, midTy, src, *collapseAssoc);
+    return tensor::ExpandShapeOp::create(rewriter, loc, dstTy, mid, *expandAssoc);
+}
+
 } // namespace mlir::syna::torq

@@ -56,6 +56,9 @@ class OptimizeLinalgForTorqPass
 
             populateSpecializeTransposeOpPatterns(ctx, patterns);
 
+            // Fold data-preserving transposes into free reshapes.
+            populateEliminateTransposePatterns(ctx, patterns);
+
             linalg::TransposeOp::getCanonicalizationPatterns(patterns, ctx);
 
             populateOptimizeArithElementwiseBinaryOpPatterns(ctx, patterns);

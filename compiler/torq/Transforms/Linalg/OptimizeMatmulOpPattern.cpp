@@ -926,11 +926,94 @@ static void expandConstantInput(Value &input, PatternRewriter &rewriter) {
     input = expandOp.getResult();
 }
 
+/// The data input of a link that commutes with a head broadcast
+/// [1,K,N] -> [1,B,K,N] feeding a batch matmul (see detectBroadcastBatchInput),
+/// or null if `op` is not such a link:
+///   - a transpose that keeps dims 0 and 1 (unit batch, broadcast heads) in place;
+///   - an elementwise generic whose other inputs are constants read at fixed
+///     indices (e.g. a scalar scale).
+static Value getBroadcastCommutingLinkInput(Operation *op) {
+    if (auto transpose = dyn_cast<linalg::TransposeOp>(op)) {
+        auto perm = transpose.getPermutation();
+        if (perm.size() != 4 || perm[0] != 0 || perm[1] != 1)
+            return {};
+        return transpose.getInput();
+    }
+    auto generic = dyn_cast<linalg::GenericOp>(op);
+    if (!generic || generic.getNumResults() != 1 || !generic.isAllParallelLoops() ||
+        generic.hasIndexSemantics() ||
+        generic.payloadUsesValueFromOperand(generic.getDpsInitOperand(0)) ||
+        generic.getNumLoops() != 4 ||
+        !generic.getMatchingIndexingMap(generic.getDpsInitOperand(0)).isIdentity())
+        return {};
+    Value data;
+    for (OpOperand *input : generic.getDpsInputOperands()) {
+        AffineMap map = generic.getMatchingIndexingMap(input);
+        if (map.isIdentity() && !data)
+            data = input->get();
+        else if (!map.isConstant() || !input->get().getDefiningOp<arith::ConstantOp>())
+            return {};
+    }
+    return data;
+}
+
+/// Replays the broadcast-commuting `links` (in data-flow order) on the
+/// un-broadcast rank-3 source, so they run once instead of once per head.
+static Value
+replayLinksBeforeBroadcast(Value source, ArrayRef<Operation *> links, PatternRewriter &rewriter) {
+    MLIRContext *ctx = rewriter.getContext();
+    AffineMap id3 = AffineMap::getMultiDimIdentityMap(3, ctx);
+    for (Operation *op : links) {
+        Location loc = op->getLoc();
+        auto sourceType = cast<RankedTensorType>(source.getType());
+        if (auto transpose = dyn_cast<linalg::TransposeOp>(op)) {
+            // Output dims 2 and 3 are source dims 1 and 2.
+            auto perm = transpose.getPermutation();
+            SmallVector<int64_t> smallPerm = {0, perm[2] - 1, perm[3] - 1};
+            Value init = tensor::EmptyOp::create(
+                rewriter, loc, applyPermutation(sourceType.getShape(), smallPerm),
+                sourceType.getElementType()
+            );
+            source =
+                linalg::TransposeOp::create(rewriter, loc, source, init, smallPerm).getResult()[0];
+            continue;
+        }
+        auto generic = cast<linalg::GenericOp>(op);
+        Value init = tensor::EmptyOp::create(
+            rewriter, loc, sourceType.getShape(), getElementTypeOrSelf(generic.getResult(0))
+        );
+        SmallVector<Value> inputs;
+        SmallVector<AffineMap> maps;
+        for (OpOperand *input : generic.getDpsInputOperands()) {
+            AffineMap map = generic.getMatchingIndexingMap(input);
+            bool isData = map.isIdentity();
+            inputs.push_back(isData ? source : input->get());
+            maps.push_back(isData ? id3 : AffineMap::get(3, 0, map.getResults(), ctx));
+        }
+        maps.push_back(id3);
+        auto replayed = linalg::GenericOp::create(
+            rewriter, loc, TypeRange{init.getType()}, inputs, ValueRange{init}, maps,
+            SmallVector<utils::IteratorType>(3, utils::IteratorType::parallel)
+        );
+        rewriter.cloneRegionBefore(
+            generic.getRegion(), replayed.getRegion(), replayed.getRegion().end()
+        );
+        source = replayed.getResult(0);
+    }
+    return source;
+}
+
 /// Check if a batch_matmul input comes from a broadcast-batch pattern:
-///   collapse_shape(linalg.generic(broadcast original [1,K,N] → [1,B,K,N]))
+///   collapse_shape(links(linalg.generic(broadcast original [1,K,N] → [1,B,K,N])))
+/// where `links` is a possibly empty single-use chain of ops that commute with
+/// the broadcast (see getBroadcastCommutingLinkInput), e.g. the K^T transpose
+/// and scalar scale of a grouped-query attention key.
 /// Returns the broadcast input index (0 or 1), or -1 if no match.
-/// Also returns the original un-broadcast source via `broadcastSource`.
-static int detectBroadcastBatchInput(linalg::BatchMatmulOp srcOp, Value &broadcastSource) {
+/// Also returns the original un-broadcast source via `broadcastSource` and the
+/// links in data-flow order via `links`.
+static int detectBroadcastBatchInput(
+    linalg::BatchMatmulOp srcOp, Value &broadcastSource, SmallVectorImpl<Operation *> &links
+) {
     for (int i : {0, 1}) {
         Value input = srcOp.getInputs()[i];
         auto collapseOp = input.getDefiningOp<tensor::CollapseShapeOp>();
@@ -944,8 +1027,19 @@ static int detectBroadcastBatchInput(linalg::BatchMatmulOp srcOp, Value &broadca
         auto srcType = collapseOp.getSrcType();
         if (srcType.getDimSize(0) != 1)
             continue;
-        // source of collapse_shape should be a broadcast linalg.generic
-        auto genericOp = collapseOp.getSrc().getDefiningOp<linalg::GenericOp>();
+        // walk up the broadcast-commuting links to the broadcast
+        links.clear();
+        Value value = collapseOp.getSrc();
+        while (Operation *def = value.getDefiningOp()) {
+            Value linkInput = getBroadcastCommutingLinkInput(def);
+            if (!linkInput || !value.hasOneUse())
+                break;
+            links.push_back(def);
+            value = linkInput;
+        }
+        std::reverse(links.begin(), links.end());
+        // source of the chain should be a broadcast linalg.generic
+        auto genericOp = value.getDefiningOp<linalg::GenericOp>();
         if (!genericOp || genericOp.getNumDpsInputs() != 1 || genericOp.getNumResults() != 1)
             continue;
         // identity body: only a yield op
@@ -967,6 +1061,20 @@ static int detectBroadcastBatchInput(linalg::BatchMatmulOp srcOp, Value &broadca
         auto outputType = cast<RankedTensorType>(genericOp.getResultTypes()[0]);
         if (inputType.getNumElements() >= outputType.getNumElements())
             continue;
+        // the links may only move dims 2 and 3, so the broadcast must be over
+        // dim 1 alone: [1,K,N] -> [1,B,K,N], and nothing else may read it
+        if (!links.empty()) {
+            MLIRContext *ctx = genericOp.getContext();
+            if (!value.hasOneUse() || !isYieldedBlockArgument(genericOp, 0) ||
+                !maps[1].isIdentity() ||
+                maps[0] != AffineMap::get(
+                               4, 0,
+                               {getAffineDimExpr(0, ctx), getAffineDimExpr(2, ctx),
+                                getAffineDimExpr(3, ctx)},
+                               ctx
+                           ))
+                continue;
+        }
 
         broadcastSource = genericOp.getInputs()[0];
         return i;
@@ -1133,6 +1241,8 @@ class BatchMatmulOpPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
 
         Value input0 = srcOp.getInputs()[0];
         Value input1 = srcOp.getInputs()[1];
+        Value origInput0 = input0;
+        Value origInput1 = input1;
 
         // Try the simple dequant pattern first (no div/mod in maps).
         // This produces a separate dequant linalg.generic and keeps the batch_matmul.
@@ -1162,7 +1272,8 @@ class BatchMatmulOpPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
         // expresses the broadcast via indexing maps. This avoids materializing
         // the broadcast buffer and lets tile-and-fuse handle it naturally.
         Value broadcastSource;
-        int broadcastIdx = detectBroadcastBatchInput(srcOp, broadcastSource);
+        SmallVector<Operation *> links;
+        int broadcastIdx = detectBroadcastBatchInput(srcOp, broadcastSource, links);
         if (broadcastIdx >= 0) {
             // Only apply when the broadcast source is rank 3 ([1,K,N]).
             // Rank-2 sources ([K,N]) would produce a linalg.generic with a
@@ -1170,6 +1281,8 @@ class BatchMatmulOpPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
             // torq_hl::MatMulOp (findBatchMatmulBcastIdx expects 3-result maps).
             auto broadcastType = dyn_cast<RankedTensorType>(broadcastSource.getType());
             if (broadcastType && broadcastType.getRank() == 3) {
+                rewriter.setInsertionPoint(srcOp);
+                broadcastSource = replayLinksBeforeBroadcast(broadcastSource, links, rewriter);
                 return replaceBatchMatmulWithBroadcastGeneric(
                     srcOp, broadcastSource, broadcastIdx, rewriter
                 );
@@ -1194,6 +1307,10 @@ class BatchMatmulOpPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
             );
             return replaceBatchMatmulWithBroadcastGeneric(srcOp, expanded, directIdx, rewriter);
         }
+
+        // Idempotence: if no input was actually changed do not touch the op.
+        if (input0 == origInput0 && input1 == origInput1)
+            return failure();
 
         rewriter.modifyOpInPlace(srcOp, [&]() {
             srcOp->setOperand(0, input0);

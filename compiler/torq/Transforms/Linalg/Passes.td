@@ -94,6 +94,13 @@ def FoldUnitExtentWrapper :
 
         Runs immediately before torq-convert-nhwc-op-to-nchw so that the 4D-only
         NHWC->NCHW conversion always sees a uniform rank-4 chain. See #1412.
+
+        The type-conversion pipeline also runs it before dispatch formation with
+        rank restoration enabled, which additionally folds the mirrored
+        tensor.collapse_shape / linalg.generic / tensor.expand_shape round trip
+        (e.g. the importer's singleton-axis Gather -> unary -> Unsqueeze chain)
+        into the generic at the higher rank. Both reshapes must only add or
+        remove size-1 dims.
     }];
 
     let constructor =
@@ -101,6 +108,36 @@ def FoldUnitExtentWrapper :
 
     let dependentDialects = [
         "linalg::LinalgDialect",
+        "tensor::TensorDialect"
+    ];
+}
+
+def CollapseUnrolledConcat :
+    InterfacePass<"torq-collapse-unrolled-concat",
+                  "mlir::FunctionOpInterface"> {
+
+    let summary = "Collapses high-fan-in concats of unit slices back into their source tensor";
+
+    let description = [{
+        Rewrites each maximal run of two or more adjacent `tensor.extract_slice`
+        operands of a `tensor.concat` (>= 32 operands) that are consecutive
+        unit slices of a common static source into the source tensor
+        itself when the run covers the whole source extent on the concat dim,
+        or into a single extract of the run's extent otherwise. Non-slice
+        operands keep their place and order.
+
+        Runs function-level before dispatch formation, while the per-element
+        extracts are still clean `tensor.extract_slice` ops; after dispatch
+        creation they are materialized as strided loads from the source
+        binding and the source structure is no longer expressible.
+    }];
+
+    let constructor =
+        "mlir::syna::torq::createCollapseUnrolledConcatPass()";
+
+    let options = RewritePassUtils.options;
+
+    let dependentDialects = [
         "tensor::TensorDialect"
     ];
 }

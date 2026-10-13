@@ -163,6 +163,18 @@
     measured but not the best for all of them (yolo_pose was best at 24). Use it to tune a model
     or to compare performance.
 
+  - ``--torq-eliminate-transpose-mode=enable|disable`` (default ``enable``): replace a
+    ``linalg.transpose`` that keeps the flat (row-major) element order, i.e. one that only moves
+    size-1 dims, with a free ``tensor.collapse_shape``/``expand_shape``. The transpose kernel
+    disappears. Value-preserving; use ``disable`` to compare with the transpose kernel or to rule
+    the rewrite out when debugging.
+
+  - ``--torq-collapse-unrolled-concat-mode=enable|disable`` (default ``enable``): before dispatch
+    formation, rewrite a ``tensor.concat`` of 32 or more operands whose operands include runs of
+    consecutive unit ``tensor.extract_slice`` of one source (an unrolled stack) into the source
+    tensor, or a single slice of it. This replaces one small strided copy per element with a few
+    contiguous copies. Value-preserving; use ``disable`` to compare or to rule the rewrite out.
+
   - To see all supported Torq flags, run:
 
     ```{code} shell

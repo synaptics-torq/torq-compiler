@@ -21,6 +21,9 @@ void populateDecomposeLinalgOpsPatterns(MLIRContext *context, RewritePatternSet 
 
 void populateSpecializeTransposeOpPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 
+// Value-preserving transpose normalization
+void populateEliminateTransposePatterns(MLIRContext *ctx, RewritePatternSet &patterns);
+
 void populateOptimizeMatmuOpPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 
 void populateRaiseSoftmaxOpPatterns(MLIRContext *ctx, RewritePatternSet &patterns);

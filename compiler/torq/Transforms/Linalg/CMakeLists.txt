@@ -29,6 +29,7 @@ iree_cc_library(
     ConvertNhwcOpToNchwPass.cpp
     RaiseResizeNearestNeighborPass.cpp
     FoldUnitExtentWrapperPass.cpp
+    CollapseUnrolledConcatPass.cpp
     RaiseSoftmaxOpPattern.cpp
     RaiseDynamicQuantizePattern.cpp
     RaiseIntMeanToPoolingPattern.cpp
@@ -37,6 +38,7 @@ iree_cc_library(
     OptimizeSelectOpPattern.cpp
     DecomposeLinalgOpsPattern.cpp
     SpecializeTransposeOpPattern.cpp
+    EliminateTransposePattern.cpp
     OptimizeMatmulOpPattern.cpp
     OptimizeConv1DPattern.cpp
     OptimizeArithElementwiseBinaryOpPattern.cpp

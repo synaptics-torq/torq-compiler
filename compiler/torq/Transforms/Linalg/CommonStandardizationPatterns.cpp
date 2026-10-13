@@ -81,98 +81,72 @@ bool isElementwiseNIn1Out(linalg::GenericOp srcOp) {
 }
 } // namespace
 
-class ReshapeToCollapseExpand : public OpRewritePattern<tensor::ReshapeOp> {
+/// The reshape that consumes `value` as its source as its only use, or null.
+static Operation *nextReshapeInChain(Value value) {
+    if (!value.hasOneUse() || value.use_begin()->getOperandNumber() != 0)
+        return nullptr;
+    Operation *next = value.use_begin()->getOwner();
+    return isa<tensor::ReshapeOp, tensor::CollapseShapeOp, tensor::ExpandShapeOp>(next) ? next
+                                                                                        : nullptr;
+}
+
+/// Number of non-unit dims (at least 1).
+static int64_t reducedRank(RankedTensorType type) {
+    return std::max<int64_t>(1, llvm::count_if(type.getShape(), [](int64_t d) { return d != 1; }));
+}
+
+/// Standardizes reshapes into tensor.collapse_shape / tensor.expand_shape: a
+/// chain of consecutive reshape ops (tensor.reshape, collapse_shape,
+/// expand_shape, each the single-use source of the next) starting at the
+/// anchor is replaced by its net reshape, emitted as a single collapse/expand
+/// or, for a mid-shape net, as a collapse+expand pair through the reduced
+/// shape. A lone tensor.reshape is a one-op chain.
+template <typename ReshapeOpTy>
+class ReshapeToCollapseExpand : public OpRewritePattern<ReshapeOpTy> {
   public:
-    using OpRewritePattern::OpRewritePattern;
-    LogicalResult matchAndRewrite(tensor::ReshapeOp op, PatternRewriter &rewriter) const {
-        //////////Support Functions///////////
-        auto calcRank = [&](ArrayRef<int64_t> srcShape) {
-            int rank = 0;
-            for (auto dim : srcShape) {
-                if (dim != 1)
-                    rank++;
-            }
-            if (rank == 0)
-                rank = 1;
-            return rank;
-        };
+    ReshapeToCollapseExpand(MLIRContext *ctx) : OpRewritePattern<ReshapeOpTy>(ctx) {
+        this->setDebugName("ReshapeToCollapseExpand");
+    }
 
-        auto findCollapseShape = [](ArrayRef<int64_t> shape) {
-            SmallVector<int64_t> collapseShape;
-            for (auto d : shape) {
-                if (d == 1) {
-                    continue;
-                }
-                collapseShape.push_back(d);
-            }
-            if (collapseShape.empty()) {
-                collapseShape.push_back(1);
-            }
-            return collapseShape;
-        };
-        //////////////End of Support Functions//////////////
-
-        auto srcType = mlir::dyn_cast<RankedTensorType>(op.getSource().getType());
-        auto dstType = mlir::dyn_cast<RankedTensorType>(op.getResult().getType());
-        if (!srcType || !dstType || !srcType.hasStaticShape() || !dstType.hasStaticShape())
-            return failure();
-
-        ArrayRef<int64_t> srcShape = srcType.getShape();
-        ArrayRef<int64_t> dstShape = dstType.getShape();
-        if (calcRank(srcShape) != calcRank(dstShape)) {
-            return failure();
+    LogicalResult matchAndRewrite(ReshapeOpTy op, PatternRewriter &rewriter) const override {
+        SmallVector<Operation *> chain = {op};
+        while (Operation *next = nextReshapeInChain(chain.back()->getResult(0)))
+            chain.push_back(next);
+        for (Operation *link : chain) {
+            auto srcTy = dyn_cast<RankedTensorType>(link->getOperand(0).getType());
+            auto dstTy = dyn_cast<RankedTensorType>(link->getResult(0).getType());
+            if (!srcTy || !dstTy || !srcTy.hasStaticShape() || !dstTy.hasStaticShape())
+                return rewriter.notifyMatchFailure(op, "expected static shapes");
         }
 
-        const int srcRank = srcType.getRank();
-        const int dstRank = dstType.getRank();
-        if (auto direct = getReassociationIndicesForReshape(srcType, dstType)) {
-            Value out;
-            if (dstRank < srcRank) {
-                out = tensor::CollapseShapeOp::create(
-                    rewriter, op.getLoc(), dstType, op.getSource(), *direct
-                );
-            }
-            else if (dstRank > srcRank) {
-                out = tensor::ExpandShapeOp::create(
-                    rewriter, op.getLoc(), dstType, op.getSource(), *direct
-                );
-            }
-            /// same rank: fall through to mid-shape decomposition
+        auto srcTy = cast<RankedTensorType>(chain.front()->getOperand(0).getType());
+        auto dstTy = cast<RankedTensorType>(chain.back()->getResult(0).getType());
+        bool hasReshape = llvm::any_of(chain, llvm::IsaPred<tensor::ReshapeOp>);
+        // A lone tensor.reshape that changes the number of non-unit dims is left
+        // to its consumers; a lone collapse/expand is already standard.
+        if (chain.size() == 1 && (!hasReshape || reducedRank(srcTy) != reducedRank(dstTy)))
+            return rewriter.notifyMatchFailure(op, "single reshape left as is");
+        // A collapse+expand pair whose net is mid-shape is already at its 2-op
+        // floor; refolding it would ping-pong in the greedy driver.
+        if (chain.size() == 2 && !hasReshape && srcTy != dstTy &&
+            !getReassociationIndicesForReshape(srcTy, dstTy))
+            return rewriter.notifyMatchFailure(op, "2-op chain at mid-shape floor");
 
-            if (out) {
-                rewriter.replaceOp(op, out);
-                return success();
-            }
-        }
-
-        SmallVector<int64_t> collapseShape = findCollapseShape(srcShape);
-        SmallVector<int64_t> dstCollapseShape = findCollapseShape(dstShape);
-        if (collapseShape != dstCollapseShape) {
-            op.emitError("ReshapeToCollapseExpand: cannot optimize reshape op due to different "
-                         "collapse shape");
-            return failure();
-        }
-
-        auto collapseSrc = getReassociationIndicesForCollapse(srcShape, collapseShape);
-        auto collapseDst = getReassociationIndicesForCollapse(dstShape, dstCollapseShape);
-        if (!collapseSrc || !collapseDst) {
-            return failure();
-        }
-
-        auto midType = RankedTensorType::get(collapseShape, srcType.getElementType());
-        Value collapsed = tensor::CollapseShapeOp::create(
-            rewriter, op.getLoc(), midType, op.getSource(), *collapseSrc
-        );
-        Value expanded =
-            tensor::ExpandShapeOp::create(rewriter, op.getLoc(), dstType, collapsed, *collapseDst);
-
-        rewriter.replaceOp(op, expanded);
+        Value replacement =
+            emitValuePreservingReshape(rewriter, op.getLoc(), op->getOperand(0), srcTy, dstTy);
+        rewriter.replaceAllUsesWith(chain.back()->getResult(0), replacement);
+        // Erase tail-first: every intermediate result is used only by the next op.
+        for (Operation *link : llvm::reverse(chain))
+            rewriter.eraseOp(link);
         return success();
     }
 };
 
 void populateCommonStandardizationPatterns(MLIRContext *context, RewritePatternSet &patterns) {
-    patterns.add<ReshapeToCollapseExpand>(context);
+    patterns.add<
+        ReshapeToCollapseExpand<tensor::ReshapeOp>,
+        ReshapeToCollapseExpand<tensor::CollapseShapeOp>,
+        ReshapeToCollapseExpand<tensor::ExpandShapeOp>>(context);
     tensor::populateReassociativeReshapeFoldingPatterns(patterns);
     patterns.add<ComposeExpandOfCollapseOp<tensor::ExpandShapeOp, tensor::CollapseShapeOp>>(context
     );

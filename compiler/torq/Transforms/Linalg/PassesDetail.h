@@ -41,6 +41,7 @@ namespace mlir::syna::torq {
 #define GEN_PASS_DEF_TORQANNOTATETORQRESOURCES
 #define GEN_PASS_DEF_DECOMPOSECONVTOSPACETODEPTH
 #define GEN_PASS_DEF_REMOVEISNAN
+#define GEN_PASS_DEF_COLLAPSEUNROLLEDCONCAT
 
 #include "torq/Transforms/Linalg/Passes.h.inc"
 

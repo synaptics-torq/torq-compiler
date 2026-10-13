@@ -34,4 +34,16 @@ broadcastInputs(linalg::LinalgOp srcOp, SmallVectorImpl<Value> &inputs, PatternR
 /// (identity, or broadcast from a size-1 dimension via constant-zero expr).
 bool checkIdentityLikeMaps(linalg::GenericOp op);
 
+/// Emits a value-preserving reshape from `src` to `dstTy` (both static ranked
+/// tensor types, same element type and numel):
+///   - `src` itself, when the types are equal;
+///   - a single tensor.collapse_shape / tensor.expand_shape when a
+///     reassociation exists;
+///   - a collapse+expand pair otherwise (mid-shape), through the reduced
+///     (non-unit) shape when both endpoints reduce identically, else rank-1.
+Value emitValuePreservingReshape(
+    PatternRewriter &rewriter, Location loc, Value src, RankedTensorType srcTy,
+    RankedTensorType dstTy
+);
+
 } // namespace mlir::syna::torq
