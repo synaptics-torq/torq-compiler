@@ -488,8 +488,7 @@ static void addHostLoweringPasses(OpPassManager &pipeline) {
         // the configuration half torq skips today: strategy + lowering configs
         buildLLVMCPUCodegenConfigurationPassPipeline(modulePassManager, CPUCodegenOptions{});
 
-        pipeline.nest<ModuleOp>().addNestedPass<func::FuncOp>(
-            std::make_unique<ZeroDistributionTilesPass>()
+        modulePassManager.addNestedPass<func::FuncOp>(std::make_unique<ZeroDistributionTilesPass>()
         );
 
         buildLLVMCPUCodegenPassPipeline(modulePassManager, LLVMCPUPipelineOptions{});
