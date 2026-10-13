@@ -44,7 +44,6 @@ void populateCastI32MulPatterns(FunctionOpInterface funcOp, IRRewriter &rewriter
 
 void populateSwishActivationPatterns(MLIRContext *context, RewritePatternSet &patterns);
 void populatePreCalcI8TablePatterns(MLIRContext *context, RewritePatternSet &patterns);
-void populateMulPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
 void populateFuseReluClampWithTruncfPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 

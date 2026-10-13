@@ -5,7 +5,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "PassesDetail.h"
-#include "Patterns.h"
 
 #include "torq/Conversions/LinalgToTorqHL/Passes.h"
 #include "torq/Conversions/TosaToTorqHL/Passes.h"

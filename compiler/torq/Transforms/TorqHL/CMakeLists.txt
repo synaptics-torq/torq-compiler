@@ -54,7 +54,6 @@ iree_cc_library(
     Transforms
   HDRS
     "Passes.h"
-    "Patterns.h"
   SRCS
     ${sources}
   DEPS

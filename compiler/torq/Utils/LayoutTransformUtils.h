@@ -68,7 +68,7 @@ bool isLayoutConversionTranspose(linalg::TransposeOp transposeOp);
 /// Output layout: [N,  C*bH*bW, H/bH, W/bW]
 /// Channel order: c * (bH*bW) + bh * bW + bw  (C-major, bh/bw innermost)
 ///
-/// This is identical to the SpaceToDepth used in Conv2DOpBigStridePattern.
+/// DecomposeConvToSpaceToDepthPass uses it for both the input and the weights.
 /// Applying it to a weight tensor [F, C, kH, kW] (treating F as N) gives
 /// [F, C*bH*bW, kH/bH, kW/bW], which is exactly the kernel repack needed
 /// when the corresponding input undergoes the same SpaceToDepth.
