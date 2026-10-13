@@ -29,6 +29,7 @@
 #include "iree/compiler/Dialect/Encoding/IR/EncodingTypes.h"
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
+#include "iree/compiler/Dialect/Util/Transforms/Passes.h"
 
 #include "compiler/plugins/target/LLVMCPU/LLVMIRPasses.h"
 #include "compiler/plugins/target/LLVMCPU/LLVMTargetOptions.h"
@@ -411,6 +412,11 @@ static void addCssLoweringPasses(OpPassManager &pipeline) {
         .addPass(createEmulateNarrowTypePass)
         .addPass(createCanonicalizerPass)
         .addPass(createCSEPass);
+
+    // 3.12's stream analysis attaches util.assume.int (e.g. udiv) to dispatch
+    // operands and they survive interface materialization; ConvertToLLVM marks
+    // the util dialect illegal. Drop the hints first, as LLVMCPU does.
+    modulePassManager.addPass(IREE::Util::createDropCompilerHintsPass());
 
     modulePassManager.addPass(iree_compiler::createConvertToLLVMPass(true));
     modulePassManager.addPass(createReconcileUnrealizedCastsPass());
