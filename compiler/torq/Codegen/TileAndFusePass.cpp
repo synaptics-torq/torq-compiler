@@ -333,6 +333,98 @@ int64_t makeByteAlignedTileSize(int64_t valuesPerByte, int64_t domainSize, int64
     return size - remainder;
 }
 
+// Record in `steps[dim]` the LCM of the constant right-hand sides of every
+// floordiv/mod/ceildiv sub-expression whose left-hand side references loop
+// dimension `dim`, and flag in `ceilDivs[dim]` whether any of them is a
+// ceildiv (ceildiv only composes with step-aligned tile sizes).
+void collectSemiAffineSteps(
+    AffineExpr expr, llvm::SmallVectorImpl<int64_t> &steps, llvm::SmallVectorImpl<bool> &ceilDivs
+) {
+    auto binOp = dyn_cast<AffineBinaryOpExpr>(expr);
+    if (!binOp)
+        return;
+
+    auto kind = binOp.getKind();
+    if (kind == AffineExprKind::FloorDiv || kind == AffineExprKind::Mod ||
+        kind == AffineExprKind::CeilDiv) {
+        if (auto constant = dyn_cast<AffineConstantExpr>(binOp.getRHS())) {
+            binOp.getLHS().walk([&](AffineExpr subExpr) {
+                if (auto dimExpr = dyn_cast<AffineDimExpr>(subExpr)) {
+                    unsigned dim = dimExpr.getPosition();
+                    steps[dim] = std::lcm(steps[dim], constant.getValue());
+                    ceilDivs[dim] = ceilDivs[dim] || kind == AffineExprKind::CeilDiv;
+                }
+            });
+        }
+    }
+
+    collectSemiAffineSteps(binOp.getLHS(), steps, ceilDivs);
+    collectSemiAffineSteps(binOp.getRHS(), steps, ceilDivs);
+}
+
+// Record in `plain`/`strided`/`stepped` the loop dims referenced by `expr`,
+// where dims under the left-hand side of a floordiv/mod/ceildiv by a constant
+// count as stepped (transitively), and dims scaled by a non-unit constant
+// factor (e.g. d0 * 64) count as strided: slicing a strided dim only shifts
+// the accessed window, it does not disturb the stepped structure itself.
+void collectDimUsage(
+    AffineExpr expr, bool underStep, bool scaled, llvm::SmallVectorImpl<bool> &plain,
+    llvm::SmallVectorImpl<bool> &strided, llvm::SmallVectorImpl<bool> &stepped
+) {
+    if (auto dimExpr = dyn_cast<AffineDimExpr>(expr)) {
+        if (underStep)
+            stepped[dimExpr.getPosition()] = true;
+        else if (scaled)
+            strided[dimExpr.getPosition()] = true;
+        else
+            plain[dimExpr.getPosition()] = true;
+        return;
+    }
+    auto binOp = dyn_cast<AffineBinaryOpExpr>(expr);
+    if (!binOp)
+        return;
+    auto kind = binOp.getKind();
+    bool isStep = (kind == AffineExprKind::FloorDiv || kind == AffineExprKind::Mod ||
+                   kind == AffineExprKind::CeilDiv) &&
+                  isa<AffineConstantExpr>(binOp.getRHS());
+    bool lhsScaled = scaled, rhsScaled = scaled;
+    if (kind == AffineExprKind::Mul) {
+        if (auto constant = dyn_cast<AffineConstantExpr>(binOp.getRHS()))
+            lhsScaled = lhsScaled || constant.getValue() != 1;
+        if (auto constant = dyn_cast<AffineConstantExpr>(binOp.getLHS()))
+            rhsScaled = rhsScaled || constant.getValue() != 1;
+    }
+    collectDimUsage(binOp.getLHS(), underStep || isStep, lhsScaled, plain, strided, stepped);
+    collectDimUsage(binOp.getRHS(), underStep || isStep, rhsScaled, plain, strided, stepped);
+}
+
+// A loop dim whose index in some input map shares an expression with a
+// floordiv/mod/ceildiv over *other* dims is "entangled" with them: e.g.
+// depth-to-space reads channel ((d2 mod 2)*2 + d3 mod 2)*C_out + d1, so d1 is
+// entangled with the parity of d2/d3. Tiling an entangled dim produces slices
+// whose shapes no longer satisfy the invariants the downstream
+// DepthToSpace/SpaceToDepth conversions match on, so it must stay whole.
+// Dims scaled by a non-unit constant (d0 * 64 in an im2col-style map
+// d1 mod K + d0 * 64) are exempt: tiling them only shifts the accessed
+// window by whole rows, which the downstream op's own stride arithmetic
+// absorbs, so they may be tiled freely.
+llvm::DenseSet<unsigned> findEntangledDims(linalg::LinalgOp linalgOp, size_t numDims) {
+    llvm::DenseSet<unsigned> entangled;
+    for (OpOperand *operand : linalgOp.getDpsInputOperands()) {
+        for (AffineExpr result : linalgOp.getMatchingIndexingMap(operand).getResults()) {
+            SmallVector<bool> plain(numDims, false), strided(numDims, false),
+                stepped(numDims, false);
+            collectDimUsage(result, false, false, plain, strided, stepped);
+            if (llvm::none_of(stepped, [](bool b) { return b; }))
+                continue;
+            for (unsigned dim = 0; dim < numDims; ++dim)
+                if (plain[dim])
+                    entangled.insert(dim);
+        }
+    }
+    return entangled;
+}
+
 TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp, int64_t sliceCount) {
     TilingInfo tilingInfo;
 
@@ -342,6 +434,12 @@ TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp, int64_t sliceCount) 
         if (loopIteratorTypes[domain] == utils::IteratorType::parallel)
             tilingInfo.tilingOrder.insert(domain);
     }
+
+    // Never tile a dim that is entangled with another dim's floordiv/mod step
+    // in an input map (see findEntangledDims); only the stepped dims may tile.
+    if (auto linalgOp = dyn_cast<linalg::LinalgOp>(tilingInterfaceOp.getOperation()))
+        for (unsigned dim : findEntangledDims(linalgOp, loopIteratorTypes.size()))
+            tilingInfo.tilingOrder.remove(dim);
 
     OpBuilder builder(tilingInterfaceOp->getContext());
     auto [iterDomainOffsets, iterDomainSizes, iterDomainStrides] =
@@ -398,6 +496,35 @@ TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp, int64_t sliceCount) 
         tilingInfo.adjustSize.push_back([=](int64_t size) {
             return makeSdimFriendlyTileSize(domainSize, size);
         });
+    }
+
+    // A loop dimension referenced under a floordiv/mod/ceildiv in an indexing
+    // map (e.g. the strided transpose-conv decomposition reads its input at
+    // `d floordiv 2`) can only be tiled with a size that composes with that
+    // step: MLIR's TilingInterfaceImpl requires the tile size to be 1, a
+    // multiple of the step, or (except for ceildiv) a divisor of it, and
+    // rejects anything else. Shrink such dims to a step-safe size up front.
+    {
+        SmallVector<int64_t> semiAffineSteps(loopIteratorTypes.size(), 1);
+        SmallVector<bool> semiAffineCeilDivs(loopIteratorTypes.size(), false);
+        if (auto linalgOp = dyn_cast<linalg::LinalgOp>(tilingInterfaceOp.getOperation())) {
+            for (AffineMap map : linalgOp.getIndexingMapsArray())
+                for (AffineExpr expr : map.getResults())
+                    collectSemiAffineSteps(expr, semiAffineSteps, semiAffineCeilDivs);
+        }
+        for (size_t index = 0; index < loopIteratorTypes.size(); ++index) {
+            int64_t step = semiAffineSteps[index];
+            if (step <= 1)
+                continue;
+            bool ceilDivOnly = semiAffineCeilDivs[index];
+            auto makeStepSafe = [=](int64_t size) {
+                while (size > 1 && size % step != 0 && (ceilDivOnly || step % size != 0))
+                    --size;
+                return size;
+            };
+            tilingInfo.adjustSize[index] =
+                composeSizeAdjustments(makeStepSafe, tilingInfo.adjustSize[index]);
+        }
     }
 
     // If any sub-byte (e.g. i4) weight feeds this op, the innermost tiled
