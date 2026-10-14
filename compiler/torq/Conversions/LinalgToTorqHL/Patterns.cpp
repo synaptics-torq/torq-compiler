@@ -537,6 +537,50 @@ bool isTorqNegateOp(Operation *op, std::string &failReason) {
     return true;
 }
 
+// Longest reduction axis that ReduceOpConversion makes by folding contiguous
+// reduced dims into one. On the NSS simulator an integer single-axis reduce
+// drops odd elements past index 32768, so lengths above 32769 are wrong there
+// (hardware is correct). Longer runs are reduced one axis at a time instead.
+constexpr int64_t kMaxFoldedReduceExtent = 32768;
+
+// Whether the sorted reduced dims `dims` are contiguous and short enough to be
+// folded into one axis (see kMaxFoldedReduceExtent).
+static bool canFoldReduceDims(ShapedType inputType, ArrayRef<int64_t> dims) {
+    if (dims.back() - dims.front() + 1 != (int64_t)dims.size()) {
+        return false;
+    }
+    int64_t foldedExtent = 1;
+    for (int64_t d : dims) {
+        int64_t size = inputType.getDimSize(d);
+        // Checked before multiplying so the product cannot overflow.
+        if (size < 0 || size > kMaxFoldedReduceExtent / foldedExtent) {
+            return false;
+        }
+        foldedExtent *= size;
+    }
+    return true;
+}
+
+// Returns why the reduction dims of `op` cannot be lowered to torq_hl.reduce,
+// or std::nullopt if they can. Multi-dimension reductions are supported unless
+// they reduce a dynamic dim.
+static std::optional<StringRef> getUnsupportedReduceDimsReason(linalg::ReduceOp op) {
+    ArrayRef<int64_t> dims = op.getDimensions();
+    if (dims.empty()) {
+        return StringRef("expected at least one reduction dimension");
+    }
+    if (dims.size() == 1) {
+        return std::nullopt;
+    }
+    auto inputType = cast<ShapedType>(op.getInputs()[0].getType());
+    for (int64_t d : dims) {
+        if (inputType.isDynamicDim(d)) {
+            return StringRef("multi-dimension reduction over a dynamic dimension");
+        }
+    }
+    return std::nullopt;
+}
+
 bool isTorqReduceSumOp(Operation *op, std::string &failReason) {
     auto reduceOp = dyn_cast<linalg::ReduceOp>(op);
     if (!reduceOp) {
@@ -610,9 +654,9 @@ bool isTorqReduceSumOp(Operation *op, std::string &failReason) {
         }
     }
 
-    // Only support single dimension reduction
-    if (reduceOp.getDimensions().size() != 1) {
-        failReason = "Reduce sum only supports single dimension reduction";
+    // Multi-dimension reductions are lowered by ReduceOpConversion (collapse or chain).
+    if (auto reason = getUnsupportedReduceDimsReason(reduceOp)) {
+        failReason = ("Reduce sum: " + *reason).str();
         return false;
     }
 
@@ -1154,7 +1198,8 @@ struct GenericReductionConversion : public OpRewritePattern<linalg::GenericOp> {
     }
 };
 
-/// Lowers a single-input, single-dimension `linalg.reduce` to `torq_hl::ReduceOp`
+/// Lowers a single-input `linalg.reduce` to `torq_hl::ReduceOp`. Multiple reduced
+/// dims are collapsed into one axis or reduced by a chain of single-axis ops.
 struct ReduceOpConversion : public OpRewritePattern<linalg::ReduceOp> {
 
     ReduceOpConversion(MLIRContext *context) : OpRewritePattern(context) {}
@@ -1203,13 +1248,17 @@ struct ReduceOpConversion : public OpRewritePattern<linalg::ReduceOp> {
 
         Value input = srcOp.getInputs()[0];
 
-        ArrayRef<int64_t> dimensions = srcOp.getDimensions();
-        if (dimensions.size() != 1) {
-            return rewriter.notifyMatchFailure(
-                srcOp, "Only support one dimension reduction in ReduceOp"
-            );
+        if (auto reason = getUnsupportedReduceDimsReason(srcOp)) {
+            return rewriter.notifyMatchFailure(srcOp, *reason);
         }
-        int64_t axis = dimensions[0];
+        SmallVector<int64_t> dimensions(srcOp.getDimensions());
+        llvm::sort(dimensions);
+
+        // A multi-dimension reduce becomes one torq_hl.reduce over a collapsed
+        // axis when it can be folded, otherwise a chain of single-axis reduces.
+        // Only decide here; IR is built below.
+        bool multiDim = dimensions.size() > 1;
+        bool foldDims = multiDim && canFoldReduceDims(inputType, dimensions);
 
         auto reduceBodyOp = yieldOp.getOperand(0).getDefiningOp();
         auto opName = getReduceOpName(reduceBodyOp);
@@ -1228,6 +1277,47 @@ struct ReduceOpConversion : public OpRewritePattern<linalg::ReduceOp> {
         RankedTensorType resultType = srcOutputType;
 
         Value scaleBias = createI32Const(rewriter, srcOp, interleave(bias, scale));
+
+        if (multiDim && !foldDims) {
+            // Reduce the highest axis first so lower axis indices stay valid.
+            // A bf16 sum keeps its partial sums in f32 between steps, as one
+            // torq_hl.reduce does in its accumulator; only the last step rounds.
+            Type partialElementType = resultType.getElementType();
+            if (inputElementType.isBF16() && *opName == "reduce_sum") {
+                partialElementType = rewriter.getF32Type();
+            }
+            Value cur = input;
+            for (int64_t d : llvm::reverse(dimensions)) {
+                SmallVector<int64_t> shape(cast<RankedTensorType>(cur.getType()).getShape());
+                shape.erase(shape.begin() + d);
+                Type stepElementType =
+                    d == dimensions.front() ? resultType.getElementType() : partialElementType;
+                auto stepType = RankedTensorType::get(shape, stepElementType);
+                auto step = emitTorqReduce(
+                    rewriter, srcOp, stepType, *opName, d, scaleBias, /*outputMin*/ 0,
+                    /*outputMax*/ 0, cur
+                );
+                cur = step.getResult(0);
+            }
+            assert(cur.getType() == resultType && "chained reduce must yield the result type");
+            rewriter.replaceOp(srcOp, cur);
+            return success();
+        }
+
+        int64_t axis = dimensions.front();
+        if (foldDims) {
+            // Fold the contiguous reduced dims [front, back] into the single axis `front`.
+            SmallVector<ReassociationIndices> reassoc;
+            for (int64_t d = 0; d < inputType.getRank(); ++d) {
+                if (d > dimensions.front() && d <= dimensions.back()) {
+                    reassoc.back().push_back(d);
+                }
+                else {
+                    reassoc.push_back({d});
+                }
+            }
+            input = tensor::CollapseShapeOp::create(rewriter, srcOp.getLoc(), input, reassoc);
+        }
 
         auto reduceOp = emitTorqReduce(
             rewriter, srcOp, resultType, *opName, axis, scaleBias, /*outputMin*/ 0, /*outputMax*/ 0,
