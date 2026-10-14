@@ -97,6 +97,10 @@ CMAKE_ARGS=(
 if [[ "$TARGET" == "astra_machina" && "$4" == "poky" ]]; then
   CMAKE_ARGS+=(
     -DIREE_BUILD_PYTHON_BINDINGS=ON
+    # Cross build: host-side test/lint targets are not usable here, and
+    # IREE 3.12's pyright binding test hard-requires a pyright executable
+    # that neither the SDK python nor the builder image provides.
+    -DIREE_BUILD_TESTS=OFF
     -DPython3_EXECUTABLE="${PYTHON3}"
     -DPython3_INCLUDE_DIR="${SDK_DIR}/sysroots/cortexa55-poky-linux/usr/include/python${PYVER}"
     -DPython_INCLUDE_DIR="${SDK_DIR}/sysroots/cortexa55-poky-linux/usr/include/python${PYVER}"
