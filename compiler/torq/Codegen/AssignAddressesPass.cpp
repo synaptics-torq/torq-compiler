@@ -736,8 +736,8 @@ static std::optional<OpIdx> lastMovablePosition(
 // and the placement is planned again, once per attempt.
 static std::optional<Placement>
 planPlacement(ArrayRef<LramBuffer> buffers, int64_t usable, bool replan) {
-    // each attempt adds one forced compaction
-    constexpr int maxReplans = 8;
+    // each attempt adds one forced compaction; a stack of repeated layers needs a few per layer
+    constexpr int maxReplans = 256;
     SmallVector<ForcedCompaction> forcedCompactions;
     for (int attempt = 0; attempt <= maxReplans; attempt++) {
         PlacementFailure failure;
