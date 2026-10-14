@@ -237,6 +237,23 @@ def AttachX86CpuObjects :
   ];
 }
 
+def SizeSliceCodeSections :
+    InterfacePass<"torq-size-slice-code-sections",
+         "mlir::FunctionOpInterface"> {
+  let summary = "Shrink slice invocation code sections to their compiled size";
+  let description = [{
+    Slice invocations reserve an upper-bound XRAM code section when they are
+    outlined. Compile each slice program once (its size does not depend on the
+    XRAM address) and shrink the section to the exact CFG + NDL size before XRAM
+    addresses are assigned, so the XRAM footprint of a network is not dominated by
+    unused code reservations.
+  }];
+  let constructor = "mlir::syna::torq::createSizeSliceCodeSectionsPass()";
+  let dependentDialects = [
+    "syna::torq_hl::TorqHLDialect"
+  ];
+}
+
 def CompileSliceInvocations :
     InterfacePass<"torq-compile-slice-invocations",
          "mlir::FunctionOpInterface"> {

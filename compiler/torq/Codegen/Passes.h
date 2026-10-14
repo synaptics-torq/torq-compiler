@@ -88,6 +88,7 @@ createAttachX86CpuObjectsPass();
 std::unique_ptr<OperationPass<ModuleOp>> createCreateGlobalsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createCompileSliceInvocationsPass();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createSizeSliceCodeSectionsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createCompileNSSInvocationsPass();
 

@@ -420,15 +420,32 @@ static LogicalResult compileProgram(
     return success();
 }
 
-static LogicalResult compileInvocation(torq_hl::CreateInvocationOp createInvocationOp) {
+// Exact CFG/NDL split of a slice program, recorded by SizeSliceCodeSections before
+// XRAM layout and honoured by CompileSliceInvocations.
+constexpr StringLiteral kSliceCfgSizeAttr = "torq.slice_cfg_size";
+constexpr StringLiteral kSliceNdlSizeAttr = "torq.slice_ndl_size";
 
-    // This function generates the bitstream for a task, this is stored only in
-    // XRAM segments and will be loaded by the main NSS program
+// Everything needed to compile the slice program of an invocation.
+struct SliceInvocationInputs {
+    torq_hl::ProgramOp programOp;
+    uint32_t lramAddress = 0;
+    int slc = 0;
+    uint32_t cfgSize = 0;
+    uint32_t ndlSize = 0;
+    IRMapping mapping;
+};
 
-    auto programOp = createInvocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
+static LogicalResult
+prepareInvocation(torq_hl::CreateInvocationOp createInvocationOp, SliceInvocationInputs &in) {
 
-    if (!programOp) {
+    in.programOp = createInvocationOp.getProgram().getDefiningOp<torq_hl::ProgramOp>();
+
+    if (!in.programOp) {
         return createInvocationOp->emitOpError("program is not a torq_hl::ProgramOp");
+    }
+
+    if (!createInvocationOp.getCodeSection()) {
+        return createInvocationOp->emitOpError("Missing code section");
     }
 
     auto maybeStartProgramOp = findStartProgramOp(createInvocationOp);
@@ -437,7 +454,7 @@ static LogicalResult compileInvocation(torq_hl::CreateInvocationOp createInvocat
         return failure();
     }
 
-    auto startOp = maybeStartProgramOp.value();
+    auto startProgramOp = maybeStartProgramOp.value();
 
     // SliceID is needed only for logging purpose in order to dump the CFG descriptors in text
     // files, using the same id for all descriptors wouldn´t change the functionality.
@@ -448,13 +465,146 @@ static LogicalResult compileInvocation(torq_hl::CreateInvocationOp createInvocat
         return createInvocationOp->emitOpError("Missing executor id");
     }
 
-    auto slc = maybeId.value().getZExtValue();
+    in.slc = maybeId.value().getZExtValue();
 
-    auto maybeLramCodeAddress = getLramAddress(startOp.getCodeSections()[0]);
+    auto maybeLramCodeAddress = getLramAddress(startProgramOp.getCodeSections()[0]);
 
     if (!maybeLramCodeAddress) {
         return createInvocationOp->emitOpError("Missing lram code address");
     }
+
+    in.lramAddress = *maybeLramCodeAddress;
+
+    if (auto cfg = createInvocationOp->getAttrOfType<IntegerAttr>(kSliceCfgSizeAttr)) {
+        // exact split measured before the code section was sized for XRAM layout
+        auto ndl = createInvocationOp->getAttrOfType<IntegerAttr>(kSliceNdlSizeAttr);
+        if (!ndl) {
+            return createInvocationOp->emitOpError("Missing ") << kSliceNdlSizeAttr;
+        }
+        in.cfgSize = cfg.getInt();
+        in.ndlSize = ndl.getInt();
+    }
+    else {
+        // find the maximal code size that was kept aside to run this program
+        auto codeType = cast<MemRefType>(createInvocationOp.getCodeSection().getType());
+        uint32_t programSize = getEncodedTotalSizeBytes(codeType);
+
+        // Default programs use 0x900 bytes for CFGs, the rest for NDLs. A larger-than-default
+        // code section (currently only from torq_hl.derive_quant_params) spends its extra bytes
+        // on CFG space, keeping a fixed 0xB00 NDL reserve. Default programs are
+        // untouched (0xA00*2 - 0xB00 == 0x900).
+        in.cfgSize = programSize > 0xA00 * 2 ? programSize - 0xB00 : 0x900;
+
+        if (programSize <= in.cfgSize) {
+            return createInvocationOp->emitOpError("Program size too small to fit CFGs instructions"
+            );
+        }
+
+        in.ndlSize = programSize - in.cfgSize;
+    }
+
+    // compute the mapping from block arguments to invocation arguments
+    auto blockArgs = in.programOp.getBody().front().getArguments();
+
+    auto argValues = startProgramOp.getArgs();
+
+    for (auto [arg, value] : llvm::zip(blockArgs, argValues)) {
+        in.mapping.map(arg, value);
+    }
+
+    return success();
+}
+
+// Point the DMA that copies a code section into LRAM at exactly `size` bytes.
+static LogicalResult
+resizeCodeSectionLoads(RewriterBase &rewriter, Value codeSection, int64_t size) {
+    for (auto &use : codeSection.getUses()) {
+        if (auto loadOp = dyn_cast<torq_hl::LoadOp>(use.getOwner())) {
+            rewriter.setInsertionPoint(loadOp);
+
+            auto destSubview = memref::SubViewOp::create(
+                rewriter, loadOp.getLoc(), loadOp.getOutput(), SmallVector<int64_t>{0},
+                SmallVector<int64_t>{size}, SmallVector<int64_t>{1}
+            );
+
+            auto maybeLramAddress = getLramAddress(loadOp.getOutput());
+
+            if (!maybeLramAddress.has_value()) {
+                return loadOp.emitError("Unable to get LRAM address of load destination");
+            }
+
+            setLramAddress(destSubview, maybeLramAddress.value());
+
+            loadOp.getOutputMutable().set(destSubview);
+
+            // fix the amount of data to load
+            loadOp.setElementSizeBytes(static_cast<int32_t>(size));
+
+            break;
+        }
+    }
+    return success();
+}
+
+// Shrink the XRAM code section of a slice invocation from its upper-bound budget to
+// the size its program actually compiles to, before XRAM addresses are assigned. The
+// program size does not depend on the XRAM address, so the measurement compiles at
+// address 0; CompileSliceInvocations later compiles at the real address with the
+// recorded split. Without this every invocation reserved its full budget in the XRAM
+// layout, and the runtime maps the whole span.
+static LogicalResult sizeCodeSection(torq_hl::CreateInvocationOp createInvocationOp) {
+    if (createInvocationOp->hasAttr(kSliceCfgSizeAttr)) {
+        return success();
+    }
+
+    SliceInvocationInputs in;
+    if (failed(prepareInvocation(createInvocationOp, in))) {
+        return failure();
+    }
+
+    if (failed(compileProgram(
+            in.lramAddress, /*xramAddress=*/0, in.cfgSize, in.ndlSize, in.slc, in.programOp,
+            in.mapping
+        ))) {
+        return createInvocationOp->emitOpError("Failed to compile slice program");
+    }
+
+    Builder builder(createInvocationOp);
+    createInvocationOp->setAttr(kSliceCfgSizeAttr, builder.getI32IntegerAttr(in.cfgSize));
+    createInvocationOp->setAttr(kSliceNdlSizeAttr, builder.getI32IntegerAttr(in.ndlSize));
+
+    Value codeSection = createInvocationOp.getCodeSection();
+    auto codeType = cast<MemRefType>(codeSection.getType());
+    int64_t size = in.cfgSize + in.ndlSize;
+
+    if (size >= codeType.getNumElements()) {
+        return success();
+    }
+
+    codeSection.setType(MemRefType::get(
+        {size}, codeType.getElementType(), codeType.getLayout(), codeType.getMemorySpace()
+    ));
+
+    IRRewriter rewriter(createInvocationOp);
+    return resizeCodeSectionLoads(rewriter, codeSection, size);
+}
+
+static LogicalResult compileInvocation(torq_hl::CreateInvocationOp createInvocationOp) {
+
+    // This function generates the bitstream for a task, this is stored only in
+    // XRAM segments and will be loaded by the main NSS program
+
+    SliceInvocationInputs in;
+    if (failed(prepareInvocation(createInvocationOp, in))) {
+        return failure();
+    }
+
+    auto programOp = in.programOp;
+    auto slc = in.slc;
+    auto lramAddress = in.lramAddress;
+    uint32_t cfgSize = in.cfgSize;
+    uint32_t ndlSize = in.ndlSize;
+    IRMapping &mapping = in.mapping;
 
     auto maybeXramCodeAddress = createInvocationOp.getXramCodeAddress();
 
@@ -462,39 +612,7 @@ static LogicalResult compileInvocation(torq_hl::CreateInvocationOp createInvocat
         return createInvocationOp->emitOpError("Missing xram code address");
     }
 
-    // compute the initial addresses and sizes for memory that will host cfgs and ndls
-    auto lramAddress = *maybeLramCodeAddress;
     auto xramAddress = *maybeXramCodeAddress;
-
-    // find the maximal code size that was kept aside to run this program
-    auto codeType = cast<MemRefType>(createInvocationOp.getCodeSection().getType());
-    uint32_t programSize = getEncodedTotalSizeBytes(codeType);
-
-    // Default programs use 0x900 bytes for CFGs, the rest for NDLs. A larger-than-default
-    // code section (currently only from torq_hl.derive_quant_params) spends its extra bytes
-    // on CFG space, keeping a fixed 0xB00 NDL reserve. Default programs are
-    // untouched (0xA00*2 - 0xB00 == 0x900).
-    uint32_t cfgSize = programSize > 0xA00 * 2 ? programSize - 0xB00 : 0x900;
-
-    if (programSize <= cfgSize) {
-        return createInvocationOp->emitOpError("Program size too small to fit CFGs instructions");
-    }
-
-    uint32_t ndlSize = programSize - cfgSize;
-
-    auto startProgramOp = *maybeStartProgramOp;
-
-    // compute the mapping from block arguments to invocation arguments
-
-    IRMapping mapping;
-
-    auto blockArgs = programOp.getBody().front().getArguments();
-
-    auto argValues = startProgramOp.getArgs();
-
-    for (auto [arg, value] : llvm::zip(blockArgs, argValues)) {
-        mapping.map(arg, value);
-    }
 
     // compile once the program to figure out the real cfg/ndl sizes
     if (failed(compileProgram(lramAddress, xramAddress, cfgSize, ndlSize, slc, programOp, mapping)
@@ -508,6 +626,13 @@ static LogicalResult compileInvocation(torq_hl::CreateInvocationOp createInvocat
             lramAddress, xramAddress, cfgSize, ndlSize, slc, programOp, mapping, &code
         ))) {
         return createInvocationOp->emitOpError("Failed to compile slice program");
+    }
+
+    // the XRAM layout reserved exactly the measured size: the code must still fit it
+    auto reservedType = cast<MemRefType>(createInvocationOp.getCodeSection().getType());
+    if (static_cast<int64_t>(code.size()) > reservedType.getNumElements()) {
+        return createInvocationOp->emitOpError("slice program grew past its XRAM code section (")
+               << code.size() << " > " << reservedType.getNumElements() << " bytes)";
     }
 
     // replace the createInvocation op code section a descriptor op
@@ -530,30 +655,10 @@ static LogicalResult compileInvocation(torq_hl::CreateInvocationOp createInvocat
     // directly
 
     // update all the dma load of descriptors to use the correct size
-    for (auto &use : descriptorOp.getCodeSection().getUses()) {
-        if (auto loadOp = dyn_cast<torq_hl::LoadOp>(use.getOwner())) {
-            rewriter.setInsertionPoint(loadOp);
-
-            auto destSubview = memref::SubViewOp::create(
-                rewriter, loadOp.getLoc(), loadOp.getOutput(), SmallVector<int64_t>{0},
-                SmallVector<int64_t>{static_cast<int64_t>(code.size())}, SmallVector<int64_t>{1}
-            );
-
-            auto maybeLramAddress = getLramAddress(loadOp.getOutput());
-
-            if (!maybeLramAddress.has_value()) {
-                return loadOp.emitError("Unable to get LRAM address of load destination");
-            }
-
-            setLramAddress(destSubview, maybeLramAddress.value());
-
-            loadOp.getOutputMutable().set(destSubview);
-
-            // fix the amount of data to load
-            loadOp.setElementSizeBytes(static_cast<int32_t>(code.size()));
-
-            break;
-        }
+    if (failed(resizeCodeSectionLoads(
+            rewriter, descriptorOp.getCodeSection(), static_cast<int64_t>(code.size())
+        ))) {
+        return failure();
     }
 
     if (programOp.use_empty()) {
@@ -582,10 +687,34 @@ void CompileSliceInvocationsPass::runOnOperation() {
     }
 }
 
+class SizeSliceCodeSectionsPass
+    : public impl::SizeSliceCodeSectionsBase<SizeSliceCodeSectionsPass> {
+  public:
+    using SizeSliceCodeSectionsBase::SizeSliceCodeSectionsBase;
+
+    void runOnOperation() override {
+        SmallVector<torq_hl::CreateInvocationOp> invocationOps;
+        for (auto op : getOperation().getFunctionBody().getOps<torq_hl::CreateInvocationOp>()) {
+            if (op.getInvocation().getType().getExecutor() == torq_hl::Executor::Slice) {
+                invocationOps.push_back(op);
+            }
+        }
+        for (auto op : invocationOps) {
+            if (failed(sizeCodeSection(op))) {
+                return signalPassFailure();
+            }
+        }
+    }
+};
+
 } // namespace
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createCompileSliceInvocationsPass() {
     return std::make_unique<CompileSliceInvocationsPass>();
+}
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createSizeSliceCodeSectionsPass() {
+    return std::make_unique<SizeSliceCodeSectionsPass>();
 }
 
 } // namespace mlir::syna::torq

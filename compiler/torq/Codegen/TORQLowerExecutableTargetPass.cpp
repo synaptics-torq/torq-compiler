@@ -312,6 +312,10 @@ void addNssPostAssignLramAddressesPasses(OpPassManager &pm) {
     {
         auto &funcPm = pm.nest<func::FuncOp>();
 
+        // size slice code sections to their compiled programs so the XRAM layout
+        // does not reserve the outlining upper bound for every invocation
+        funcPm.addPass(createSizeSliceCodeSectionsPass());
+
         // assign addresses to DTCM, ITCM, and XRAM
         funcPm.addPass(createAssignDtcmItcmXramAddressesPass());
 
