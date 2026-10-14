@@ -42,6 +42,11 @@ constexpr int64_t kConvOutputChannelTile = 64;
 // Set by TileAndFuse on a conv that LinalgSlicing must keep on one slice.
 constexpr llvm::StringLiteral kSingleSliceAttr = "torq-single-slice";
 
+// The LRAM budget, in percent, that the tile-fit probe used with the stream schedule. Set by
+// TileAndFuse on each tile loop, and on the function for the ops it does not tile.
+// FoldConvert sizes an op against the nearest one.
+constexpr llvm::StringLiteral kPrefetchTileBudgetAttr = "torq-prefetch-tile-budget";
+
 // True when `op` is a Conv2DNchwFchwOp whose packed weight is too large to keep
 // `sliceCount` copies live within half of LRAM. Dual slicing such a conv can
 // force smaller tiles that each re-stream the weights, so TileAndFuse probes it

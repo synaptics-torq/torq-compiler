@@ -104,6 +104,7 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createSegmentNSSProgramsPass
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignNSSProgramsAddressesPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createLinalgSlicingPass(int64_t sliceCount = 0);
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createPrefetchInputsPass(int64_t lramSize = 0);
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAddDeallocationPass();
 
@@ -163,6 +164,15 @@ void addTorqComprehensiveBufferizePasses(
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createMarkHostExecutorPass();
 
+/// How DMA is moved to overlap compute: --torq-prefetch-algorithm. The default, auto, is
+/// constant-loads on every chip.
+enum class PrefetchAlgorithm { Auto, None, ConstantLoads, StreamSchedule };
+PrefetchAlgorithm prefetchAlgorithm();
+
+/// Whether the stream schedule (PrefetchInputs) is on. The matmul tile budget only
+/// applies then.
+bool prefetchInputsEnabled();
+
 // When optimizeForTileAndFuse is true the pipeline is being executed inside
 // Tile & Fuse, to check if the extracted IR fits in LRAM. Hence, we don't care
 // so much about the result of the computation. For example, if all the
@@ -172,9 +182,11 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createMarkHostExecutorPass()
 // kept rather than thrown away, which is what makes failure-driven recovery worth its
 // DMA; a probe that recovered would report a tile as fitting when it only fits because
 // of that DMA. `sliceBufferSharing` is for the real pipeline only, see FoldConvert.
+// `budgetPercent` is the part of LRAM the passes size against: a tile-fit probe for a
+// smaller tile budget passes less than 100.
 void addPassesPostTileAndFuseUpToAssignLramAddresses(
     OpPassManager &pipeline, bool optimizeForTileAndFuse = false, bool isRealPipeline = false,
-    SliceBufferSharing sliceBufferSharing = SliceBufferSharing::None
+    SliceBufferSharing sliceBufferSharing = SliceBufferSharing::None, int budgetPercent = 100
 );
 
 // The tail of the NSS pipeline: buffer deallocation, failure-driven LRAM residency

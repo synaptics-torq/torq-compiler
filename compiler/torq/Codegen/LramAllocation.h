@@ -17,4 +17,8 @@ namespace mlir::syna::torq {
 // swap-in, or nullopt when the allocation fails. The trial does not change `funcOp`.
 std::optional<int64_t> lramSwapBytes(FunctionOpInterface funcOp);
 
+// True when the LRAM planner places `funcOp` within `usableBytes` without any swap.
+// `funcOp` must already contain the deallocations that define the buffer lifetimes.
+bool lramPlacementFitsWithoutSwaps(FunctionOpInterface funcOp, int64_t usableBytes);
+
 } // namespace mlir::syna::torq

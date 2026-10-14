@@ -799,6 +799,12 @@ static BoolAttr getTileFitProbeAttr(FunctionOpInterface funcOp) {
     return moduleOp ? moduleOp->getAttrOfType<BoolAttr>(kTileFitProbeAttr) : BoolAttr();
 }
 
+bool lramPlacementFitsWithoutSwaps(FunctionOpInterface funcOp, int64_t usableBytes) {
+    SmallVector<LramBuffer> buffers = collectLramBuffers(funcOp);
+    std::optional<Placement> placement = planPlacement(buffers, usableBytes, /*replan=*/true);
+    return placement && placement->schedule.empty();
+}
+
 // Lay out every LRAM allocation over its whole lifetime; when that does not fit, schedule
 // swaps and perform them with convertVirtualToPhysicalMemRefs, which places the buffers it
 // swaps in where the plan put them. Infeasibility (the buffers pinned at some op cannot

@@ -58,6 +58,7 @@
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SetOperations.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -73,6 +74,7 @@
 #include <cassert>
 #include <cstdint>
 #include <iomanip>
+#include <map>
 #include <numeric>
 #include <optional>
 #include <sstream>
@@ -90,6 +92,23 @@ static constexpr llvm::StringLiteral kLramPayloadArgAttr = "torq.lram_payload";
 using namespace mlir::iree_compiler;
 
 namespace mlir::syna::torq {
+
+static llvm::cl::opt<int> clPrefetchTileBudgetPercent(
+    "torq-prefetch-tile-budget-percent",
+    llvm::cl::desc("with --torq-prefetch-algorithm=stream-schedule, the percent of LRAM the "
+                   "tile-fit probe may use in a function whose constants do not fit in LRAM; "
+                   "the rest stays free to load the next weights"),
+    llvm::cl::init(50)
+);
+
+static llvm::cl::opt<int> clMatmulTileBudgetPercent(
+    "torq-prefetch-matmul-tile-budget-percent",
+    llvm::cl::desc("with --torq-prefetch-algorithm=stream-schedule, the percent of LRAM the "
+                   "tile-fit probe may use for a tile loop rooted at a matmul (or other "
+                   "contraction without a sliding window) in a function whose constants do not "
+                   "fit in LRAM"),
+    llvm::cl::init(40)
+);
 
 /// Return true if two ops can be fused — they must have the same executor
 /// assignment, or at least one must be unassigned (e.g. constants, casts).
@@ -742,6 +761,19 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
     // Bytes the LRAM plan of the last tile the probe accepted relocates.
     int64_t lastFitRelocatedBytes_ = 0;
 
+    // The same probes built for a smaller tile budget, one set per budget percent.
+    struct BudgetPipelines {
+        std::unique_ptr<PassManager> optimized, notOptimized, sharedSlices;
+    };
+    std::map<int, BudgetPipelines> budgetPipelines_;
+    // Budget percent for the tile loop being fitted, or -1 for the whole LRAM.
+    int tileBudgetPercent_ = -1;
+    // Whether this function's loops get the smaller budgets. See runOnOperation.
+    bool reducedBudgets_ = false;
+    // tileBudgetPercent_ outside the matmul loops: the smaller budget in a function with
+    // reducedBudgets_, else -1 (the whole LRAM).
+    int defaultBudgetPercent_ = -1;
+
     // Holds all the untiled ops we have already tiled, so we don't tile them
     // again.
     llvm::DenseSet<Operation *> untiledTiledOps_;
@@ -882,6 +914,38 @@ void TileAndFusePass::initPipelines(MLIRContext *context) {
 llvm::LogicalResult
 TileAndFusePass::runAssignAddressesPipeline(ModuleOp moduleOp, bool optimizeForTileAndFuse) {
     initPipelines(moduleOp->getContext());
+
+    if (tileBudgetPercent_ >= 0) {
+        MLIRContext *context = moduleOp->getContext();
+        BudgetPipelines &p = budgetPipelines_[tileBudgetPercent_];
+        if (!p.optimized) {
+            p.optimized = std::make_unique<PassManager>(context);
+            p.notOptimized = std::make_unique<PassManager>(context);
+            p.sharedSlices = std::make_unique<PassManager>(context);
+            for (PassManager *pm :
+                 {p.optimized.get(), p.notOptimized.get(), p.sharedSlices.get()}) {
+                if (failed(applyPassManagerCLOptions(*pm)))
+                    assert(false);
+            }
+            addPassesPostTileAndFuseUpToAssignLramAddresses(
+                *p.optimized, true, /*isRealPipeline=*/false, SliceBufferSharing::None,
+                tileBudgetPercent_
+            );
+            addPassesPostTileAndFuseUpToAssignLramAddresses(
+                *p.notOptimized, false, /*isRealPipeline=*/false, SliceBufferSharing::None,
+                tileBudgetPercent_
+            );
+            addPassesPostTileAndFuseUpToAssignLramAddresses(
+                *p.sharedSlices, true, /*isRealPipeline=*/false,
+                SliceBufferSharing::InputsAndOutputs, tileBudgetPercent_
+            );
+        }
+        if (optimizeForTileAndFuse && probeWithSharedSliceBuffers_)
+            return p.sharedSlices->run(moduleOp);
+        if (optimizeForTileAndFuse)
+            return p.optimized->run(moduleOp);
+        return p.notOptimized->run(moduleOp);
+    }
 
     LLVM_DEBUG(llvm::dbgs() << "*** Running the pipeline for: " << moduleOp.getName() << "\n");
 
@@ -1254,6 +1318,41 @@ static SmallVector<std::optional<int64_t>> getConvOutputDomains(
         return domains;
     }
     return {};
+}
+
+static int64_t staticBytes(Value value) {
+    auto type = dyn_cast<ShapedType>(value.getType());
+    if (!type || !type.hasStaticShape())
+        return -1;
+    return type.getNumElements() * llvm::divideCeil(type.getElementTypeBitWidth(), 8);
+}
+
+// How many times the tile `sizes` makes the matmul loop `linalgOp` load its weight (its
+// largest input): once per row tile, the tiles of the parallel domains the weight does
+// not index. 1 when the weight loads only once.
+static int64_t countMatmulWeightLoads(
+    linalg::LinalgOp linalgOp, ArrayRef<int64_t> iterDomainSizes, ArrayRef<OpFoldResult> sizes
+) {
+    OpOperand *weight = nullptr;
+    for (OpOperand *input : linalgOp.getDpsInputOperands())
+        if (staticBytes(input->get()) > (weight ? staticBytes(weight->get()) : -1))
+            weight = input;
+    if (!weight)
+        return 1;
+    llvm::SmallBitVector weightDims(iterDomainSizes.size());
+    for (AffineExpr expr : linalgOp.getMatchingIndexingMap(weight).getResults())
+        if (auto dim = dyn_cast<AffineDimExpr>(expr))
+            weightDims.set(dim.getPosition());
+    int64_t loads = 1;
+    for (auto [d, iterator] : llvm::enumerate(linalgOp.getIteratorTypesArray())) {
+        if (iterator != utils::IteratorType::parallel || weightDims.test(d) ||
+            d >= iterDomainSizes.size())
+            continue;
+        std::optional<int64_t> tile = getConstantIntValue(sizes[d]);
+        if (tile && *tile > 0)
+            loads *= llvm::divideCeil(iterDomainSizes[d], *tile);
+    }
+    return loads;
 }
 
 // Number of tiles `sizes` splits the iteration domain into, or the int64 max
@@ -2507,6 +2606,16 @@ void TileAndFusePass::tileAndFuse(
     applyMatmulTilingHeuristics(tilingInfo, tiOp, *iterDomainConstSizes, producerOps);
     applySliceAlignedTiles(tilingInfo, tiOp, *iterDomainConstSizes, this->sliceCount);
 
+    // With the stream schedule, a tile loop in a function whose constants do not fit in
+    // LRAM fits against a smaller budget: the rest of LRAM stays free, so the next weights
+    // load while this tile computes. A matmul loop has its own budget: it has no sliding
+    // window, so a smaller tile costs it no halo.
+    auto linalgRoot = dyn_cast<linalg::LinalgOp>(tiOp.getOperation());
+    bool matmulLoop =
+        reducedBudgets_ && linalgRoot && linalg::isaContractionOpInterface(linalgRoot);
+    tileBudgetPercent_ = matmulLoop ? clMatmulTileBudgetPercent.getValue() : defaultBudgetPercent_;
+    llvm::scope_exit resetTileBudget([&] { tileBudgetPercent_ = defaultBudgetPercent_; });
+
     // Find a tile size that fits tiOp in memory, together with all the
     // candidate producers in MaxProducers mode (pattern-fuse-group members are
     // always included by extractOpsForMemoryCheck). Heavy convs are probed
@@ -2530,6 +2639,19 @@ void TileAndFusePass::tileAndFuse(
         fuseMode = TileAndFuseProducersFuseMode::OnlyPatterns;
         resetTilingInfoAndProducerOps(tiOp, *iterDomainConstSizes, producerOps, tilingInfo);
         // fitTileToMemory expects the full iteration domain as the starting tile.
+        tileOffsets.assign(iterDomainOffsets.begin(), iterDomainOffsets.end());
+        tileSizes.assign(iterDomainSizes.begin(), iterDomainSizes.end());
+        tileFit = fitDualSliceTile(
+            tiOp, producerOps, tilingInfo, *iterDomainConstSizes, heavyConvs, tileOffsets, tileSizes
+        );
+    }
+
+    // The smaller budget pays only when the matmul streams its weight once. If the tile
+    // also splits the rows (the domains the weight does not index), every row tile loads
+    // the whole weight again: fit against the whole LRAM instead.
+    if (matmulLoop && tileFit == TileFit::FitsShrunk &&
+        countMatmulWeightLoads(linalgRoot, *iterDomainConstSizes, tileSizes) > 1) {
+        tileBudgetPercent_ = -1;
         tileOffsets.assign(iterDomainOffsets.begin(), iterDomainOffsets.end());
         tileSizes.assign(iterDomainSizes.begin(), iterDomainSizes.end());
         tileFit = fitDualSliceTile(
@@ -2618,6 +2740,17 @@ void TileAndFusePass::tileAndFuse(
     }
 
     fusedProducers.insert(tiledResults->fusedProducers.begin(), tiledResults->fusedProducers.end());
+
+    // FoldConvert sizes the ops of this loop against the budget the probe sized it with.
+    if (reducedBudgets_) {
+        int64_t budgetPercent = tileBudgetPercent_ >= 0 ? tileBudgetPercent_ : 100;
+        for (LoopLikeOpInterface loop : tiledResults->loops) {
+            loop->setAttr(
+                kPrefetchTileBudgetAttr,
+                IntegerAttr::get(IntegerType::get(loop->getContext(), 64), budgetPercent)
+            );
+        }
+    }
 
     LLVM_DEBUG({
         llvm::dbgs() << "  fused " << tiledResults->fusedProducers.size() << " producers\n";
@@ -2857,6 +2990,30 @@ void TileAndFusePass::runOnOperation() {
     LLVM_DEBUG(llvm::dbgs() << "Tile and Fuse - START\n");
 
     FunctionOpInterface funcOp = getOperation();
+
+    // The smaller budgets leave LRAM free to load the next weights while a tile computes.
+    // That pays only when the weights do not all fit in LRAM; otherwise they load once and
+    // stay. FoldConvert sizes against the same budgets (see kPrefetchTileBudgetAttr).
+    reducedBudgets_ = false;
+    defaultBudgetPercent_ = -1;
+    if (prefetchInputsEnabled()) {
+        int64_t constantBytes = 0;
+        funcOp.walk([&](arith::ConstantOp op) {
+            if (auto type = dyn_cast<RankedTensorType>(op.getType()); type && type.hasStaticShape())
+                constantBytes +=
+                    type.getNumElements() * llvm::divideCeil(type.getElementTypeBitWidth(), 8);
+        });
+        reducedBudgets_ = constantBytes > static_cast<int64_t>(TorqHw::get().getLramSize());
+    }
+    if (reducedBudgets_) {
+        defaultBudgetPercent_ = clPrefetchTileBudgetPercent;
+        funcOp->setAttr(
+            kPrefetchTileBudgetAttr,
+            IntegerAttr::get(IntegerType::get(funcOp.getContext(), 64), defaultBudgetPercent_)
+        );
+    }
+    tileBudgetPercent_ = defaultBudgetPercent_;
+    llvm::scope_exit resetDefaultBudget([&] { tileBudgetPercent_ = -1; });
 
     // Reduction split phase: K-chunk LRAM-oversized matmuls before the parallel
     // fit. The split is unrolled (no scf.for), so the fit-check below stays

@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" width="1640" height="800" viewBox="0 0 1640 800">
+<rect width="1640" height="800" fill="#ffffff"/>
+<text x="820" y="34" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" font-weight="bold" fill="#0f172a" text-anchor="middle">Step 0: the input IR becomes a dependency graph (StreamGraph)</text>
+<rect x="30" y="70" width="430" height="560" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/>
+<text x="48" y="98" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="start">Input NSS stream (one block, in order)</text>
+<rect x="46" y="116" width="398" height="26" rx="5" fill="#dbeafe" stroke="#2563eb" stroke-width="1.2"/>
+<text x="56" y="134" font-family="DejaVu Sans Mono, monospace" font-size="12" font-weight="bold" fill="#64748b" text-anchor="start"> 0</text>
+<text x="84" y="134" font-family="DejaVu Sans Mono, monospace" font-size="12.5" font-weight="normal" fill="#0f172a" text-anchor="start">torq_hl.load  %w1 &lt;- xram</text>
+<rect x="46" y="152" width="398" height="26" rx="5" fill="#dcfce7" stroke="#16a34a" stroke-width="1.2"/>
+<text x="56" y="170" font-family="DejaVu Sans Mono, monospace" font-size="12" font-weight="bold" fill="#64748b" text-anchor="start"> 1</text>
+<text x="84" y="170" font-family="DejaVu Sans Mono, monospace" font-size="12.5" font-weight="normal" fill="#0f172a" text-anchor="start">start_program P1(%w1, %x)</text>
+<rect x="46" y="188" width="398" height="26" rx="5" fill="#f3e8ff" stroke="#9333ea" stroke-width="1.2"/>
+<text x="56" y="206" font-family="DejaVu Sans Mono, monospace" font-size="12" font-weight="bold" fill="#64748b" text-anchor="start"> 2</text>
+<text x="84" y="206" font-family="DejaVu Sans Mono, monospace" font-size="12.5" font-weight="normal" fill="#0f172a" text-anchor="start">wait_program  P1      // y1 ready</text>
+<rect x="46" y="224" width="398" height="26" rx="5" fill="#dbeafe" stroke="#2563eb" stroke-width="1.2"/>
+<text x="56" y="242" font-family="DejaVu Sans Mono, monospace" font-size="12" font-weight="bold" fill="#64748b" text-anchor="start"> 3</text>
+<text x="84" y="242" font-family="DejaVu Sans Mono, monospace" font-size="12.5" font-weight="normal" fill="#0f172a" text-anchor="start">torq_hl.load  %w2 &lt;- xram</text>
+<rect x="46" y="260" width="398" height="26" rx="5" fill="#dcfce7" stroke="#16a34a" stroke-width="1.2"/>
+<text x="56" y="278" font-family="DejaVu Sans Mono, monospace" font-size="12" font-weight="bold" fill="#64748b" text-anchor="start"> 4</text>
+<text x="84" y="278" font-family="DejaVu Sans Mono, monospace" font-size="12.5" font-weight="normal" fill="#0f172a" text-anchor="start">start_program P2(%w2, %x)</text>
+<rect x="46" y="296" width="398" height="26" rx="5" fill="#f3e8ff" stroke="#9333ea" stroke-width="1.2"/>
+<text x="56" y="314" font-family="DejaVu Sans Mono, monospace" font-size="12" font-weight="bold" fill="#64748b" text-anchor="start"> 5</text>
+<text x="84" y="314" font-family="DejaVu Sans Mono, monospace" font-size="12.5" font-weight="normal" fill="#0f172a" text-anchor="start">wait_program  P2</text>
+<rect x="46" y="332" width="398" height="26" rx="5" fill="#dbeafe" stroke="#2563eb" stroke-width="1.2"/>
+<text x="56" y="350" font-family="DejaVu Sans Mono, monospace" font-size="12" font-weight="bold" fill="#64748b" text-anchor="start"> 6</text>
+<text x="84" y="350" font-family="DejaVu Sans Mono, monospace" font-size="12.5" font-weight="normal" fill="#0f172a" text-anchor="start">torq_hl.load  %w3 &lt;- xram</text>
+<rect x="46" y="368" width="398" height="26" rx="5" fill="#dcfce7" stroke="#16a34a" stroke-width="1.2"/>
+<text x="56" y="386" font-family="DejaVu Sans Mono, monospace" font-size="12" font-weight="bold" fill="#64748b" text-anchor="start"> 7</text>
+<text x="84" y="386" font-family="DejaVu Sans Mono, monospace" font-size="12.5" font-weight="normal" fill="#0f172a" text-anchor="start">start_program P3(%w3, %y1)</text>
+<rect x="46" y="404" width="398" height="26" rx="5" fill="#f3e8ff" stroke="#9333ea" stroke-width="1.2"/>
+<text x="56" y="422" font-family="DejaVu Sans Mono, monospace" font-size="12" font-weight="bold" fill="#64748b" text-anchor="start"> 8</text>
+<text x="84" y="422" font-family="DejaVu Sans Mono, monospace" font-size="12.5" font-weight="normal" fill="#0f172a" text-anchor="start">wait_program  P3      // y3 ready</text>
+<rect x="46" y="440" width="398" height="26" rx="5" fill="#ffedd5" stroke="#ea580c" stroke-width="1.2"/>
+<text x="56" y="458" font-family="DejaVu Sans Mono, monospace" font-size="12" font-weight="bold" fill="#64748b" text-anchor="start"> 9</text>
+<text x="84" y="458" font-family="DejaVu Sans Mono, monospace" font-size="12.5" font-weight="normal" fill="#0f172a" text-anchor="start">torq_hl.store %y3 -&gt; xram</text>
+<text x="48" y="502" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#475569" text-anchor="start">Pure ops (allocs, views, invocations) are not</text>
+<text x="48" y="520" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#475569" text-anchor="start">nodes to schedule: each is emitted right before</text>
+<text x="48" y="538" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#475569" text-anchor="start">the first action that needs it.</text>
+<line x1="470.0" y1="360.0" x2="505.0" y2="360.0" stroke="#334155" stroke-width="3"/>
+<polygon points="505.0,360.0 494.0,355.0 494.0,365.0" fill="#334155"/>
+<line x1="590.0" y1="177.0" x2="590.0" y2="243.0" stroke="#475569" stroke-width="1.8"/>
+<polygon points="590.0,243.0 595.0,232.0 585.0,232.0" fill="#475569"/>
+<line x1="800.0" y1="177.0" x2="800.0" y2="243.0" stroke="#475569" stroke-width="1.8"/>
+<polygon points="800.0,243.0 805.0,232.0 795.0,232.0" fill="#475569"/>
+<line x1="1010.0" y1="177.0" x2="1010.0" y2="483.0" stroke="#475569" stroke-width="1.8"/>
+<polygon points="1010.0,483.0 1015.0,472.0 1005.0,472.0" fill="#475569"/>
+<line x1="590.0" y1="297.0" x2="590.0" y2="363.0" stroke="#9333ea" stroke-width="1.8"/>
+<polygon points="590.0,363.0 595.0,352.0 585.0,352.0" fill="#9333ea"/>
+<line x1="800.0" y1="297.0" x2="800.0" y2="363.0" stroke="#9333ea" stroke-width="1.8"/>
+<polygon points="800.0,363.0 805.0,352.0 795.0,352.0" fill="#9333ea"/>
+<line x1="1010.0" y1="537.0" x2="1010.0" y2="603.0" stroke="#9333ea" stroke-width="1.8"/>
+<polygon points="1010.0,603.0 1015.0,592.0 1005.0,592.0" fill="#9333ea"/>
+<line x1="653.0" y1="417.0" x2="947.0" y2="483.0" stroke="#dc2626" stroke-width="1.8" stroke-dasharray="6,4"/>
+<polygon points="947.0,483.0 937.4,475.7 935.2,485.5" fill="#dc2626"/>
+<line x1="1010.0" y1="657.0" x2="1010.0" y2="723.0" stroke="#dc2626" stroke-width="1.8" stroke-dasharray="6,4"/>
+<polygon points="1010.0,723.0 1015.0,712.0 1005.0,712.0" fill="#dc2626"/>
+<rect x="515.0" y="123.0" width="150" height="54" rx="9" fill="#dbeafe" stroke="#2563eb" stroke-width="1.6"/>
+<text x="590" y="146" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">L1</text>
+<text x="590" y="164" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#475569" text-anchor="middle">load w1  30 cyc</text>
+<rect x="725.0" y="123.0" width="150" height="54" rx="9" fill="#dbeafe" stroke="#2563eb" stroke-width="1.6"/>
+<text x="800" y="146" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">L2</text>
+<text x="800" y="164" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#475569" text-anchor="middle">load w2  30 cyc</text>
+<rect x="935.0" y="123.0" width="150" height="54" rx="9" fill="#dbeafe" stroke="#2563eb" stroke-width="1.6"/>
+<text x="1010" y="146" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">L3</text>
+<text x="1010" y="164" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#475569" text-anchor="middle">load w3  30 cyc</text>
+<rect x="515.0" y="243.0" width="150" height="54" rx="9" fill="#dcfce7" stroke="#16a34a" stroke-width="1.6"/>
+<text x="590" y="266" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">start P1</text>
+<text x="590" y="284" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#475569" text-anchor="middle">100 cyc</text>
+<rect x="725.0" y="243.0" width="150" height="54" rx="9" fill="#dcfce7" stroke="#16a34a" stroke-width="1.6"/>
+<text x="800" y="266" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">start P2</text>
+<text x="800" y="284" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#475569" text-anchor="middle">100 cyc</text>
+<rect x="515.0" y="363.0" width="150" height="54" rx="9" fill="#f3e8ff" stroke="#9333ea" stroke-width="1.6"/>
+<text x="590" y="386" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">wait P1</text>
+<text x="590" y="404" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#475569" text-anchor="middle">frees w1</text>
+<rect x="725.0" y="363.0" width="150" height="54" rx="9" fill="#f3e8ff" stroke="#9333ea" stroke-width="1.6"/>
+<text x="800" y="386" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">wait P2</text>
+<text x="800" y="404" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#475569" text-anchor="middle">frees w2</text>
+<rect x="935.0" y="483.0" width="150" height="54" rx="9" fill="#dcfce7" stroke="#16a34a" stroke-width="1.6"/>
+<text x="1010" y="506" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">start P3</text>
+<text x="1010" y="524" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#475569" text-anchor="middle">100 cyc</text>
+<rect x="935.0" y="603.0" width="150" height="54" rx="9" fill="#f3e8ff" stroke="#9333ea" stroke-width="1.6"/>
+<text x="1010" y="626" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">wait P3</text>
+<text x="1010" y="644" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#475569" text-anchor="middle">frees w3, y1</text>
+<rect x="935.0" y="723.0" width="150" height="54" rx="9" fill="#ffedd5" stroke="#ea580c" stroke-width="1.6"/>
+<text x="1010" y="746" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">S3</text>
+<text x="1010" y="764" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#475569" text-anchor="middle">store y3  20 cyc</text>
+<rect x="500" y="112" width="600" height="76" rx="14" fill="none" stroke="#16a34a" stroke-width="2" stroke-dasharray="6,4"/>
+<text x="1100" y="70" font-family="DejaVu Sans, Arial, sans-serif" font-size="13" font-weight="bold" fill="#16a34a" text-anchor="start">Sources: no predecessors.</text>
+<text x="1100" y="88" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#16a34a" text-anchor="start">The scheduler starts here, at the TOP:</text>
+<text x="1100" y="104" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#16a34a" text-anchor="start">only these are ready at t = 0.</text>
+<text x="1100" y="470" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#dc2626" text-anchor="start">P3 reads y1, which P1 writes:</text>
+<text x="1100" y="486" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#dc2626" text-anchor="start">memory edge from wait P1</text>
+<text x="1100" y="502" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#dc2626" text-anchor="start">(P1 holds its buffers until its wait).</text>
+<text x="1100" y="740" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#dc2626" text-anchor="start">The store reads y3:</text>
+<text x="1100" y="756" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#dc2626" text-anchor="start">it must follow wait P3.</text>
+<text x="1120" y="220" font-family="DejaVu Sans, Arial, sans-serif" font-size="13" font-weight="bold" fill="#0f172a" text-anchor="start">Node kinds</text>
+<rect x="1120" y="232" width="26" height="16" rx="4" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+<text x="1154" y="245" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#0f172a" text-anchor="start">Load (DMA in)</text>
+<rect x="1120" y="254" width="26" height="16" rx="4" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+<text x="1154" y="267" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#0f172a" text-anchor="start">start_program (slice)</text>
+<rect x="1120" y="276" width="26" height="16" rx="4" fill="#f3e8ff" stroke="#9333ea" stroke-width="1.5"/>
+<text x="1154" y="289" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#0f172a" text-anchor="start">wait_program</text>
+<rect x="1120" y="298" width="26" height="16" rx="4" fill="#ffedd5" stroke="#ea580c" stroke-width="1.5"/>
+<text x="1154" y="311" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#0f172a" text-anchor="start">Store (DMA out)</text>
+<text x="1120" y="332" font-family="DejaVu Sans, Arial, sans-serif" font-size="13" font-weight="bold" fill="#0f172a" text-anchor="start">Edges (A -&gt; B: A must come first)</text>
+<line x1="1120.0" y1="350.0" x2="1150.0" y2="350.0" stroke="#475569" stroke-width="1.8"/>
+<polygon points="1150.0,350.0 1139.0,345.0 1139.0,355.0" fill="#475569"/>
+<text x="1158" y="354" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#0f172a" text-anchor="start">uses the loaded buffer (SSA / read-after-write)</text>
+<line x1="1120.0" y1="372.0" x2="1150.0" y2="372.0" stroke="#9333ea" stroke-width="1.8"/>
+<polygon points="1150.0,372.0 1139.0,367.0 1139.0,377.0" fill="#9333ea"/>
+<text x="1158" y="376" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#0f172a" text-anchor="start">a program&#x27;s start before its wait</text>
+<line x1="1120.0" y1="394.0" x2="1150.0" y2="394.0" stroke="#dc2626" stroke-width="1.8" stroke-dasharray="6,4"/>
+<polygon points="1150.0,394.0 1139.0,389.0 1139.0,399.0" fill="#dc2626"/>
+<text x="1158" y="398" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#0f172a" text-anchor="start">memory: reads bytes an earlier op writes</text>
+</svg>

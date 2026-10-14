@@ -115,10 +115,42 @@ static llvm::cl::opt<IsNanMode> clTorqIsNanMode(
     llvm::cl::init(IsNanMode::Lower)
 );
 
+static llvm::cl::opt<PrefetchAlgorithm> clPrefetchAlgorithm(
+    "torq-prefetch-algorithm",
+    llvm::cl::desc("how DMA transfers are moved to overlap slice compute"),
+    llvm::cl::values(
+        clEnumValN(PrefetchAlgorithm::Auto, "auto", "constant-loads"),
+        clEnumValN(PrefetchAlgorithm::None, "none", "no prefetching"),
+        clEnumValN(
+            PrefetchAlgorithm::ConstantLoads, "constant-loads",
+            "load each constant in front of the wait of the program before its consumer "
+            "(torq-prefetch-constant-loads)"
+        ),
+        clEnumValN(
+            PrefetchAlgorithm::StreamSchedule, "stream-schedule",
+            "reschedule the whole NSS stream over both slices, the DMA engine and LRAM "
+            "(torq-prefetch-inputs), and give matmul tile loops a smaller tile budget so the "
+            "next weight tile can load meanwhile"
+        )
+    ),
+    llvm::cl::init(PrefetchAlgorithm::Auto)
+);
+
+PrefetchAlgorithm prefetchAlgorithm() {
+    if (clPrefetchAlgorithm == PrefetchAlgorithm::Auto) {
+        return PrefetchAlgorithm::ConstantLoads;
+    }
+    return clPrefetchAlgorithm;
+}
+
+bool prefetchInputsEnabled() { return prefetchAlgorithm() == PrefetchAlgorithm::StreamSchedule; }
+
 namespace {
 
-int64_t getLramSizeBasedOnBudget() {
-    int64_t lramSize = TorqHw::get().getLramSize();
+// The usable LRAM size for a pipeline built with `budgetPercent` of LRAM. Only a tile-fit
+// probe that TileAndFuse builds for a smaller tile budget gets less than 100.
+int64_t getLramSizeBasedOnBudget(int budgetPercent) {
+    int64_t lramSize = TorqHw::get().getLramSize() * budgetPercent / 100;
     int nssProgramPoolSize = HwInfo::nss_max_program_size * 2;
     lramSize -= nssProgramPoolSize;
     return lramSize;
@@ -139,7 +171,8 @@ void addCompileTimeConstPasses(OpPassManager &funcPm, bool optimizeForTileAndFus
 }
 
 void addPostTileAndFuseLoweringPasses(
-    OpPassManager &funcPm, bool optimizeForTileAndFuse, SliceBufferSharing sliceBufferSharing
+    OpPassManager &funcPm, bool optimizeForTileAndFuse, SliceBufferSharing sliceBufferSharing,
+    int budgetPercent
 ) {
     if (!clDisableSlicing && TorqHw::get().getSliceCount() > 1) {
         // Group each pure-elementwise chain (erf/tanh/mul) before slicing, so the
@@ -180,7 +213,7 @@ void addPostTileAndFuseLoweringPasses(
     addCompileTimeConstPasses(funcPm, optimizeForTileAndFuse);
 
     funcPm.addPass(createEncodeTensorsPass());
-    auto lramSize = getLramSizeBasedOnBudget();
+    auto lramSize = getLramSizeBasedOnBudget(budgetPercent);
     funcPm.addPass(createFoldConvertPass(lramSize, sliceBufferSharing));
     funcPm.addPass(createCanonicalizerPass());
 
@@ -195,7 +228,7 @@ void addPostTileAndFuseLoweringPasses(
     }
 }
 
-void addCpuPasses(OpPassManager &pm) {
+void addCpuPasses(OpPassManager &pm, int budgetPercent = 100) {
 
     // tile the operations for CSS (at the moment all the operations are sent to CSS if it's not
     // disabled )
@@ -227,14 +260,15 @@ void addCpuPasses(OpPassManager &pm) {
 
     // since to run on CSS we inserted a bunch of copies to LRAM we can
     // now simplify them
-    auto lramSize = getLramSizeBasedOnBudget();
+    auto lramSize = getLramSizeBasedOnBudget(budgetPercent);
     funcPm.addPass(createFoldConvertPass(lramSize));
 
     funcPm.addPass(createCanonicalizerPass());
 }
 
 void addNssUpToAssignLramAddresses(
-    OpPassManager &pm, bool optimizeForTileAndFuse = false, bool isRealPipeline = false
+    OpPassManager &pm, bool optimizeForTileAndFuse = false, bool isRealPipeline = false,
+    int budgetPercent = 100
 ) {
     auto &funcPm = pm.nest<func::FuncOp>();
 
@@ -250,7 +284,7 @@ void addNssUpToAssignLramAddresses(
 
         funcPm.addPass(createEraseHALDescriptorTypeFromMemRefPass());
 
-        int64_t lramSize = getLramSizeBasedOnBudget();
+        int64_t lramSize = getLramSizeBasedOnBudget(budgetPercent);
         funcPm.addPass(createLowerHostCopiesToNpuPass(lramSize));
 
         funcPm.addPass(createMapBindingsPass());
@@ -300,12 +334,23 @@ void addNssUpToAssignLramAddresses(
     if (!optimizeForTileAndFuse) {
         funcPm.addNestedPass<torq_hl::ProgramOp>(createConvertSliceProgramToTorqHwPass());
 
-        if (clEnableTorqProfiling) {
+        if (clEnableTorqProfiling || prefetchInputsEnabled()) {
             funcPm.addPass(createAnnotateDmaAndSliceCyclesPass());
         }
     }
 
-    addNssLramAllocationPasses(funcPm, isRealPipeline);
+    // The total LRAM pool for the allocator, NSS program slots included. It is the whole
+    // LRAM, except in a tile-fit probe built for a smaller tile budget.
+    int64_t lramPoolSize =
+        getLramSizeBasedOnBudget(budgetPercent) + HwInfo::nss_max_program_size * 2;
+
+    // Reorder the NSS stream so that loads overlap slice compute. PrefetchInputs places
+    // with the same pool size AssignLramAddresses uses.
+    if (!optimizeForTileAndFuse && prefetchInputsEnabled()) {
+        funcPm.addPass(createPrefetchInputsPass(lramPoolSize));
+    }
+
+    addNssLramAllocationPasses(funcPm, isRealPipeline, lramPoolSize);
 }
 
 void addNssPostAssignLramAddressesPasses(OpPassManager &pm) {
@@ -609,7 +654,7 @@ struct TORQLowerExecutableTargetPass
 
 void addPassesPostTileAndFuseUpToAssignLramAddresses(
     OpPassManager &pipeline, bool optimizeForTileAndFuse, bool isRealPipeline,
-    SliceBufferSharing sliceBufferSharing
+    SliceBufferSharing sliceBufferSharing, int budgetPercent
 ) {
     // NB: This is the post-tiling pipeline used by TileAndFusePass for its memory-fit
     // simulation. It must match exactly what happens after TileAndFuse in the real
@@ -623,13 +668,15 @@ void addPassesPostTileAndFuseUpToAssignLramAddresses(
     }
     funcPm.addPass(createPeelTileLoopsPass());
 
-    addPostTileAndFuseLoweringPasses(funcPm, optimizeForTileAndFuse, sliceBufferSharing);
+    addPostTileAndFuseLoweringPasses(
+        funcPm, optimizeForTileAndFuse, sliceBufferSharing, budgetPercent
+    );
 
     if (!clDisableCSS || !clDisableHost) {
-        addCpuPasses(pipeline);
+        addCpuPasses(pipeline, budgetPercent);
     }
 
-    addNssUpToAssignLramAddresses(pipeline, optimizeForTileAndFuse, isRealPipeline);
+    addNssUpToAssignLramAddresses(pipeline, optimizeForTileAndFuse, isRealPipeline, budgetPercent);
 }
 
 void addNssLramAllocationPasses(OpPassManager &funcPm, bool isRealPipeline, int64_t lramSize) {
@@ -641,7 +688,10 @@ void addNssLramAllocationPasses(OpPassManager &funcPm, bool isRealPipeline, int6
     // costs would buy nothing there and would hide it from the tile choice.
     if (isRealPipeline) {
         funcPm.addPass(createRecoverLramResidencyPass());
-        funcPm.addPass(createPrefetchConstantLoadsPass());
+        // only one prefetch algorithm runs in a compile
+        if (prefetchAlgorithm() == PrefetchAlgorithm::ConstantLoads) {
+            funcPm.addPass(createPrefetchConstantLoadsPass());
+        }
     }
 
     // assign addresses to all allocations; the probe gets no re-planning for the same

@@ -50,6 +50,8 @@ set(sources
     OutlineUtils.cpp
     Passes.cpp
     PeelTileLoopsPass.cpp
+    PrefetchInputsPass.cpp
+    PrefetchPassUtils.cpp
     Pool.cpp
     PrefetchConstantLoadsPass.cpp
     ProfilingPass.cpp

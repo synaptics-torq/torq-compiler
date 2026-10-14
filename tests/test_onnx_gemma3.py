@@ -110,6 +110,11 @@ def case_config(request, chip_config):
     comp_config["torq_compiler_timeout"] = 1000
     torq_compiler_options += ["--torq-max-nss-programs-size", str(0xA7B200)]
 
+    # On SL2610 the full models and the hybrid components use the stream schedule: it
+    # overlaps the weight loads of the matmuls with compute (doc/dev-manual/prefetch_list_scheduler.md).
+    if not next_chip and ("full_model" in request.node.name or "hybrid" in request.node.name):
+        torq_compiler_options.append("--torq-prefetch-algorithm=stream-schedule")
+
     comp_config["torq_compiler_options"] = torq_compiler_options
 
     if "Gelu" in request.node.name:

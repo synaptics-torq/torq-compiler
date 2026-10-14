@@ -1,0 +1,182 @@
+<svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" width="1720" height="860" viewBox="0 0 1720 860">
+<rect width="1720" height="860" fill="#ffffff"/>
+<text x="860" y="34" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" font-weight="bold" fill="#0f172a" text-anchor="middle">Step 5: emit  L3</text>
+<line x1="120.0" y1="167.0" x2="120.0" y2="233.0" stroke="#cbd5e1" stroke-width="1.8"/>
+<polygon points="120.0,233.0 125.0,222.0 115.0,222.0" fill="#cbd5e1"/>
+<line x1="330.0" y1="167.0" x2="330.0" y2="233.0" stroke="#cbd5e1" stroke-width="1.8"/>
+<polygon points="330.0,233.0 335.0,222.0 325.0,222.0" fill="#cbd5e1"/>
+<line x1="540.0" y1="167.0" x2="540.0" y2="473.0" stroke="#475569" stroke-width="1.8"/>
+<polygon points="540.0,473.0 545.0,462.0 535.0,462.0" fill="#475569"/>
+<line x1="120.0" y1="287.0" x2="120.0" y2="353.0" stroke="#9333ea" stroke-width="1.8"/>
+<polygon points="120.0,353.0 125.0,342.0 115.0,342.0" fill="#9333ea"/>
+<line x1="330.0" y1="287.0" x2="330.0" y2="353.0" stroke="#9333ea" stroke-width="1.8"/>
+<polygon points="330.0,353.0 335.0,342.0 325.0,342.0" fill="#9333ea"/>
+<line x1="540.0" y1="527.0" x2="540.0" y2="593.0" stroke="#9333ea" stroke-width="1.8"/>
+<polygon points="540.0,593.0 545.0,582.0 535.0,582.0" fill="#9333ea"/>
+<line x1="183.0" y1="407.0" x2="477.0" y2="473.0" stroke="#dc2626" stroke-width="1.8" stroke-dasharray="6,4"/>
+<polygon points="477.0,473.0 467.4,465.7 465.2,475.5" fill="#dc2626"/>
+<line x1="540.0" y1="647.0" x2="540.0" y2="713.0" stroke="#dc2626" stroke-width="1.8" stroke-dasharray="6,4"/>
+<polygon points="540.0,713.0 545.0,702.0 535.0,702.0" fill="#dc2626"/>
+<rect x="45.0" y="113.0" width="150" height="54" rx="9" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.6"/>
+<text x="120" y="136" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#64748b" text-anchor="middle">L1</text>
+<text x="120" y="154" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#64748b" text-anchor="middle">load w1  30 cyc</text>
+<circle cx="193.0" cy="115.0" r="12" fill="#334155"/>
+<text x="193.0" y="119.0" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="bold" fill="#ffffff" text-anchor="middle">1</text>
+<rect x="255.0" y="113.0" width="150" height="54" rx="9" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.6"/>
+<text x="330" y="136" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#64748b" text-anchor="middle">L2</text>
+<text x="330" y="154" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#64748b" text-anchor="middle">load w2  30 cyc</text>
+<circle cx="403.0" cy="115.0" r="12" fill="#334155"/>
+<text x="403.0" y="119.0" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="bold" fill="#ffffff" text-anchor="middle">3</text>
+<rect x="459.0" y="107.0" width="162" height="66" rx="12" fill="none" stroke="#f59e0b" stroke-width="4"/>
+<rect x="465.0" y="113.0" width="150" height="54" rx="9" fill="#dbeafe" stroke="#2563eb" stroke-width="3.2"/>
+<text x="540" y="136" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">L3</text>
+<text x="540" y="154" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#475569" text-anchor="middle">load w3  30 cyc</text>
+<circle cx="613.0" cy="115.0" r="12" fill="#334155"/>
+<text x="613.0" y="119.0" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="bold" fill="#ffffff" text-anchor="middle">5</text>
+<rect x="45.0" y="233.0" width="150" height="54" rx="9" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.6"/>
+<text x="120" y="256" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#64748b" text-anchor="middle">start P1</text>
+<text x="120" y="274" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#64748b" text-anchor="middle">100 cyc</text>
+<circle cx="193.0" cy="235.0" r="12" fill="#334155"/>
+<text x="193.0" y="239.0" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="bold" fill="#ffffff" text-anchor="middle">2</text>
+<rect x="255.0" y="233.0" width="150" height="54" rx="9" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.6"/>
+<text x="330" y="256" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#64748b" text-anchor="middle">start P2</text>
+<text x="330" y="274" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#64748b" text-anchor="middle">100 cyc</text>
+<circle cx="403.0" cy="235.0" r="12" fill="#334155"/>
+<text x="403.0" y="239.0" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="bold" fill="#ffffff" text-anchor="middle">4</text>
+<rect x="45.0" y="353.0" width="150" height="54" rx="9" fill="#f3e8ff" stroke="#9333ea" stroke-width="3.2"/>
+<text x="120" y="376" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">wait P1</text>
+<text x="120" y="394" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#475569" text-anchor="middle">frees w1</text>
+<rect x="255.0" y="353.0" width="150" height="54" rx="9" fill="#f3e8ff" stroke="#9333ea" stroke-width="3.2"/>
+<text x="330" y="376" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">wait P2</text>
+<text x="330" y="394" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#475569" text-anchor="middle">frees w2</text>
+<rect x="465.0" y="473.0" width="150" height="54" rx="9" fill="#ffffff" stroke="#16a34a" stroke-width="1.6" stroke-dasharray="5,4"/>
+<text x="540" y="496" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">start P3</text>
+<text x="540" y="514" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#475569" text-anchor="middle">100 cyc</text>
+<rect x="465.0" y="593.0" width="150" height="54" rx="9" fill="#ffffff" stroke="#9333ea" stroke-width="1.6" stroke-dasharray="5,4"/>
+<text x="540" y="616" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">wait P3</text>
+<text x="540" y="634" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#475569" text-anchor="middle">frees w3, y1</text>
+<rect x="465.0" y="713.0" width="150" height="54" rx="9" fill="#ffffff" stroke="#ea580c" stroke-width="1.6" stroke-dasharray="5,4"/>
+<text x="540" y="736" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="middle">S3</text>
+<text x="540" y="754" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="normal" fill="#475569" text-anchor="middle">store y3  20 cyc</text>
+<rect x="680" y="64" width="500" height="352" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/>
+<text x="694" y="88" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="start">A. Ready queues before this step</text>
+<text x="694" y="106" font-family="DejaVu Sans, Arial, sans-serif" font-size="11.5" font-weight="normal" fill="#475569" text-anchor="start">FIFO per resource, oldest (input order) at the head, left</text>
+<text x="694" y="144" font-family="DejaVu Sans, Arial, sans-serif" font-size="13" font-weight="bold" fill="#0f172a" text-anchor="start">Starts</text>
+<text x="694" y="160" font-family="DejaVu Sans, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#64748b" text-anchor="start">start queue -&gt; a free slice</text>
+<text x="850" y="144" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#94a3b8" text-anchor="start">(empty)</text>
+<text x="694" y="202" font-family="DejaVu Sans, Arial, sans-serif" font-size="13" font-weight="bold" fill="#0f172a" text-anchor="start">DMA</text>
+<text x="694" y="218" font-family="DejaVu Sans, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#64748b" text-anchor="start">DMA queue -&gt; the DMA engine</text>
+<rect x="846" y="180" width="44" height="34" rx="7" fill="none" stroke="#f59e0b" stroke-width="3"/>
+<rect x="850" y="184" width="36" height="26" rx="5" fill="#dbeafe" stroke="#2563eb" stroke-width="1.4"/>
+<text x="868.0" y="202" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="bold" fill="#0f172a" text-anchor="middle">L3</text>
+<text x="868.0" y="226" font-family="DejaVu Sans, Arial, sans-serif" font-size="10.5" font-weight="bold" fill="#b45309" text-anchor="middle">picked</text>
+<text x="694" y="260" font-family="DejaVu Sans, Arial, sans-serif" font-size="13" font-weight="bold" fill="#0f172a" text-anchor="start">Waits</text>
+<text x="694" y="276" font-family="DejaVu Sans, Arial, sans-serif" font-size="10.5" font-weight="normal" fill="#64748b" text-anchor="start">wait queue -&gt; the stream blocks</text>
+<rect x="850" y="242" width="45" height="26" rx="5" fill="#f3e8ff" stroke="#9333ea" stroke-width="1.4"/>
+<text x="872.5" y="260" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="bold" fill="#0f172a" text-anchor="middle">wP1</text>
+<rect x="909" y="242" width="45" height="26" rx="5" fill="#f3e8ff" stroke="#9333ea" stroke-width="1.4"/>
+<text x="931.5" y="260" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="bold" fill="#0f172a" text-anchor="middle">wP2</text>
+<text x="694" y="312" font-family="DejaVu Sans, Arial, sans-serif" font-size="12.5" font-weight="bold" fill="#0f172a" text-anchor="start">After this step:</text>
+<text x="820" y="312" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#b45309" text-anchor="start">- L3 leaves its queue (emitted)</text>
+<text x="820" y="332" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="normal" fill="#64748b" text-anchor="start">+ nothing joins (no node had only this one left)</text>
+<rect x="1196" y="64" width="506" height="352" rx="10" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.2"/>
+<text x="1210" y="88" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="bold" fill="#0f172a" text-anchor="start">B. Decision: rules checked top to bottom</text>
+<text x="1210" y="106" font-family="DejaVu Sans, Arial, sans-serif" font-size="11.5" font-weight="normal" fill="#475569" text-anchor="start">clock t = 62; the first rule that applies picks</text>
+<rect x="1208" y="122" width="482" height="50" rx="6" fill="#ffffff" stroke="#b91c1c" stroke-width="1"/>
+<text x="1218" y="140" font-family="DejaVu Sans Mono, monospace" font-size="12.5" font-weight="bold" fill="#0f172a" text-anchor="start">1  barrier ready?</text>
+<text x="1678" y="140" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="bold" fill="#b91c1c" text-anchor="end">skip</text>
+<text x="1230" y="156" font-family="DejaVu Sans, Arial, sans-serif" font-size="11.5" font-weight="normal" fill="#b91c1c" text-anchor="start">no barrier in the block</text>
+<rect x="1208" y="178" width="482" height="50" rx="6" fill="#ffffff" stroke="#b91c1c" stroke-width="1"/>
+<text x="1218" y="196" font-family="DejaVu Sans Mono, monospace" font-size="12.5" font-weight="bold" fill="#0f172a" text-anchor="start">2  a slice free + a start that fits?</text>
+<text x="1678" y="196" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="bold" fill="#b91c1c" text-anchor="end">skip</text>
+<text x="1230" y="212" font-family="DejaVu Sans, Arial, sans-serif" font-size="11.5" font-weight="normal" fill="#b91c1c" text-anchor="start">no free slice</text>
+<rect x="1208" y="234" width="482" height="66" rx="6" fill="#dcfce7" stroke="#15803d" stroke-width="2"/>
+<text x="1218" y="252" font-family="DejaVu Sans Mono, monospace" font-size="12.5" font-weight="bold" fill="#0f172a" text-anchor="start">3  DMA: oldest load/store that fits,</text>
+<text x="1218" y="268" font-family="DejaVu Sans Mono, monospace" font-size="12.5" font-weight="bold" fill="#0f172a" text-anchor="start">    and starts before a slice ends?</text>
+<text x="1678" y="252" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="bold" fill="#15803d" text-anchor="end">FIRES</text>
+<text x="1230" y="284" font-family="DejaVu Sans, Arial, sans-serif" font-size="11.5" font-weight="normal" fill="#15803d" text-anchor="start">L3 heads the DMA queue; starts at 62 &lt;= first end 130</text>
+<rect x="1208" y="306" width="482" height="50" rx="6" fill="#ffffff" stroke="#e2e8f0" stroke-width="1"/>
+<text x="1218" y="324" font-family="DejaVu Sans Mono, monospace" font-size="12.5" font-weight="bold" fill="#94a3b8" text-anchor="start">4  wait for the slice that ends first</text>
+<text x="1678" y="324" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="bold" fill="#94a3b8" text-anchor="end">-</text>
+<text x="1230" y="340" font-family="DejaVu Sans, Arial, sans-serif" font-size="11.5" font-weight="normal" fill="#94a3b8" text-anchor="start">not reached</text>
+<rect x="1208" y="362" width="482" height="50" rx="6" fill="#ffffff" stroke="#e2e8f0" stroke-width="1"/>
+<text x="1218" y="380" font-family="DejaVu Sans Mono, monospace" font-size="12.5" font-weight="bold" fill="#94a3b8" text-anchor="start">5  fallback: oldest ready action</text>
+<text x="1678" y="380" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="bold" fill="#94a3b8" text-anchor="end">-</text>
+<text x="1230" y="396" font-family="DejaVu Sans, Arial, sans-serif" font-size="11.5" font-weight="normal" fill="#94a3b8" text-anchor="start">not reached</text>
+<text x="690" y="460" font-family="DejaVu Sans, Arial, sans-serif" font-size="13" font-weight="bold" fill="#0f172a" text-anchor="start">Simulated hardware (cycles)</text>
+<text x="690" y="488" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="bold" fill="#334155" text-anchor="start">DMA</text>
+<rect x="754" y="470" width="900" height="26" rx="4" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+<text x="690" y="522" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="bold" fill="#334155" text-anchor="start">slice 0</text>
+<rect x="754" y="504" width="900" height="26" rx="4" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+<text x="690" y="556" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="bold" fill="#334155" text-anchor="start">slice 1</text>
+<rect x="754" y="538" width="900" height="26" rx="4" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+<rect x="754.0" y="472" width="64.28571428571428" height="22" rx="4" fill="#dbeafe" stroke="#2563eb" stroke-width="1.4"/>
+<text x="786.1428571428571" y="487" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="bold" fill="#0f172a" text-anchor="middle">L1</text>
+<rect x="818.2857142857142" y="506" width="214.28571428571428" height="22" rx="4" fill="#dcfce7" stroke="#16a34a" stroke-width="1.4"/>
+<text x="925.4285714285714" y="521" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="bold" fill="#0f172a" text-anchor="middle">P1</text>
+<rect x="820.4285714285714" y="472" width="64.28571428571428" height="22" rx="4" fill="#dbeafe" stroke="#2563eb" stroke-width="1.4"/>
+<text x="852.5714285714286" y="487" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="bold" fill="#0f172a" text-anchor="middle">L2</text>
+<rect x="884.7142857142858" y="540" width="214.28571428571428" height="22" rx="4" fill="#dcfce7" stroke="#16a34a" stroke-width="1.4"/>
+<text x="991.8571428571429" y="555" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="bold" fill="#0f172a" text-anchor="middle">P2</text>
+<rect x="886.8571428571429" y="472" width="64.28571428571428" height="22" rx="4" fill="#dbeafe" stroke="#2563eb" stroke-width="1.4"/>
+<text x="919.0" y="487" font-family="DejaVu Sans, Arial, sans-serif" font-size="11" font-weight="bold" fill="#0f172a" text-anchor="middle">L3</text>
+<line x1="754.0" y1="572" x2="754.0" y2="576" stroke="#94a3b8"/>
+<text x="754.0" y="590" font-family="DejaVu Sans, Arial, sans-serif" font-size="10" font-weight="normal" fill="#64748b" text-anchor="middle">0</text>
+<line x1="861.1428571428571" y1="572" x2="861.1428571428571" y2="576" stroke="#94a3b8"/>
+<text x="861.1428571428571" y="590" font-family="DejaVu Sans, Arial, sans-serif" font-size="10" font-weight="normal" fill="#64748b" text-anchor="middle">50</text>
+<line x1="968.2857142857142" y1="572" x2="968.2857142857142" y2="576" stroke="#94a3b8"/>
+<text x="968.2857142857142" y="590" font-family="DejaVu Sans, Arial, sans-serif" font-size="10" font-weight="normal" fill="#64748b" text-anchor="middle">100</text>
+<line x1="1075.4285714285716" y1="572" x2="1075.4285714285716" y2="576" stroke="#94a3b8"/>
+<text x="1075.4285714285716" y="590" font-family="DejaVu Sans, Arial, sans-serif" font-size="10" font-weight="normal" fill="#64748b" text-anchor="middle">150</text>
+<line x1="1182.5714285714284" y1="572" x2="1182.5714285714284" y2="576" stroke="#94a3b8"/>
+<text x="1182.5714285714284" y="590" font-family="DejaVu Sans, Arial, sans-serif" font-size="10" font-weight="normal" fill="#64748b" text-anchor="middle">200</text>
+<line x1="1289.7142857142858" y1="572" x2="1289.7142857142858" y2="576" stroke="#94a3b8"/>
+<text x="1289.7142857142858" y="590" font-family="DejaVu Sans, Arial, sans-serif" font-size="10" font-weight="normal" fill="#64748b" text-anchor="middle">250</text>
+<line x1="1396.857142857143" y1="572" x2="1396.857142857143" y2="576" stroke="#94a3b8"/>
+<text x="1396.857142857143" y="590" font-family="DejaVu Sans, Arial, sans-serif" font-size="10" font-weight="normal" fill="#64748b" text-anchor="middle">300</text>
+<line x1="1504.0" y1="572" x2="1504.0" y2="576" stroke="#94a3b8"/>
+<text x="1504.0" y="590" font-family="DejaVu Sans, Arial, sans-serif" font-size="10" font-weight="normal" fill="#64748b" text-anchor="middle">350</text>
+<line x1="1611.142857142857" y1="572" x2="1611.142857142857" y2="576" stroke="#94a3b8"/>
+<text x="1611.142857142857" y="590" font-family="DejaVu Sans, Arial, sans-serif" font-size="10" font-weight="normal" fill="#64748b" text-anchor="middle">400</text>
+<line x1="951.1428571428571" y1="466" x2="951.1428571428571" y2="574" stroke="#f59e0b" stroke-width="2.5"/>
+<text x="951.1428571428571" y="606" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="bold" fill="#b45309" text-anchor="middle">t = 92</text>
+<text x="690" y="650" font-family="DejaVu Sans, Arial, sans-serif" font-size="13" font-weight="bold" fill="#b45309" text-anchor="start">clock: t = 62  -&gt;  t = 92</text>
+<text x="690" y="690" font-family="DejaVu Sans, Arial, sans-serif" font-size="13" font-weight="bold" fill="#0f172a" text-anchor="start">New order so far</text>
+<rect x="690" y="702" width="36" height="26" rx="5" fill="#dbeafe" stroke="#2563eb" stroke-width="1.4"/>
+<text x="708.0" y="720" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="bold" fill="#0f172a" text-anchor="middle">L1</text>
+<rect x="734" y="702" width="45" height="26" rx="5" fill="#dcfce7" stroke="#16a34a" stroke-width="1.4"/>
+<text x="756.5" y="720" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="bold" fill="#0f172a" text-anchor="middle">sP1</text>
+<rect x="787" y="702" width="36" height="26" rx="5" fill="#dbeafe" stroke="#2563eb" stroke-width="1.4"/>
+<text x="805.0" y="720" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="bold" fill="#0f172a" text-anchor="middle">L2</text>
+<rect x="831" y="702" width="45" height="26" rx="5" fill="#dcfce7" stroke="#16a34a" stroke-width="1.4"/>
+<text x="853.5" y="720" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="bold" fill="#0f172a" text-anchor="middle">sP2</text>
+<rect x="880" y="698" width="44" height="34" rx="7" fill="none" stroke="#f59e0b" stroke-width="3"/>
+<rect x="884" y="702" width="36" height="26" rx="5" fill="#dbeafe" stroke="#2563eb" stroke-width="1.4"/>
+<text x="902.0" y="720" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="bold" fill="#0f172a" text-anchor="middle">L3</text>
+<text x="690" y="760" font-family="DejaVu Sans, Arial, sans-serif" font-size="12.5" font-weight="bold" fill="#0f172a" text-anchor="start">Graph legend:</text>
+<rect x="690" y="772" width="26" height="16" rx="4" fill="#e2e8f0" stroke="#94a3b8" stroke-width="1.5"/>
+<text x="722" y="785" font-family="DejaVu Sans, Arial, sans-serif" font-size="11.5" font-weight="normal" fill="#0f172a" text-anchor="start">done (in the new order)</text>
+<rect x="911" y="772" width="26" height="16" rx="4" fill="#ffffff" stroke="#16a34a" stroke-width="3.2"/>
+<text x="943" y="785" font-family="DejaVu Sans, Arial, sans-serif" font-size="11.5" font-weight="normal" fill="#0f172a" text-anchor="start">ready (in a queue)</text>
+<rect x="1097" y="772" width="26" height="16" rx="4" fill="#ffffff" stroke="#64748b" stroke-width="1.5" stroke-dasharray="5,4"/>
+<text x="1129" y="785" font-family="DejaVu Sans, Arial, sans-serif" font-size="11.5" font-weight="normal" fill="#0f172a" text-anchor="start">waiting on a predecessor</text>
+<rect x="1325" y="772" width="26" height="16" rx="4" fill="none" stroke="#f59e0b" stroke-width="3"/>
+<text x="1357" y="785" font-family="DejaVu Sans, Arial, sans-serif" font-size="11.5" font-weight="normal" fill="#0f172a" text-anchor="start">picked in this step</text>
+<rect x="690" y="804" width="26" height="16" rx="4" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+<text x="722" y="817" font-family="DejaVu Sans, Arial, sans-serif" font-size="11.5" font-weight="normal" fill="#0f172a" text-anchor="start">Load (DMA in)</text>
+<rect x="841" y="804" width="26" height="16" rx="4" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+<text x="873" y="817" font-family="DejaVu Sans, Arial, sans-serif" font-size="11.5" font-weight="normal" fill="#0f172a" text-anchor="start">start_program (slice)</text>
+<rect x="1048" y="804" width="26" height="16" rx="4" fill="#f3e8ff" stroke="#9333ea" stroke-width="1.5"/>
+<text x="1080" y="817" font-family="DejaVu Sans, Arial, sans-serif" font-size="11.5" font-weight="normal" fill="#0f172a" text-anchor="start">wait_program</text>
+<rect x="1192" y="804" width="26" height="16" rx="4" fill="#ffedd5" stroke="#ea580c" stroke-width="1.5"/>
+<text x="1224" y="817" font-family="DejaVu Sans, Arial, sans-serif" font-size="11.5" font-weight="normal" fill="#0f172a" text-anchor="start">Store (DMA out)</text>
+<line x1="690.0" y1="840.0" x2="718.0" y2="840.0" stroke="#475569" stroke-width="1.8"/>
+<polygon points="718.0,840.0 707.0,835.0 707.0,845.0" fill="#475569"/>
+<text x="724" y="844" font-family="DejaVu Sans, Arial, sans-serif" font-size="11.5" font-weight="normal" fill="#0f172a" text-anchor="start">uses the loaded buffer (SSA / read-after-write)</text>
+<line x1="1046.1" y1="840.0" x2="1074.1" y2="840.0" stroke="#9333ea" stroke-width="1.8"/>
+<polygon points="1074.1,840.0 1063.1,835.0 1063.1,845.0" fill="#9333ea"/>
+<text x="1080.1" y="844" font-family="DejaVu Sans, Arial, sans-serif" font-size="11.5" font-weight="normal" fill="#0f172a" text-anchor="start">a program&#x27;s start before its wait</text>
+<line x1="1314.0" y1="840.0" x2="1342.0" y2="840.0" stroke="#dc2626" stroke-width="1.8" stroke-dasharray="6,4"/>
+<polygon points="1342.0,840.0 1331.0,835.0 1331.0,845.0" fill="#dc2626"/>
+<text x="1348.0" y="844" font-family="DejaVu Sans, Arial, sans-serif" font-size="11.5" font-weight="normal" fill="#0f172a" text-anchor="start">memory: reads bytes an earlier op writes</text>
+</svg>

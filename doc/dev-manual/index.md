@@ -9,6 +9,7 @@ adding_ops.md
 kernel_dev.md
 add_pass.md
 tile_and_fuse.md
+prefetch_list_scheduler.md
 passes_optimizations.md
 contributing.md
 debug_tips.md

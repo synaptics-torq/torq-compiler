@@ -613,6 +613,26 @@ def LinalgSlicing :
     ];
 }
 
+def PrefetchInputs :
+    InterfacePass<"torq-prefetch-inputs",
+         "mlir::FunctionOpInterface"> {
+  let summary = "Reschedule the NSS stream over both slices, the DMA engine and LRAM";
+  let constructor =
+      "mlir::syna::torq::createPrefetchInputsPass()";
+
+  let options = [
+      Option<"lramSize", "lram-size", "int64_t",
+             /*default=*/"0",
+             "Total LRAM pool size in bytes, matching AssignLramAddresses. "
+             "0 means the full LRAM size.">
+  ];
+
+  let dependentDialects = [
+        "syna::torq_hl::TorqHLDialect"
+    ];
+
+}
+
 def BufferizePeeledForallInPlace :
            InterfacePass<"torq-bufferize-peeled-forall-in-place",
                          "mlir::FunctionOpInterface"> {

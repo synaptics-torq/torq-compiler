@@ -5,10 +5,12 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "PassesDetail.h"
+#include "TilingUtils.h"
 
 #include "torq/Dialect/TorqHL/EncodingRequirements.h"
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
+#include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/MemoryUtils.h"
@@ -504,6 +506,19 @@ class FoldConvertOfUnusedData : public OpRewritePattern<torq_hl::ConvertOp> {
 //
 // %1 = tensor.extract_slice(%0) {offsets = ..., sizes = ..., strides = ...}
 // %2 = convert(%1)
+// The LRAM size to size `op` against. With the stream schedule, TileAndFuse sets the tile
+// budget on each tile loop and, for the ops it does not tile, on the function: the nearest
+// one is the budget the probe sized `op` with. Without it, `lramSize`.
+static int64_t lramSizeFor(Operation *op, int64_t lramSize) {
+    for (Operation *parent = op->getParentOp(); parent; parent = parent->getParentOp()) {
+        if (auto budget = parent->getAttrOfType<IntegerAttr>(kPrefetchTileBudgetAttr)) {
+            return static_cast<int64_t>(TorqHw::get().getLramSize()) * budget.getInt() / 100 -
+                   HwInfo::nss_max_program_size * 2;
+        }
+    }
+    return lramSize;
+}
+
 class SwapExtractAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
   public:
     SwapExtractAndConvert(MLIRContext *ctx, int64_t lramSize)
@@ -721,12 +736,13 @@ class SwapExtractAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
         int64_t parentBytes = srcTy.getNumElements() * elemBytes;
         int64_t sliceBytes = sliceTy.getNumElements() * elemBytes;
         int64_t extraBytes = parentBytes - sliceBytes;
-        int64_t budget = residencyBudget();
+        int64_t lramSize = lramSizeFor(extractOp, lramSize_);
+        int64_t budget = residencyBudget(lramSize);
 
         LLVM_DEBUG(
             llvm::dbgs() << "SwapExtractAndConvert: residency parent=" << parentBytes << " slice="
                          << sliceBytes << " extra=" << extraBytes << " budget=" << budget
-                         << " lram=" << lramSize_ << " type=" << srcTy << "\n"
+                         << " lram=" << lramSize << " type=" << srcTy << "\n"
         );
 
         if (extraBytes > budget) {
@@ -751,15 +767,15 @@ class SwapExtractAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
     // have that is 12% of 512 KB and 3% of 256 KB, so 62 KB against 8 KB.
     //
     // A chip with the tuned size or more keeps the plain percentage.
-    int64_t residencyBudget() const {
+    int64_t residencyBudget(int64_t lramSize) const {
 
-        int64_t budget = (lramSize_ * clSwapExtractAndConvertMaxWastePercent) / 100;
+        int64_t budget = (lramSize * clSwapExtractAndConvertMaxWastePercent) / 100;
 
         // The ratio is at most one here, so this cannot grow the budget. It also cannot overflow:
-        // the guard keeps lramSize_ under the tuned size, and the tuned size cubed still fits in
+        // the guard keeps lramSize under the tuned size, and the tuned size cubed still fits in
         // an int64_t.
-        if (lramSize_ < kSwapExtractAndConvertTunedLramSize) {
-            budget = (budget * lramSize_ * lramSize_) /
+        if (lramSize < kSwapExtractAndConvertTunedLramSize) {
+            budget = (budget * lramSize * lramSize) /
                      (kSwapExtractAndConvertTunedLramSize * kSwapExtractAndConvertTunedLramSize);
         }
 
@@ -852,7 +868,7 @@ class KeepConcatInLram : public OpRewritePattern<tensor::InsertSliceOp> {
             }
 
             // we cannot fit the whole contact in LRAM so we won't apply this pattern
-            if (totalSize > lramSize_) {
+            if (totalSize > lramSizeFor(rootOp, lramSize_)) {
                 return failure();
             }
 
@@ -1198,6 +1214,9 @@ void FoldConvertPass::runOnOperation() {
     patterns.add<FoldConvertOfEmpty>(ctx);
     patterns.add<FoldRoundTripConversion>(ctx);
     patterns.add<FoldLramToLramConversionChain>(ctx);
+    // KeepConcatInLram and SwapExtractAndConvert size each op against the tile budget of its
+    // tile loop (see lramSizeFor), or the real pipeline would keep more data in LRAM than the
+    // probe that sized the tiles.
     patterns.add<KeepConcatInLram>(ctx, this->lramSize);
     patterns.add<FoldDuplicateConversion>(ctx);
     if (this->shareSliceOutputs) {
