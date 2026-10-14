@@ -873,6 +873,48 @@ static std::pair<int64_t, llvm::ilist<AddressAssignment>::iterator> findEmptyReg
     return {currentAddress, liveAllocations.end()};
 }
 
+// The top-level op of `funcOp` at which each XRAM allocation is first used, through
+// derived views (deallocations do not count). Allocations are often hoisted far
+// ahead of their first use; starting the live range at the alloc op would keep the
+// buffer reserved across everything in between and block address reuse.
+static llvm::DenseMap<Operation *, SmallVector<memref::AllocOp>>
+findXramAllocStarts(FunctionOpInterface funcOp) {
+    Block &body = funcOp.getFunctionBody().front();
+    llvm::DenseMap<Operation *, int> order;
+    int index = 0;
+    for (Operation &op : body)
+        order[&op] = index++;
+
+    llvm::DenseMap<Operation *, SmallVector<memref::AllocOp>> starts;
+    for (auto allocOp : body.getOps<memref::AllocOp>()) {
+        if (getEncodingMemorySpace(allocOp.getType()) != torq_hl::MemorySpace::Xram)
+            continue;
+
+        Operation *first = nullptr;
+        SmallVector<Value> worklist{allocOp.getResult()};
+        llvm::DenseSet<Value> seen;
+        while (!worklist.empty()) {
+            Value value = worklist.pop_back_val();
+            for (Operation *user : value.getUsers()) {
+                if (isa<memref::DeallocOp>(user))
+                    continue;
+                if (isDerivedMemRefOperation(user))
+                    for (Value result : user->getResults())
+                        if (seen.insert(result).second)
+                            worklist.push_back(result);
+                Operation *top = body.findAncestorOpInBlock(*user);
+                if (top && (!first || order[top] < order[first]))
+                    first = top;
+            }
+        }
+        // never start before the allocation itself (or at all, if it is unused)
+        if (!first || order[first] < order[allocOp])
+            first = allocOp;
+        starts[first].push_back(allocOp);
+    }
+    return starts;
+}
+
 static FailureOr<int64_t>
 assignAddressesToXramAllocs(FunctionOpInterface funcOp, int64_t startAddress) {
 
@@ -882,54 +924,48 @@ assignAddressesToXramAllocs(FunctionOpInterface funcOp, int64_t startAddress) {
     int64_t lastUsedAddress = startAddress;
 
     // Track which memory regions are in use via liveAllocations (a sorted list of
-    // allocated address ranges). For each AllocOp, find the first gap large enough
-    // to fit the allocation, insert it into the live list, and record the mapping
-    // from value to allocation. When DeallocOps are encountered, remove their
-    // corresponding allocations from the live list. This maintains a fragmented
-    // memory map that can reuse space as allocations are deallocated.
+    // allocated address ranges). Each XRAM allocation becomes live at its first use
+    // (findXramAllocStarts): find the first gap large enough to fit it, insert it
+    // into the live list, and record the mapping from value to allocation. When
+    // DeallocOps are encountered, remove their corresponding allocations from the
+    // live list. This maintains a fragmented memory map that can reuse space as
+    // allocations are deallocated.
+
+    auto starts = findXramAllocStarts(funcOp);
 
     for (auto &op : funcOp.getFunctionBody().getOps()) {
-        if (auto allocOp = dyn_cast<memref::AllocOp>(op)) {
+        if (auto it = starts.find(&op); it != starts.end()) {
+            for (memref::AllocOp allocOp : it->second) {
 
-            auto value = allocOp.getResult();
+                auto value = allocOp.getResult();
 
-            if (getEncodingMemorySpace(value.getType()) != torq_hl::MemorySpace::Xram) {
-                continue;
-            }
+                int64_t allocSize = align_ceil(getEncodedTotalSizeBytes(value.getType()), 4);
 
-            int64_t allocSize = align_ceil(getEncodedTotalSizeBytes(value.getType()), 4);
+                auto [allocAddr, pos] = findEmptyRegion(liveAllocations, startAddress, allocSize);
 
-            auto [allocAddr, it] = findEmptyRegion(liveAllocations, startAddress, allocSize);
-
-            if (allocAddr + allocSize > HwInfo::xram_size) {
-                return allocOp.emitError("XRAM size exceeded while assigning addresses");
-            }
-
-            lastUsedAddress = std::max(lastUsedAddress, allocAddr + allocSize);
-
-            LLVM_DEBUG({
-                llvm::dbgs() << "Processing alloc: ";
-                allocOp.dump();
-
-                llvm::dbgs() << "Assigned address " << allocAddr << " to allocation of size "
-                             << allocSize << "\n";
-                llvm::dbgs() << "Live allocations:\n";
-                for (auto &alloc : liveAllocations) {
-                    llvm::dbgs() << "   address: " << alloc.address << " size: " << alloc.size
-                                 << "\n";
+                if (allocAddr + allocSize > HwInfo::xram_size) {
+                    return allocOp.emitError("XRAM size exceeded while assigning addresses");
                 }
-                llvm::dbgs() << "\n";
 
-                llvm::dbgs() << "Last used address: " << lastUsedAddress << "\n";
-            });
+                lastUsedAddress = std::max(lastUsedAddress, allocAddr + allocSize);
 
-            // append the allocation at the right place
-            auto allocation = liveAllocations.insert(it, {allocAddr, allocSize});
-            liveAllocationsMap.try_emplace(value, &*allocation);
+                LLVM_DEBUG({
+                    llvm::dbgs() << "Processing alloc: ";
+                    allocOp.dump();
+                    llvm::dbgs() << "Assigned address " << allocAddr << " to allocation of size "
+                                 << allocSize << "\n";
+                    llvm::dbgs() << "Last used address: " << lastUsedAddress << "\n";
+                });
 
-            setXramAddress(&op, allocAddr);
+                // append the allocation at the right place
+                auto allocation = liveAllocations.insert(pos, {allocAddr, allocSize});
+                liveAllocationsMap.try_emplace(value, &*allocation);
+
+                setXramAddress(allocOp, allocAddr);
+            }
         }
-        else if (auto deallocOp = dyn_cast<memref::DeallocOp>(op)) {
+
+        if (auto deallocOp = dyn_cast<memref::DeallocOp>(op)) {
 
             auto it = liveAllocationsMap.find(deallocOp.getMemref());
             if (it != liveAllocationsMap.end()) {
