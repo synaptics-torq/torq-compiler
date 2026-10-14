@@ -17,7 +17,8 @@ from pathlib import Path
 from typing import List, Optional
 
 from torq.lab.cli.commands import _hint, _profile_quality, _run_summary, _status_for
-from torq.lab.cli.output import format_inspect, format_summary
+from torq.lab.cli.output import format_diagnosis, format_inspect, format_summary
+from torq.lab.debug import diagnose
 from torq.lab.pipeline.remote import RemoteTarget
 from torq.lab.pipeline.workflow import ModelPipeline, PipelineConfig
 
@@ -132,6 +133,13 @@ def _compile_with_flags(model_path: Path, work_dir: Path, reader, writer) -> Opt
     except Exception as exc:
         pipe.write_manifest(status="error", diagnostics=str(exc))
         writer(f"Compile failed: {exc}")
+        # First-error users are the target audience: no opt-out prompt here.
+        try:
+            diagnosis = diagnose(pipe)
+        except Exception as debug_exc:
+            writer(f"Auto-debug failed: {debug_exc}")
+        else:
+            writer(format_diagnosis(diagnosis))
         return None
     writer("Compile finished.")
     pipe.write_manifest(compile_result=compile_result)

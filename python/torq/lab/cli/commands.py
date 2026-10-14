@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import Optional
 
 from torq.lab.pipeline import artifacts
-from torq.lab.cli.output import Plan, StageTime, Summary, format_inspect, format_plan, format_summary
+from torq.lab.cli.output import Plan, StageTime, Summary, format_diagnosis, format_inspect, format_plan, format_summary
 from torq.lab.cli.parser import PROG, _MODEL_SUFFIXES, _build_parser, _config_from_args, _opt, _remote_from_args
 from torq.lab import LabError
+from torq.lab.debug import diagnose
 from torq.lab.pipeline.remote import RemoteTarget
 from torq.lab.pipeline.workflow import ModelPipeline, PipelineConfig, load_config
 
@@ -26,6 +27,27 @@ logger = logging.getLogger("torq.lab.cli")
 _OK = 0
 _ERROR = 1
 _COMPARISON_FAILED = 2
+_USAGE_ERROR = 2  # usage errors follow argparse's exit code
+
+# Suffixes whose compile step can fail in a way the debug diagnosis covers.
+_COMPILE_SOURCE_SUFFIXES = (".onnx", ".tflite", ".mlir")
+
+
+def _auto_debug(args, pipe) -> None:
+    """Print the diagnosis of a failed compile step to stdout; never raises."""
+    if _opt(args, "no_auto_debug", False):
+        return
+    if Path(pipe.config.model_path).suffix not in _COMPILE_SOURCE_SUFFIXES:
+        return
+    try:
+        diagnosis = diagnose(pipe)
+    except Exception as exc:
+        logger.error("Auto-debug failed: %s", exc)
+        return
+    if _opt(args, "json", False):
+        print(json.dumps(diagnosis.to_dict()))
+    else:
+        print(format_diagnosis(diagnosis))
 
 
 def _hint(rest: str) -> str:
@@ -114,6 +136,7 @@ def _cmd_compile(args) -> int:
     except Exception as exc:
         pipe.write_manifest(status="error", diagnostics=str(exc))
         logger.error("Compile failed: %s", exc)
+        _auto_debug(args, pipe)
         return _ERROR
     pipe.write_manifest(compile_result=compile_result)
     logger.info("Compiled: %s", compile_result.vmfb_path)
@@ -122,6 +145,35 @@ def _cmd_compile(args) -> int:
         next_command=_hint(f"run {compile_result.vmfb_path}"),
     ))
     return _OK
+
+
+def _cmd_debug(args) -> int:
+    if not args.model and not args.config:
+        # The documented debug exit codes are 0 clean, 1 diagnosed, 2 usage.
+        logger.error("'model' is required unless --config is given")
+        return _USAGE_ERROR
+    config = _config_from_args(args)
+    if _opt(args, "bisect", False) and Path(config.model_path).suffix != ".onnx":
+        logger.error("bisect is ONNX-only: %s", config.model_path)
+        return _USAGE_ERROR
+    if config.timeout is None:
+        # Bound diagnostic runs so hangs produce a timeout diagnosis.
+        config.timeout = 600
+    remote = _remote_from_args(args)
+    if _opt(args, "print_plan", False):
+        print(format_plan(_build_plan("debug", config, remote)))
+        return _OK
+    pipe = ModelPipeline(config, remote)
+    diagnosis = diagnose(
+        pipe,
+        probe=_opt(args, "probe", False),
+        bisect=_opt(args, "bisect", False),
+    )
+    if _opt(args, "json", False):
+        print(json.dumps(diagnosis.to_dict()))
+    else:
+        logger.info(format_diagnosis(diagnosis))
+    return _OK if diagnosis.cls == "ok" else _ERROR
 
 
 def _cmd_run(args) -> int:
@@ -134,8 +186,14 @@ def _cmd_run(args) -> int:
     compile_result = None
     try:
         compile_result, vmfb = pipe.ensure_vmfb()
-        if compile_result is not None:
-            logger.info("Compiling %s -> %s", pipe.config.model_path, vmfb)
+    except Exception as exc:
+        pipe.write_manifest(compile_result=compile_result, status="error", diagnostics=str(exc))
+        logger.error("Run failed: %s", exc)
+        _auto_debug(args, pipe)
+        return _ERROR
+    if compile_result is not None:
+        logger.info("Compiling %s -> %s", pipe.config.model_path, vmfb)
+    try:
         run_result = pipe.run(vmfb)
     except Exception as exc:
         pipe.write_manifest(compile_result=compile_result, status="error", diagnostics=str(exc))
@@ -181,8 +239,14 @@ def _cmd_verify(args) -> int:
     compile_result = None
     try:
         compile_result, vmfb = pipe.ensure_vmfb()
-        if compile_result is not None:
-            logger.info("Compiling %s -> %s", pipe.config.model_path, vmfb)
+    except Exception as exc:
+        pipe.write_manifest(compile_result=compile_result, status="error", diagnostics=str(exc))
+        logger.error("verify failed: %s", exc)
+        _auto_debug(args, pipe)
+        return _ERROR
+    if compile_result is not None:
+        logger.info("Compiling %s -> %s", pipe.config.model_path, vmfb)
+    try:
         run_result = pipe.run(vmfb)
         comparison = pipe.verify_outputs(run_result)
     except Exception as exc:
@@ -236,6 +300,11 @@ def _cmd_profile(args) -> int:
     except Exception as exc:
         pipe.write_manifest(compile_result=compile_result, status="error", diagnostics=str(exc))
         logger.error("Profile failed: %s", exc)
+        # profile() interleaves compile and run; the compile step is the
+        # suspect only when it left no VMFB behind (a failed torq-compile
+        # never leaves -o; a run failure implies the VMFB exists).
+        if not pipe._vmfb_path().exists():
+            _auto_debug(args, pipe)
         return _ERROR
 
     quality, detail = _profile_quality(pipe, run_result)

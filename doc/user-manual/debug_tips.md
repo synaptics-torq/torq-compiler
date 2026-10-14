@@ -1,5 +1,7 @@
 ## Debug tips and tricks
 
+For a first-pass automatic diagnosis of a failed compile, use `torq-lab debug`. See [Debugging compile errors](https://synaptics-torq.github.io/torq-compiler/v/latest/user-manual/debugging_compile_errors.html); the raw flags below remain the manual toolkit.
+
 - To inspect the IR generated use the ``--dump-compilation-phases-to=<dir-name>`` parameter.
 
 - To see the full stack trace when an errors is generated use the ``--mlir-print-stacktrace-on-diagnostic`` parameter.

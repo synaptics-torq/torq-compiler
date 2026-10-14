@@ -80,3 +80,48 @@ def test_interactive_profile_first_generates_random_inputs(fake_tools):
     assert not any("Profile failed" in line for line in lines)
     argv = (fake_tools / "r_argv.txt").read_text()
     assert "--input=" in argv
+
+
+def test_interactive_compile_failure_prints_diagnosis_then_menu(tmp_path, monkeypatch):
+    """A failing initial compile prints the diagnosis; the session continues."""
+    compile_tool = write_fake_compile(tmp_path / "tools")
+    run_tool = write_fake_run(tmp_path / "tools")
+    monkeypatch.setenv("TORQ_COMPILE", str(compile_tool))
+    monkeypatch.setenv("TORQ_RUN_MODULE", str(run_tool))
+    monkeypatch.setenv("FAKE_RC", "1")
+    monkeypatch.setenv("FAKE_STDERR", "model.mlir:1:1: error: something nobody has seen before\n")
+    model = _write_model(tmp_path)
+    work = tmp_path / "out"
+    responses = iter([
+        str(model), str(work), "", "", "", "",
+        str(model), str(work), "", "", "", "",
+        "quit",
+    ])
+    seen_model_prompt = [False]
+
+    def reader(prompt=""):
+        try:
+            resp = next(responses)
+        except StopIteration:
+            raise EOFError()
+        # The model prompt appears a second time only after the first
+        # compile failed: clear the failure knobs before the retry.
+        if prompt.startswith("Model file"):
+            if seen_model_prompt[0]:
+                monkeypatch.setenv("FAKE_RC", "0")
+                monkeypatch.delenv("FAKE_STDERR")
+            else:
+                seen_model_prompt[0] = True
+        return resp
+
+    lines, writer = _capturing_writer()
+    rc = interactive.run_interactive(reader=reader, writer=writer)
+
+    assert rc == 0
+    joined = "\n".join(lines)
+    # The failure printed the diagnosis before returning to the prompt.
+    assert "Compile failed:" in joined
+    assert "diagnosis: unknown" in joined
+    # The session continues: the retry compiles and the menu is reachable.
+    assert joined.index("diagnosis: unknown") < joined.index("Compile finished.")
+    assert "Menu:" in joined

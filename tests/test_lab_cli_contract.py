@@ -20,6 +20,18 @@ from _lab_fake_tools import write_fake_compile, write_fake_run
 
 TESTS_DIR = Path(__file__).parent
 
+_MINIMAL_MLIR = """module {
+  func.func @main(%arg0: tensor<1x4xf32>) -> tensor<1x4xf32> {
+    return %arg0 : tensor<1x4xf32>
+  }
+}
+"""
+
+_FAIL_ENV = {
+    "FAKE_RC": "1",
+    "FAKE_STDERR": "model.mlir:1:1: error: something nobody has seen before\n",
+}
+
 
 def _run_lab(args, *, env=None):
     """Run ``python -m torq.lab <args>`` from a neutral cwd with stdin closed."""
@@ -144,3 +156,81 @@ def test_json_summary_and_manifest_contract(tmp_path):
         str(work_dir / "outputs" / "output_0.bin")
     ]
     assert manifest["artifact"]["source_kind"] == "mlir"
+
+
+# auto-debug: a failed compile step prints the diagnosis (item 9)
+
+
+def _fail_env(tmp_path):
+    env = os.environ.copy()
+    env.update(_FAIL_ENV)
+    env["TORQ_COMPILE"] = str(write_fake_compile(tmp_path / "tools"))
+    return env
+
+
+def test_compile_failure_auto_debugs(tmp_path):
+    model = tmp_path / "model.mlir"
+    model.write_text(_MINIMAL_MLIR)
+    env = _fail_env(tmp_path)
+    result = _run_lab(["compile", str(model), "--work-dir", str(tmp_path / "out")], env=env)
+    assert result.returncode == 1
+    assert "diagnosis: unknown" in result.stdout
+    assert (tmp_path / "out" / "debug" / "diagnosis.json").exists()
+
+
+def test_compile_failure_no_auto_debug_opt_out(tmp_path):
+    model = tmp_path / "model.mlir"
+    model.write_text(_MINIMAL_MLIR)
+    env = _fail_env(tmp_path)
+    result = _run_lab(
+        ["compile", str(model), "--work-dir", str(tmp_path / "out"), "--no-auto-debug"],
+        env=env,
+    )
+    assert result.returncode == 1
+    assert "diagnosis:" not in result.stdout
+    assert not (tmp_path / "out" / "debug" / "diagnosis.json").exists()
+
+
+def test_compile_failure_json_prints_diagnosis_object(tmp_path):
+    model = tmp_path / "model.mlir"
+    model.write_text(_MINIMAL_MLIR)
+    env = _fail_env(tmp_path)
+    result = _run_lab(
+        ["compile", str(model), "--work-dir", str(tmp_path / "out"), "--json"], env=env
+    )
+    assert result.returncode == 1
+    data = json.loads(result.stdout)  # stdout is the diagnosis JSON object
+    assert data["cls"] == "unknown"
+    assert data["raw_stderr"].endswith("raw-stderr.txt")
+
+
+def test_run_source_model_compile_failure_auto_debugs(tmp_path):
+    model = tmp_path / "model.mlir"
+    model.write_text(_MINIMAL_MLIR)
+    env = _fail_env(tmp_path)
+    result = _run_lab(
+        ["run", str(model), "--work-dir", str(tmp_path / "out"), "--random-inputs"],
+        env=env,
+    )
+    assert result.returncode == 1
+    assert "diagnosis: unknown" in result.stdout
+
+
+def test_run_vmfb_run_failure_no_auto_debug(tmp_path):
+    vmfb = tmp_path / "model.vmfb"
+    vmfb.write_bytes(b"FAKEVMFB")
+    (tmp_path / "model.mlir").write_text(_MINIMAL_MLIR)  # sibling for the I/O spec
+    run_tool = tmp_path / "tools" / "torq-run-module"
+    run_tool.parent.mkdir(parents=True, exist_ok=True)
+    run_tool.write_text(
+        "#!/usr/bin/env python3\nimport sys\n"
+        "sys.stderr.write('torq-run-module: exploded\n')\nsys.exit(1)\n"
+    )
+    run_tool.chmod(0o755)
+    env = os.environ.copy()
+    env.update({"TORQ_RUN_MODULE": str(run_tool)})
+    result = _run_lab(["run", str(vmfb), "--work-dir", str(tmp_path / "out")], env=env)
+    assert result.returncode == 1
+    assert "Run failed" in result.stderr
+    assert "diagnosis:" not in result.stdout
+    assert not (tmp_path / "out" / "debug" / "diagnosis.json").exists()

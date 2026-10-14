@@ -8,7 +8,8 @@
 
 The fakes record their argv to a file (path from an env var) so tests can assert
 on the assembled command line, and produce the expected artifacts:
-  * fake torq-compile writes a dummy VMFB at the ``-o`` path.
+  * fake torq-compile writes a dummy VMFB at the ``-o`` path, or fails with
+    ``FAKE_RC`` / ``FAKE_STDERR`` when ``FAKE_RC`` is non-zero.
   * fake torq-run-module writes zero-filled outputs (sizes from an env var) for
     each ``--output=@`` arg and an optional host-profile CSV.
 """
@@ -22,6 +23,10 @@ argv = sys.argv[1:]
 rec = os.environ.get("FAKE_COMPILE_RECORD")
 if rec:
     pathlib.Path(rec).write_text("\n".join(argv))
+rc = int(os.environ.get("FAKE_RC", "0"))
+if rc:
+    sys.stderr.write(os.environ.get("FAKE_STDERR", ""))
+    sys.exit(rc)
 out = None
 for i, a in enumerate(argv):
     if a == "-o":

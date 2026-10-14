@@ -16,6 +16,7 @@ import xdist
 import json
 
 import torq.testing.xfail
+from torq.lab.debug import normalize_error
 
 _failures: Dict[str, Dict[str, Any]] = defaultdict(dict)
 _reports: Dict[str, Dict[str, Any]] = defaultdict(dict)
@@ -28,10 +29,6 @@ _ISSUE_TYPE = "Bug"
 _MAX_ISSUE_TITLE_LEN = 256
 _MODULE_TITLE_SUFFIX_BUDGET = 48
 _ERROR_TITLE_SUFFIX_BUDGET = 32
-
-# Things that look like an error
-# re.MULTILINE makes $ match end of line.
-_ERROR_PATTERN = re.compile(r'(Assertion .*$|error: .*$)', re.MULTILINE)
 
 def pytest_addoption(parser):
 
@@ -62,27 +59,13 @@ def pytest_configure(config: pytest.Config):
 def _normalize_error(report: pytest.TestReport) -> str | None:
     
     # try to get the error from the stderr
-    while True:
+    stderr = getattr(report, "capstderr", "")
 
-        stderr =  getattr(report, "capstderr", "")
-
-        if stderr is None:
-            break
-
+    if stderr is not None:
         stderr = stderr.replace("error: Failed call to cuInit", "")
-
-        error_match = _ERROR_PATTERN.search(stderr)
-        if error_match is None:
-            break
-
-        # Normalize the error text:
-        # - remove the suffix tile and fuse adds
-        error = error_match.group(0).removesuffix(
-            " (encountered while running the pipeline to checking if a tile fits in memory)")
-        # - change fixed numbers to <N>
-        error = re.sub(r"[0-9]+", "<N>", error)
-
-        return error
+        normalized = normalize_error(stderr)
+        if normalized is not None:
+            return normalized
         
     # if this is another type of failure try to return the exception message
     longrepr = getattr(report, "longrepr", None)

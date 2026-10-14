@@ -4,7 +4,7 @@
 
 It is available via three interfaces:
 
-- the **`torq-lab` command line**: compile, run, verify, and profile a model from the shell;
+- the **`torq-lab` command line**: compile, debug, run, verify, and profile a model from the shell;
 - **interactive mode**: a guided, no-flags-needed session for exploring a model; and
 - the **`torq.lab` Python package**: a python module you can import into your own scripts and applications.
 
@@ -53,13 +53,14 @@ $ python -m torq.lab <command> <model> [options]
 $ torq-lab
 ```
 
-`<model>` is a `.onnx`, `.tflite`, or `.mlir` source for `compile`/`run`/`verify`/`profile` (imported/compiled first as needed), or a `.vmfb` module to run/verify/profile/inspect directly. It is optional when `--config` supplies `model_path`. The delegated commands (`gen_config`, `quantize`, `analyze`, `convert_dtype`, `convert_static`) do not take a `<model>` positional; see [Delegated commands](#delegated-commands).
+`<model>` is a `.onnx`, `.tflite`, or `.mlir` source for `compile`/`debug`/`run`/`verify`/`profile` (imported/compiled first as needed), or a `.vmfb` module to run/verify/profile/inspect directly. It is optional when `--config` supplies `model_path`. The delegated commands (`gen_config`, `quantize`, `analyze`, `convert_dtype`, `convert_static`) do not take a `<model>` positional; see [Delegated commands](#delegated-commands).
 
 ### Subcommands
 
 | Command      | Purpose                                                             |
 |--------------|----------------------------------------------------------------------|
 | `compile`    | Compile a model to a VMFB.                                          |
+| `debug`      | Diagnose a failed compile: class, location, probes, repro bundle.   |
 | `run`        | Compile if needed, then run the model.                              |
 | `verify`     | Compile/run if needed, then check outputs against a reference.      |
 | `profile`    | Compile/run if needed with profiling on, and report the profile.    |
@@ -70,6 +71,8 @@ $ torq-lab
 | `convert_dtype` | Convert an ONNX model to Torq-compatible dtypes (`onnx`); delegates to `torq-convert-dtype`. |
 | `convert_static` | Convert a dynamic TFLite model to static shapes (`tflite`); delegates to `torq-convert-static`. |
 | *(none)*     | Launches [interactive mode](#interactive-mode).                     |
+
+When compilation fails, `compile`, `run`, `verify`, and `profile` print a diagnosis and suggested next step. Interactive mode does this too. Diagnosis re-runs the compile to collect evidence; use `--no-auto-debug` to skip it. See [Debugging compile errors](debugging_compile_errors.md) for examples and reproduction files.
 
 ### Examples
 
@@ -84,6 +87,12 @@ Compile a model to a VMFB (accepts `.onnx`, `.tflite`, or `.mlir`):
 ```bash
 $ torq-lab compile MobileNetV2_int8.mlir -o mobilenetv2_int8.vmfb
 $ torq-lab compile model.mlir -o model.vmfb
+```
+
+Diagnose a failed compile using the same options as the original command:
+
+```bash
+$ torq-lab debug erf_f32.onnx --compiler-option=--torq-disable-css --compiler-option=--torq-disable-host
 ```
 
 Compile and run in one step, with random inputs. `run` accepts `.onnx`/`.tflite`/`.mlir` directly and compiles automatically:
@@ -157,7 +166,7 @@ See [Remote execution](#remote-execution) for the SSH and ADB address forms.
 
 Running `<command> -h` displays the options relevant to the command.
 
-**common**: `--config`, `--work-dir`, `--timeout`, `--reuse-work-dir`
+**common**: `--config`, `--work-dir`, `--timeout`, `--reuse-work-dir`, `--no-auto-debug`
 
 | Option                  | Description                                                        |
 |-------------------------|----------------------------------------------------------------------|
@@ -165,14 +174,15 @@ Running `<command> -h` displays the options relevant to the command.
 | `--work-dir DIR`        | Artifact directory (default: `./<model-stem>-run`).                |
 | `--timeout SECONDS`     | Per-tool timeout in seconds; see note below.                  |
 | `--reuse-work-dir`      | Reuse a populated work directory instead of allocating a new run ID. |
+| `--no-auto-debug`       | Skip automatic diagnosis after a compile failure to avoid additional compiler runs. |
 
-**target** (`compile`, `run`, `verify`, `profile`): `--runtime-hw-type`
+**target** (`compile`, `debug`, `run`, `verify`, `profile`): `--runtime-hw-type`
 
-**compile stage** (`compile`, `run`, `verify`, `profile`):
+**compile stage** (`compile`, `debug`, `run`, `verify`, `profile`):
 
 | Option                     | Description                                                        |
 |----------------------------|--------------------------------------------------------------------|
-| `--chip CHIP`              | Chip target for `--torq-hw` (default: `SL2610`).                  |
+| `--chip CHIP`              | Chip target (passed to the compiler as `--torq-hw`; default: `SL2610`).                  |
 | `--compiler-option OPT`    | Extra `torq-compile` flag (repeatable).                           |
 | `--dump-ir`                | Dump IR after each pass into `<work-dir>/debug/ir`.                |
 | `--dump-phases`            | Dump compilation phases into `<work-dir>/phases`.                 |
@@ -208,16 +218,16 @@ Running `<command> -h` displays the options relevant to the command.
 | `--remote-runner PATH` | Absolute path of `torq-run-module` already on the device.   |
 | `--stage-runner PATH`  | Local `torq-run-module` to copy onto the device.             |
 
-**output** (`compile`, `run`, `verify`, `profile`, `inspect`):
+**output** (`compile`, `debug`, `run`, `verify`, `profile`, `inspect`):
 
 | Option           | Description                                                                 |
 |------------------|-------------------------------------------------------------------------------|
 | `--print-plan`   | Print what the command would do and exit, without importing, compiling, running, or connecting to a board. |
 | `--json`         | Print the result as one structured JSON object instead of human-readable text. |
 
-`compile` also has `-o, --output PATH` (output VMFB path; default `<work-dir>/<model-stem>.vmfb`). `inspect` also has `--artifact MANIFEST` (resolve facts from an explicit manifest), `--source MODEL` (resolve I/O from an explicit `.mlir`/`.onnx`), and `--function NAME` (override the resolved entry function).
+`compile` also has `-o, --output PATH` (output VMFB path; default `<work-dir>/<model-stem>.vmfb`). `debug` also has `--probe` to try relevant compiler options and `--bisect` to check ONNX layers individually. Unsupported NPU lowering always gets fallback probes. `inspect` also has `--artifact MANIFEST` (resolve facts from an explicit manifest), `--source MODEL` (resolve I/O from an explicit `.mlir`/`.onnx`), and `--function NAME` (override the resolved entry function).
 
-`--timeout` is a single value applied *independently* to each tool invocation, not a budget for the whole pipeline: `run` gives the compile its own `SECONDS` and the run another `SECONDS`. There is currently no way to set a different limit for the compiler and the runtime. On a remote run the same value also bounds each individual command issued over the SSH/ADB transport (default `15` when `--timeout` is unset).
+`--timeout` is a single value applied *independently* to each tool invocation, not a budget for the whole pipeline: `run` gives the compile its own `SECONDS` and the run another `SECONDS`. There is currently no way to set a different limit for the compiler and the runtime. On a remote run the same value also bounds each individual command issued over the SSH/ADB transport (default `15` when `--timeout` is unset). `debug` defaults to 600 seconds per tool run. It may compile several times to collect reproduction files and test probes; see [Debugging compile errors](debugging_compile_errors.md).
 
 When both `--config` and CLI flags are given, an explicit CLI flag always overrides the same key from the config file.
 

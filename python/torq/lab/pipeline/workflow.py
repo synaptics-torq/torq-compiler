@@ -349,8 +349,21 @@ class ModelPipeline:
         self.phases_dir = self.work_dir / "phases"
         self.profiles_dir = Path(config.profiles_dir).resolve() if config.profiles_dir else self.work_dir / "profiles"
         self.remote_dir = self.work_dir / "remote"
+        self._debug_only = None
 
     # -- helpers ---------------------------------------------------------
+
+    def debug_only_available(self) -> bool:
+        """Whether the compiler accepts --debug-only (assert-enabled builds); cached."""
+        if self._debug_only is None:
+            try:
+                tools.run_tool([tools.find_compile_tool(self.config.compile_tool), "--debug-only=x"])
+                self._debug_only = True
+            except FileNotFoundError:
+                self._debug_only = False
+            except tools.ToolError as exc:
+                self._debug_only = "Unknown command line argument" not in exc.output
+        return self._debug_only
 
     def _ensure_work_dir(self) -> None:
         """Create the work directory, allocating a run ID if it has run artifacts."""

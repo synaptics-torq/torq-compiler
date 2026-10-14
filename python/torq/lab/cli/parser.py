@@ -32,6 +32,7 @@ def _add_shared_options(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--work-dir", help="Artifact directory (default: ./<model-stem>-run)")
     group.add_argument("--timeout", type=int, help="Per-tool timeout in seconds")
     group.add_argument("--reuse-work-dir", action="store_true", help="Reuse a populated work directory instead of allocating a run ID")
+    group.add_argument("--no-auto-debug", action="store_true", help="Don't run the debug diagnosis automatically when a compile fails (debug re-runs the compile, so this saves time on large models)")
 
 
 def _add_target_options(parser: argparse.ArgumentParser) -> None:
@@ -41,7 +42,7 @@ def _add_target_options(parser: argparse.ArgumentParser) -> None:
 
 def _add_compile_options(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("compile stage")
-    group.add_argument("--chip", default=None, help="Chip target for --torq-hw (default: SL2610)")
+    group.add_argument("--chip", default=None, help="Chip target (passed to the compiler as --torq-hw; default: SL2610)")
     group.add_argument("--compiler-option", action="append", default=[], help="Extra torq-compile flag (repeatable)")
     group.add_argument("--dump-ir", action="store_true", help="Dump IR after each pass into <work-dir>/debug/ir")
     group.add_argument("--dump-phases", action="store_true", help="Dump compilation phases into <work-dir>/phases")
@@ -218,6 +219,22 @@ Delegated command groups (see `{PROG} <group> --help`):
     compile_sub.add_argument("-o", "--output", help="Output VMFB path (default: <work-dir>/<model-stem>.vmfb)")
     _add_output_options(compile_sub)
     compile_sub.set_defaults(handler=commands._cmd_compile)
+
+    # debug command
+    debug_sub = subparsers.add_parser(
+        "debug",
+        help="Diagnose a compile failure: class, stage, pass, op, source node, next step",
+        description="Compile a model and report the failure location and next step. Save a reproduction bundle to <work-dir>/debug/. Exit codes: 0 for success, 1 for a diagnosed failure, 2 for invalid usage.",
+        allow_abbrev=False,
+    )
+    _add_model_arg(debug_sub, ".onnx/.tflite/.mlir to compile and diagnose (optional when --config supplies it)")
+    _add_shared_options(debug_sub)
+    _add_target_options(debug_sub)
+    _add_compile_options(debug_sub)
+    debug_sub.add_argument("--probe", action="store_true", help="Run differential probes (the no-npu-lowering fallback probe always runs)")
+    debug_sub.add_argument("--bisect", action="store_true", help="Compile each extracted layer on its own (ONNX only)")
+    _add_output_options(debug_sub)
+    debug_sub.set_defaults(handler=commands._cmd_debug)
 
     # run command
     run_sub = subparsers.add_parser("run", help="Compile if needed, then run a model", allow_abbrev=False)

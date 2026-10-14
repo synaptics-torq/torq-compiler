@@ -13,6 +13,7 @@ inference_time.md
 css_host_fallback.md
 custom_hw.md
 debug_tips.md
+debugging_compile_errors.md
 torq-gen-config.md
 torq_lab.md
 torq-synap-integration.md
