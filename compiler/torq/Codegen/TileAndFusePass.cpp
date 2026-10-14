@@ -213,6 +213,13 @@ static llvm::cl::opt<unsigned> clProbeRelocationMaxTileGrowth(
     llvm::cl::init(25)
 );
 
+static llvm::cl::opt<bool> clDisableAvoidProducerRecompute(
+    "torq-disable-tnf-avoid-producer-recompute",
+    llvm::cl::desc("Allow fusing producers whose result slice is invariant in an enclosing tiled "
+                   "loop, i.e. producers that get recomputed on every iteration of that loop"),
+    llvm::cl::init(false) // Default value
+);
+
 const std::string TORQ_TNF_DISTANCE = "torq-tnf-distance";
 
 void setSourcesDistance(Operation *op, std::optional<int64_t> distance) {
@@ -2026,6 +2033,84 @@ static bool pointwiseChainNeedsSpatialTile(Operation *op) {
     return false;
 }
 
+// True if `value` can change from one iteration of `loop` to the next: it is the loop's
+// induction variable or one of its iter_args, or it is computed from one. A value defined
+// inside the loop does not necessarily vary with it: in an interchanged nest
+// for(n) { for(m) { ... } }, the inner m index is defined inside the n loop but does not
+// depend on n. Values from ops with regions are conservatively assumed to vary.
+static bool variesWithLoop(Value value, scf::ForOp loop, DenseSet<Value> &visited) {
+    if (loop.isDefinedOutsideOfLoop(value) || !visited.insert(value).second)
+        return false;
+    if (auto arg = dyn_cast<BlockArgument>(value)) {
+        Operation *owner = arg.getOwner()->getParentOp();
+        if (owner == loop.getOperation())
+            return true;
+        // A nested loop's induction variable varies with `loop` only if its bounds or step do.
+        // Its iter_args carry values from its body, so they are assumed to vary.
+        auto nested = dyn_cast<scf::ForOp>(owner);
+        if (!nested || value != nested.getInductionVar())
+            return true;
+        return llvm::any_of(
+            ValueRange{nested.getLowerBound(), nested.getUpperBound(), nested.getStep()},
+            [&](Value bound) { return variesWithLoop(bound, loop, visited); }
+        );
+    }
+    Operation *def = value.getDefiningOp();
+    if (def->getNumRegions() > 0)
+        return true;
+    return llvm::any_of(def->getOperands(), [&](Value operand) {
+        return variesWithLoop(operand, loop, visited);
+    });
+}
+
+// A fused producer is recomputed on every iteration of an enclosing tiled loop
+// whose induction variable its result slice does not depend on: the identical
+// producer tile is materialized again and again. E.g. fusing the gelu chain
+// that feeds a matmul's LHS into the matmul recomputes the whole chain for
+// every N tile (the LHS slice does not index N), turning a single pass over
+// the activations into numColTiles passes. Detected by checking, for every
+// enclosing multi-trip scf.for, whether any operand of the candidate slice
+// (offsets/sizes) varies with that loop.
+static bool isRecomputedInEnclosingLoop(tensor::ExtractSliceOp sliceOp, Operation *producerOp) {
+    for (auto loop = sliceOp->getParentOfType<scf::ForOp>(); loop;
+         loop = loop->getParentOfType<scf::ForOp>()) {
+        // The producer already runs on every iteration of a loop that contains it; fusing it
+        // into an inner tile does not add recomputation relative to that loop.
+        if (loop->isAncestor(producerOp))
+            continue;
+
+        // A single-iteration loop does not recompute anything.
+        std::optional<int64_t> lb = getConstantIntValue(loop.getLowerBound());
+        std::optional<int64_t> ub = getConstantIntValue(loop.getUpperBound());
+        std::optional<int64_t> step = getConstantIntValue(loop.getStep());
+        if (lb && ub && step && *ub - *lb <= *step)
+            continue;
+
+        DenseSet<Value> visited;
+        bool dependsOnLoop = llvm::any_of(sliceOp->getOperands(), [&](Value operand) {
+            return operand != sliceOp.getSource() && variesWithLoop(operand, loop, visited);
+        });
+        if (!dependsOnLoop)
+            return true;
+    }
+    return false;
+}
+
+// True when `producerOp` must not be fused into the tile `candidateSliceOp` reads, because an
+// enclosing tiled loop would recompute it on every iteration. Leaving it unfused costs one DRAM
+// round trip of its result; fusing it costs (tripCount - 1) redundant evaluations of the
+// producer (and re-reads of ITS inputs). Fills are exempt: recomputing a fill is free, and it
+// is the canonical destination producer.
+//
+// Only meaningful for the tiling actually applied: the loops must be those of the domains the
+// tile really cuts. The producer-discovery probe (MaxSizeAllDoms) cuts every parallel domain
+// to its smallest tile, so there every producer that does not index some domain would look
+// recomputed, e.g. a matmul LHS producer when only the rows are tiled in the end.
+static bool wouldRecomputeProducer(Operation *producerOp, tensor::ExtractSliceOp candidateSliceOp) {
+    return !clDisableAvoidProducerRecompute && !isa<linalg::FillOp>(producerOp) &&
+           isRecomputedInEnclosingLoop(candidateSliceOp, producerOp);
+}
+
 // an SCFTileAndFuseOptions::ControlFnTy for the max-size fuse mode.
 std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuseControlMaxSize(
     IRRewriter &rewriter, bool allDomains, const DenseSet<TilingInterface> &toTileOps,
@@ -2070,6 +2155,17 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> TileAndFusePass::fuse
     if (isMarkedFuseGroup(producerOp) && !isFuseGroupOutput(producerOp)) {
         setSourcesDistance(producerOp, distance);
         return fuseAndDoNotYieldProducer;
+    }
+
+    // Never fuse a producer that an enclosing tiled loop would recompute on every iteration.
+    // Not in the producer-discovery probe (allDomains), whose loops are not the real tiling:
+    // see wouldRecomputeProducer.
+    if (!allDomains && wouldRecomputeProducer(producerOp, candidateSliceOp)) {
+        LLVM_DEBUG(
+            llvm::dbgs() << "  not fusing (would be recomputed in an enclosing tiled loop): "
+                         << producerOp->getName() << "\n"
+        );
+        return doNotFuse();
     }
 
     // Get the producer's operand tiles
@@ -2194,6 +2290,18 @@ std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> fuseControlMaxProduce
     if (isMarkedFuseGroup(producerOp) && !isFuseGroupOutput(producerOp)) {
         setSourcesDistance(producerOp, distance);
         return fuseAndDoNotYieldProducer;
+    }
+
+    // Never fuse a producer that an enclosing tiled loop would recompute on every iteration.
+    // The discovery probe keeps such producers in `producerOps`; this is the real tiling, whose
+    // loops are the domains actually cut, so the check is decided here (see
+    // wouldRecomputeProducer).
+    if (wouldRecomputeProducer(producerOp, candidateSliceOp)) {
+        LLVM_DEBUG(
+            llvm::dbgs() << "  not fusing (would be recomputed in an enclosing tiled loop): "
+                         << producerOp->getName() << "\n"
+        );
+        return doNotFuse();
     }
 
     SmallVector<OpFoldResult> mappedOffsets, mappedSizes;

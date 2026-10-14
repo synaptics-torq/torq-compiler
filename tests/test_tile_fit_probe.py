@@ -199,3 +199,82 @@ def test_relocation_free_search_keeps_alignment(torq_compiler, tmp_path):
     # Without this, the test would pass even if the search stopped changing the tile.
     assert default != disabled, "the tile no longer relocates, so this test proves nothing"
     assert default % 4 == 0, f"tile of {default} columns is not a multiple of 4"
+
+
+# Tile-and-fuse must not fuse a producer that a tiled loop would recompute on every
+# iteration, and must keep fusing it when nothing would be recomputed. Both cases feed a
+# matmul's LHS from an elementwise producer (arith.negf).
+PRODUCER_N_TILED_MODEL = MODELS_DIR / "tiling" / "matmul-lhs-producer-n-tiled-bf16.mlir"
+PRODUCER_M_TILED_MODEL = MODELS_DIR / "tiling" / "matmul-lhs-producer-m-tiled-bf16.mlir"
+
+
+def outer_loop_nests(torq_compiler, tmp_path, model, extra_flags):
+    """For each outermost scf.for nest of the dispatch after tile-and-fuse, whether it
+    contains the producer (arith.negf) and the matmul."""
+    cmd = [
+        str(torq_compiler.file_path),
+        str(model),
+        "-o",
+        str(tmp_path / "model.vmfb"),
+        "--torq-hw=SL2610",
+        "--torq-disable-host",
+        "--torq-disable-css",
+        "--mlir-disable-threading",
+        "--mlir-print-ir-after=torq-tile-and-fuse",
+    ] + extra_flags
+    print("Compiling with:", " ".join(cmd))
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    assert proc.returncode == 0, f"compile failed:\n{proc.stderr}"
+
+    dumps = [
+        dump
+        for dump in proc.stderr.split("// -----// IR Dump After")
+        if re.search(r"func\.func @main_dispatch", dump) and "linalg.matmul" in dump
+    ]
+    assert dumps, "no dump of the matmul dispatch after torq-tile-and-fuse"
+
+    nests, stack = [], []
+    for line in dumps[-1].splitlines():
+        text = line.strip()
+        if text.startswith("}") and stack:
+            stack.pop()
+        if "scf.for" in stack:
+            nests[-1]["negf"] |= "arith.negf" in text
+            nests[-1]["matmul"] |= "linalg.matmul" in text
+        if text.endswith("{"):
+            if "scf.for" in text and "scf.for" not in stack:
+                nests.append({"negf": False, "matmul": False})
+            stack.append("scf.for" if "scf.for" in text else "other")
+    return nests
+
+
+def producer_fused(nests):
+    return any(nest["negf"] and nest["matmul"] for nest in nests)
+
+
+@pytest.mark.ci
+def test_producer_not_recomputed_in_n_tiled_matmul(torq_compiler, tmp_path):
+    """The LHS slice does not index N: fusing the producer would recompute it per N tile."""
+    hatch = outer_loop_nests(
+        torq_compiler,
+        tmp_path,
+        PRODUCER_N_TILED_MODEL,
+        ["--torq-disable-tnf-avoid-producer-recompute"],
+    )
+    # Without this, the test would pass even if the matmul stopped being tiled along N.
+    assert producer_fused(hatch), "control: the producer is not fused even without the check"
+
+    nests = outer_loop_nests(torq_compiler, tmp_path, PRODUCER_N_TILED_MODEL, [])
+    assert not producer_fused(nests), f"the producer is recomputed per N tile: {nests}"
+    assert any(nest["negf"] and not nest["matmul"] for nest in nests), (
+        f"the producer is not computed once in its own loop: {nests}"
+    )
+
+
+@pytest.mark.ci
+def test_producer_fused_in_m_tiled_matmul(torq_compiler, tmp_path):
+    """Near miss: tiled along M only, the LHS slice follows the tile, so nothing is
+    recomputed and the producer must stay fused."""
+    nests = outer_loop_nests(torq_compiler, tmp_path, PRODUCER_M_TILED_MODEL, [])
+    assert any(nest["matmul"] for nest in nests), f"the matmul is no longer tiled: {nests}"
+    assert producer_fused(nests), f"the producer is not fused although nothing is recomputed: {nests}"

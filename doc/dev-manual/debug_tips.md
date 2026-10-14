@@ -187,6 +187,12 @@
     percent, accepted for a tile without relocation. The limit rounds down, so a tiling of 1 to
     3 tiles keeps its relocation.
 
+  - ``--torq-disable-tnf-avoid-producer-recompute`` (default off): by default, tile-and-fuse does
+    not fuse a producer whose slice is the same on every iteration of a tiled loop, e.g. the LHS
+    producer of a matmul tiled along N, because it would be recomputed for every tile; the
+    producer is computed once and its result read back from DRAM. This flag fuses such producers
+    anyway. Use it to compare performance, or to rule this behaviour out when debugging tiling.
+
   - To see all supported Torq flags, run:
 
     ```{code} shell
