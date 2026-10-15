@@ -20,6 +20,7 @@
 #include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/DialectResourceBlobManager.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
@@ -601,10 +602,133 @@ static Value extendToI32(Value value, PatternRewriter &rewriter, Location loc, b
     return arith::ExtSIOp::create(rewriter, loc, rewriter.getI32Type(), value);
 }
 
+/// Matches a batch matmul input [1,K,N] that lifts a per-tensor dequantized
+/// constant weight, the form the importer emits for a DequantizeLinear with
+/// scalar scale and zero point:
+///   %w = linalg.generic ins(%cst : tensor<KxNxi8>) {
+///          extui/extsi (or none); [subi %zp]; sitofp; mulf %scale }
+///   input = tensor.expand_shape %w [[0, 1], [2]]
+///        or linalg.generic (d0,d1,d2)->(d1,d2) broadcast of %w
+/// with %zp (i32) and %scale captured constants. Fills `match` with the
+/// equivalent single-block form over new constants: the weight as [1,K,N],
+/// scale and zero point as [1,1,N] splats. A uint8 weight is re-encoded as
+/// int8 (w ^ 0x80, zp - 128), which preserves w - zp, so that consumers that
+/// read the weight as signed (the mixed-quant matmul) accept it.
+static LogicalResult matchPerTensorDequantMatmulInput(
+    Value input, RankedTensorType &inputType, BlockQuantizedMatmulInputMatch &match,
+    PatternRewriter &rewriter, Location loc
+) {
+    inputType = dyn_cast<RankedTensorType>(input.getType());
+    if (!inputType || inputType.getRank() != 3 || inputType.getDimSize(0) != 1 ||
+        !inputType.hasStaticShape())
+        return failure();
+    Value lifted;
+    if (auto expand = input.getDefiningOp<tensor::ExpandShapeOp>()) {
+        lifted = expand.getSrc();
+    }
+    else if (auto lift = input.getDefiningOp<linalg::GenericOp>()) {
+        auto maps = lift.getIndexingMapsArray();
+        if (lift.getNumDpsInputs() != 1 || !isYieldedBlockArgument(lift, 0) ||
+            !isFinalMatmulRhsBroadcastMap(maps[0]) || !isIdentityMap(maps[1], 3))
+            return failure();
+        lifted = lift.getInputs()[0];
+    }
+    auto dq = lifted ? lifted.getDefiningOp<linalg::GenericOp>() : linalg::GenericOp();
+    if (!dq || dq.getNumDpsInputs() != 1 || dq.getNumResults() != 1 ||
+        dq.getResult(0).getType() !=
+            RankedTensorType::get(inputType.getShape().drop_front(), inputType.getElementType()) ||
+        !llvm::all_of(dq.getIndexingMapsArray(), [](AffineMap m) { return m.isIdentity(); }))
+        return failure();
+
+    Attribute weightAttr;
+    auto weightType = dyn_cast<RankedTensorType>(dq.getInputs()[0].getType());
+    if (!weightType || !weightType.getElementType().isInteger(8) ||
+        !matchPattern(dq.getInputs()[0], m_Constant(&weightAttr)))
+        return failure();
+
+    // Body: mulf(sitofp([subi](ext(w), zp)), scale), nothing else.
+    Block *body = dq.getBody();
+    auto mulf = getSingleYieldedValue(dq).getDefiningOp<arith::MulFOp>();
+    auto sitofp = mulf ? mulf.getLhs().getDefiningOp<arith::SIToFPOp>() : arith::SIToFPOp();
+    if (!sitofp)
+        return failure();
+    auto subi = sitofp.getIn().getDefiningOp<arith::SubIOp>();
+    Value integer = subi ? subi.getLhs() : sitofp.getIn();
+    auto extui = integer.getDefiningOp<arith::ExtUIOp>();
+    auto extsi = integer.getDefiningOp<arith::ExtSIOp>();
+    Value weightArg = extui ? extui.getIn() : extsi ? extsi.getIn() : integer;
+    if (weightArg != body->getArgument(0) || (subi && !extui && !extsi) ||
+        body->getOperations().size() != 3 + bool(subi) + bool(extui || extsi))
+        return failure();
+    FloatAttr scaleAttr;
+    if (!matchPattern(mulf.getRhs(), m_Constant(&scaleAttr)))
+        return failure();
+    int64_t zeroPoint = 0;
+    if (subi) {
+        IntegerAttr zpAttr;
+        if (!matchPattern(subi.getRhs(), m_Constant(&zpAttr)))
+            return failure();
+        zeroPoint = zpAttr.getInt();
+    }
+    bool isUnsigned = static_cast<bool>(extui);
+    if (isUnsigned)
+        zeroPoint -= 128;
+    if (zeroPoint < -128 || zeroPoint > 127)
+        return failure();
+
+    // The constants of the single-block form.
+    int64_t N = weightType.getDimSize(1);
+    auto i8 = rewriter.getI8Type();
+    auto blockedType = RankedTensorType::get({1, weightType.getDimSize(0), N}, i8);
+    Attribute blockedAttr;
+    if (auto dense = dyn_cast<DenseIntElementsAttr>(weightAttr)) {
+        if (isUnsigned)
+            dense = cast<DenseIntElementsAttr>(dense.mapValues(i8, [](const APInt &v) {
+                return v ^ APInt(8, 0x80);
+            }));
+        blockedAttr = dense.reshape(blockedType);
+    }
+    else if (auto resource = dyn_cast<DenseResourceElementsAttr>(weightAttr)) {
+        AsmResourceBlob *blob = resource.getRawHandle().getBlob();
+        if (!blob || (int64_t)blob->getData().size() != blockedType.getNumElements())
+            return failure();
+        if (isUnsigned) {
+            SmallVector<char> bytes(blob->getData());
+            for (char &b : bytes)
+                b ^= static_cast<char>(0x80);
+            blockedAttr = DenseElementsAttr::getFromRawBuffer(blockedType, bytes);
+        }
+        else {
+            blockedAttr = DenseResourceElementsAttr::get(blockedType, resource.getRawHandle());
+        }
+    }
+    else {
+        return failure();
+    }
+    auto paramShape = SmallVector<int64_t>{1, 1, N};
+    match.weightType = blockedType;
+    match.scaleType = RankedTensorType::get(paramShape, scaleAttr.getType());
+    match.zeroPointType = RankedTensorType::get(paramShape, i8);
+    match.weight = arith::ConstantOp::create(rewriter, loc, cast<TypedAttr>(blockedAttr));
+    match.scale = arith::ConstantOp::create(
+        rewriter, loc, DenseElementsAttr::get(match.scaleType, ArrayRef<Attribute>{scaleAttr})
+    );
+    match.zeroPoint = arith::ConstantOp::create(
+        rewriter, loc,
+        DenseElementsAttr::get(
+            match.zeroPointType,
+            ArrayRef<Attribute>{IntegerAttr::get(i8, APInt(8, zeroPoint, /*isSigned=*/true))}
+        )
+    );
+    match.layout = BlockQuantizedMatmulInputLayout::ReductionDimBlocked;
+    return success();
+}
+
 /// Rewrite a block-quantized dequant chain into a single linalg.generic with
 /// simple indexing maps (no floordiv/mod), producing the dequantized weight.
 /// The dequantized weight is then collapsed/expanded and fed into the existing
-/// batch_matmul, which is kept as-is.
+/// batch_matmul, which is kept as-is. A per-tensor dequantized constant weight
+/// (see matchPerTensorDequantMatmulInput) is rewritten as a single block.
 ///
 /// For ReductionDimBlocked (K = G * B, weight is [G, B, N]):
 ///   3 dims: (d0=G, d1=B, d2=N)
@@ -630,13 +754,11 @@ rewriteBlockQuantizedMatmulInputSimple(Value input, PatternRewriter &rewriter, L
     OpBuilder::InsertionGuard guard(rewriter);
 
     RankedTensorType inputType;
-    auto blockedInput = getCollapsedMatmulInput(input, inputType);
-    if (failed(blockedInput)) {
-        return failure();
-    }
-
     BlockQuantizedMatmulInputMatch match;
-    if (failed(matchSeparatedBlockQuantizedMatmulInput(*blockedInput, inputType, match))) {
+    auto blockedInput = getCollapsedMatmulInput(input, inputType);
+    if ((failed(blockedInput) ||
+         failed(matchSeparatedBlockQuantizedMatmulInput(*blockedInput, inputType, match))) &&
+        failed(matchPerTensorDequantMatmulInput(input, inputType, match, rewriter, loc))) {
         return failure();
     }
 

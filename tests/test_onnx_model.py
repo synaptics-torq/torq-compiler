@@ -50,7 +50,7 @@ def case_config(request, chip_config):
     ]
     if any(s in request.node.nodeid for s in example_tc):
         pytest.xfail("Skipped Example Cases")
-    
+
     return {
          "onnx_model": "onnx_layer_model",
          "mlir_model_file": "onnx_mlir_model_file",

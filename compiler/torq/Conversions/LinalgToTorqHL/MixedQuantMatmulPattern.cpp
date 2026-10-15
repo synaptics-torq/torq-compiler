@@ -497,12 +497,14 @@ LogicalResult matchBlockQuantChain(linalg::BatchMatmulOp srcOp, PatternRewriter 
         return rw.notifyMatchFailure(srcOp, "block shape does not cover K");
     auto wq = resolveSlicedConst(wqV, rw, loc);
     auto scale = resolveSlicedConst(scaleV, rw, loc);
-    if (failed(wq) || failed(scale) || wq->splat || scale->splat)
+    if (failed(wq) || failed(scale) || wq->splat)
         return rw.notifyMatchFailure(srcOp, "weights/scale are not resolvable constants");
     const int64_t N = cast<RankedTensorType>(wq->parent.getType()).getDimSize(2);
+    // A splat scale (per-tensor quantization) may have been re-materialized at
+    // the tile width, so only its leading dims are checked.
     auto scaleTy = dyn_cast<RankedTensorType>(scale->parent.getType());
     if (!scaleTy || scaleTy.getRank() != 3 || scaleTy.getDimSize(0) != nB ||
-        scaleTy.getDimSize(1) != 1 || scaleTy.getDimSize(2) != N ||
+        scaleTy.getDimSize(1) != 1 || (!scale->splat && scaleTy.getDimSize(2) != N) ||
         !scaleTy.getElementType().isBF16())
         return rw.notifyMatchFailure(srcOp, "scale is not [nB, 1, N] bf16");
     FailureOr<SlicedConstOperand> zp;

@@ -26,6 +26,10 @@ void populateEliminateTransposePatterns(MLIRContext *ctx, RewritePatternSet &pat
 
 void populateOptimizeMatmuOpPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 
+// Fold k=1/n=1 matmuls (a single-term contraction) into the elementwise
+// product of their operands.
+void populateFoldScalarMatmulPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
+
 void populateRaiseSoftmaxOpPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 
 void populateRaiseDynamicQuantizeOpPatterns(MLIRContext *context, RewritePatternSet &patterns);

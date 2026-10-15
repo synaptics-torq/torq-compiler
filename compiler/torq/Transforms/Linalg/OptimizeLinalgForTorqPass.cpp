@@ -40,6 +40,11 @@ class OptimizeLinalgForTorqPass
 
             populateOptimizeMatmuOpPatterns(ctx, patterns);
 
+            // Fold k=1/n=1 matmuls (a single-term contraction) into the elementwise
+            // product of their operands, so a row-scale multiplication is not run as
+            // a matmul kernel.
+            populateFoldScalarMatmulPatterns(ctx, patterns);
+
             populateOptimizeElementwiseBinaryOpPatterns(ctx, patterns);
 
             populateOptimizePowPatterns(ctx, patterns);

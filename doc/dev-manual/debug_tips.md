@@ -175,6 +175,12 @@
     tensor, or a single slice of it. This replaces one small strided copy per element with a few
     contiguous copies. Value-preserving; use ``disable`` to compare or to rule the rewrite out.
 
+  - ``--torq-fold-scalar-matmul-mode=enable|disable`` (default ``enable``): replace a bf16 matmul
+    whose reduction dim and output feature dim are both 1 (``[M,1] x [1,1]``, or
+    ``[B,M,1] x [B,1,1]`` batched), with the default indexing maps and a zero init, by the
+    elementwise product of its operands, so a row scale does not run a matmul kernel.
+    Value-preserving; use ``disable`` to compare or to rule the rewrite out.
+
   - ``--torq-probe-avoid-relocation`` (default on): when the tile that the tile-fit probe picks
     fits only by relocating LRAM buffers (storing them to XRAM and loading them straight back),
     look for a slightly smaller tile that needs no relocation. Turn it off to compare with the
