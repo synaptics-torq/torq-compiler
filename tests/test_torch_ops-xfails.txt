@@ -19,10 +19,3 @@ test_mlir_files[conv2d-host.mlir-sim-sl2610-v1]
 # instancenorm: torch-mlir 3.12 InstanceNorm decomposition computes in f32;
 # torq elementwise patterns don't convert f32 generics.
 test_mlir_files[instancenorm.mlir-sim-sl2610-v1]
-# matmul_dql_q4_0: unit-batch collapse breaks BatchMatmulOpPattern fusion;
-# fused all-constant path hits compile-time-const JIT i4 emulation gap.
-test_mlir_files[matmul_dql_q4_0.mlir-sim-sl2610-v1]
-# matmul_dql_128x256_i4_zp: 3.12-only compiler crash (affine
-# composeAffineMapAndOperands assert, AffineOps.cpp:1380); DQL family,
-# deferred with matmul_dql_q4_0.
-test_mlir_files[matmul_dql_128x256_i4_zp.mlir-sim-sl2610-v1]
