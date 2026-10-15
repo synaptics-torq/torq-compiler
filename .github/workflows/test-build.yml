@@ -101,9 +101,9 @@ jobs:
 
     needs: [test_cmodel, test_aws_fpga, test_astra_machina_sl, test_torq_lab]
 
-    runs-on:
-    - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
-      image:ubuntu-7.0
+    # run on a dedicated high-availability runner with access to the dashboard
+    # since a runner is not available the workflow will be blocked here until a github timeout (24 hours)
+    runs-on: dashboard-reporter
 
     steps:
       - name: Notify dashboard
