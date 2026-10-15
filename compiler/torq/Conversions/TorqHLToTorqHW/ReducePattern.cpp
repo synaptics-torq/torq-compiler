@@ -34,9 +34,9 @@ struct In : Vectorized {
     };
 };
 
-// Emit the reduce loop nest with a fused per-channel bias. The accumulated
-// result is biased per output channel in the activation stage, in fp32,
-// matching a separate `reduce + bias` computed in fp32.
+// Emit the reduce loop nest with a fused bias: a per-channel bias, or a single
+// value (a reduce init). The accumulated result is biased in the activation
+// stage, in fp32, matching a separate `reduce + bias` computed in fp32.
 void emitPerChannelBiasReduce(
     Slice &slice, LData &input, LData &biasScale, LData &output, int axis,
     torq_hw::ALUOp1Mode hwOp1Mode, torq_hl::ReduceOp op
@@ -44,19 +44,27 @@ void emitPerChannelBiasReduce(
     // Per-channel bias is laid out along output channel dim 1 (NCHW), as
     // produced by the native conv1d generic lowering. Reshape the [C] bias to
     // the output rank (1s on the non-channel dims) and broadcast it (stride 0)
-    // so it can be indexed by the output position `b`.
+    // so it can be indexed by the output position `b`. A single-value bias (a
+    // reduce init, see ReduceOpConversion) is loaded once for every output: it
+    // has no channel dim, and the output may have no dim before `axis` to index.
     constexpr int kBiasChannelDim = 1;
     const int outRank = static_cast<int>(output.shape().size());
-    for (int d = 0; d < kBiasChannelDim; ++d) {
-        biasScale.insertDim(0, {1});
+    std::optional<BData> scalarBias;
+    if (biasScale.shape().size() == 1 && biasScale.shape()[0].count == 1) {
+        scalarBias = slice.bram.load(biasScale);
     }
-    for (int d = kBiasChannelDim + 1; d < outRank; ++d) {
-        biasScale.insertDim(static_cast<int>(biasScale.shape().size()), {1});
+    else {
+        for (int d = 0; d < kBiasChannelDim; ++d) {
+            biasScale.insertDim(0, {1});
+        }
+        for (int d = kBiasChannelDim + 1; d < outRank; ++d) {
+            biasScale.insertDim(static_cast<int>(biasScale.shape().size()), {1});
+        }
+        biasScale.broadcastAs(output);
     }
-    biasScale.broadcastAs(output);
 
     For(auto b = slice.iterate(input.dims(In::Batch, axis))) {
-        BData bdata = slice.bram.load(biasScale[b]);
+        BData bdata = scalarBias ? *scalarBias : slice.bram.load(biasScale[b]);
         For(auto i = slice.iterate(input.dims(axis + 1, In::Vectors))) {
             For(auto rv = slice.iterate(input.dim(In::Vectors))) {
                 PData pdata;

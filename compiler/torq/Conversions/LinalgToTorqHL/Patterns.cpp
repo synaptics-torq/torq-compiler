@@ -1047,6 +1047,7 @@ struct GenericReductionInfo {
     SmallVector<Value> inits;
     SmallVector<RankedTensorType> resultTypes;
     SmallVector<std::string> opNames;
+    SmallVector<Operation *> bodyOps;
     int64_t axis;
 };
 
@@ -1100,6 +1101,7 @@ getGenericReductionInfo(linalg::GenericOp srcOp, PatternRewriter &rewriter) {
             return failure();
         }
         info.opNames.push_back(*opName);
+        info.bodyOps.push_back(reduceBodyOp);
         info.inits.push_back(srcOp.getDpsInitOperand(i)->get());
         info.resultTypes.push_back(cast<RankedTensorType>(srcOp.getResultTypes()[i]));
     }
@@ -1107,29 +1109,23 @@ getGenericReductionInfo(linalg::GenericOp srcOp, PatternRewriter &rewriter) {
     return info;
 }
 
-/// Combine a tiled reduction's per-tile partial with the running accumulator
-/// (an scf.for iter_arg) using the reduction's own semantics: max/min fold with
-/// an elementwise MAX/MIN, everything else (sum, ...) with an additive combine.
+/// Combine a reduce result with an init the kernel did not start from (the
+/// scf.for accumulator of a tiled reduction, or a non-identity init) using the
+/// reduction's own semantics: max/min fold with an elementwise MAX/MIN,
+/// everything else (sum, ...) with an additive combine.
+template <typename SrcOpT>
 static FailureOr<Value> mergeReductionPartial(
-    linalg::GenericOp srcOp, Value init, Value partial, StringRef opName, PatternRewriter &rewriter
+    SrcOpT srcOp, Value init, Value partial, StringRef opName, PatternRewriter &rewriter
 ) {
-    if (opName == "reduce_max") {
-        return makeElementWiseBinary(
-            srcOp, rewriter, init, partial, torq_hl::ElementwiseOpEnum::MAXIMUM
-        );
-    }
-    if (opName == "reduce_min") {
-        return makeElementWiseBinary(
-            srcOp, rewriter, init, partial, torq_hl::ElementwiseOpEnum::MINIMUM
-        );
-    }
-    if (opName == "reduce_umax" || opName == "reduce_umin") {
+    bool isMax = opName.ends_with("max");
+    if (isMax || opName.ends_with("min")) {
         auto type = cast<RankedTensorType>(init.getType());
-        auto opType = opName == "reduce_umax" ? torq_hl::ElementwiseOpEnum::MAXIMUM
-                                              : torq_hl::ElementwiseOpEnum::MINIMUM;
+        auto opType =
+            isMax ? torq_hl::ElementwiseOpEnum::MAXIMUM : torq_hl::ElementwiseOpEnum::MINIMUM;
+        bool isUnsigned = opName.starts_with("reduce_u");
         return torq_hl::ElementWiseBinaryOp::create(
                    rewriter, srcOp.getLoc(), type, createInitTensor(srcOp, rewriter, type), opType,
-                   init, partial, /*isUnsigned=*/true
+                   init, partial, isUnsigned
         )
             .getOutput();
     }
@@ -1141,6 +1137,233 @@ static bool isScfAccumulator(Value value) {
     if (!blockArg)
         return false;
     return isa<scf::ForOp>(blockArg.getOwner()->getParentOp());
+}
+
+// The value a reduction init comes from, looking through slices, casts, reshapes and
+// scf.forall shared outputs, which is how tile-and-fuse hands a tile its part of
+// the init. Also looks through the loops of ReductionTilingPass: they write each
+// slot of their buffer once, so a slot a tile reads still holds the loop init.
+static Value getInitSource(Value value) {
+    while (true) {
+        if (auto slice = value.getDefiningOp<tensor::ExtractSliceOp>()) {
+            value = slice.getSource();
+            continue;
+        }
+        if (auto cast = value.getDefiningOp<tensor::CastOp>()) {
+            value = cast.getSource();
+            continue;
+        }
+        // A reshape keeps a splat (or tensor.empty) and its element type.
+        if (auto collapse = value.getDefiningOp<tensor::CollapseShapeOp>()) {
+            value = collapse.getSrc();
+            continue;
+        }
+        if (auto expand = value.getDefiningOp<tensor::ExpandShapeOp>()) {
+            value = expand.getSrc();
+            continue;
+        }
+        if (auto result = dyn_cast<OpResult>(value)) {
+            auto forOp = dyn_cast<scf::ForOp>(result.getOwner());
+            if (forOp && forOp->hasAttr(TORQ_REDUCTION_TILING_LOOP)) {
+                value = forOp.getInitArgs()[result.getResultNumber()];
+                continue;
+            }
+        }
+        if (auto arg = dyn_cast<BlockArgument>(value)) {
+            Operation *parent = arg.getOwner()->getParentOp();
+            if (auto forall = dyn_cast<scf::ForallOp>(parent)) {
+                if (OpOperand *tied = forall.getTiedOpOperand(arg)) {
+                    value = tied->get();
+                    continue;
+                }
+            }
+            auto forOp = dyn_cast<scf::ForOp>(parent);
+            if (forOp && forOp->hasAttr(TORQ_REDUCTION_TILING_LOOP)) {
+                if (OpOperand *init = forOp.getTiedLoopInit(arg)) {
+                    value = init->get();
+                    continue;
+                }
+            }
+        }
+        return value;
+    }
+}
+
+// The constant `value` is filled with, or null if it is not a known splat. A
+// fill already lowered to torq_hl keeps only a bit pattern (torq_hl.fill) or a
+// one-element constant (torq_hl.broadcast), so decode those with the tensor's
+// element type.
+static TypedAttr getInitSplatValue(Value value) {
+    Type elementType = cast<ShapedType>(value.getType()).getElementType();
+    if (auto fill = value.getDefiningOp<torq_hl::FillOp>()) {
+        unsigned width = elementType.getIntOrFloatBitWidth();
+        APInt bits = APInt(32, static_cast<uint32_t>(fill.getValue())).trunc(width);
+        if (auto intType = dyn_cast<IntegerType>(elementType))
+            return IntegerAttr::get(intType, bits);
+        if (auto floatType = dyn_cast<FloatType>(elementType))
+            return FloatAttr::get(floatType, APFloat(floatType.getFloatSemantics(), bits));
+        return {};
+    }
+    // A float conversion (e.g. the bf16 to f32 init that ReductionTilingPass
+    // gives a keepdims reduction it rewrites) keeps a splat, converted. It is a linalg.generic with
+    // an arith.extf or arith.truncf body, or a torq_hl.act "f2f" once lowered.
+    Value convertedFrom;
+    if (auto act = value.getDefiningOp<torq_hl::ActOp>()) {
+        if (act.getName() == "f2f")
+            convertedFrom = act.getInput();
+    }
+    else if (auto generic = value.getDefiningOp<linalg::GenericOp>()) {
+        Block &body = generic.getRegion().front();
+        if (generic.getNumDpsInputs() == 1 && body.getOperations().size() == 2 &&
+            isa<arith::ExtFOp, arith::TruncFOp>(body.front()) &&
+            body.front().getOperand(0) == body.getArgument(0))
+            convertedFrom = generic.getDpsInputOperand(0)->get();
+    }
+    if (convertedFrom) {
+        auto floatType = dyn_cast<FloatType>(elementType);
+        auto source =
+            dyn_cast_if_present<FloatAttr>(getInitSplatValue(getInitSource(convertedFrom)));
+        if (!floatType || !source)
+            return {};
+        return FloatAttr::get(floatType, *convertFloatToType(source.getValue(), floatType));
+    }
+    if (auto broadcast = value.getDefiningOp<torq_hl::BroadcastOp>())
+        value = broadcast.getInput();
+    auto attr = dyn_cast_if_present<TypedAttr>(getConstantSplatAttr(value));
+    if (!attr || attr.getType() != elementType)
+        return {};
+    return attr;
+}
+
+// True if starting the accumulation of `bodyOp` from `value` changes nothing,
+// i.e. `value` is a start value the reduce kernel may use instead (it accepts
+// both zeros for addf, and the infinity or the largest finite value for
+// maximumf / minimumf).
+static bool isReduceIdentity(TypedAttr value, Operation *bodyOp) {
+    if (auto intAttr = dyn_cast<IntegerAttr>(value)) {
+        const APInt &v = intAttr.getValue();
+        if (isa<arith::AddIOp, arith::OrIOp, arith::XOrIOp, arith::MaxUIOp>(bodyOp))
+            return v.isZero();
+        if (isa<arith::MaxSIOp>(bodyOp))
+            return v.isMinSignedValue();
+        if (isa<arith::MinSIOp>(bodyOp))
+            return v.isMaxSignedValue();
+        if (isa<arith::MinUIOp, arith::AndIOp>(bodyOp))
+            return v.isAllOnes();
+        return false;
+    }
+    if (auto floatAttr = dyn_cast<FloatAttr>(value)) {
+        const APFloat &v = floatAttr.getValue();
+        if (isa<arith::AddFOp>(bodyOp))
+            return v.isZero();
+        if (isa<arith::MaximumFOp>(bodyOp))
+            return v.isNegative() && (v.isInfinity() || v.isLargest());
+        if (isa<arith::MinimumFOp>(bodyOp))
+            return !v.isNegative() && (v.isInfinity() || v.isLargest());
+        if (isa<arith::MulFOp>(bodyOp))
+            return v.isExactlyValue(1.0);
+        return false;
+    }
+    return false;
+}
+
+// Whether a non-identity init of this reduction can be folded into the reduce
+// result. Max and min take any init tensor. A sum needs a constant init: an
+// integer add saturates while arith.addi wraps, so only an i32 sum is folded
+// (narrow sums are often near the type bounds), and a bf16 sum adds the init in
+// the kernel's f32 accumulator (see emitReduceWithInit).
+static bool canCombineInit(Operation *bodyOp, Type elementType, bool isConstant) {
+    if (isa<arith::AddIOp>(bodyOp))
+        return isConstant && elementType.isInteger(32);
+    if (isa<arith::AddFOp>(bodyOp))
+        return isConstant && elementType.isBF16();
+    if (isa<arith::MaxSIOp, arith::MinSIOp, arith::MaxUIOp, arith::MinUIOp>(bodyOp))
+        return elementType.isInteger(8) || elementType.isInteger(16) || elementType.isInteger(32);
+    if (isa<arith::MaximumFOp, arith::MinimumFOp>(bodyOp))
+        return elementType.isBF16();
+    return false;
+}
+
+// The part of a reduce init the kernel would drop, since it starts each output
+// from the identity of the combine op. Both fields are null when the init can
+// be ignored.
+struct ReduceInit {
+    // A known non-identity splat value.
+    TypedAttr constant;
+    // Any other init (including the scf.for accumulator of a tiled reduction),
+    // merged into the result as is.
+    Value tensor;
+};
+
+// Classifies the init of a reduce. Fails if the init matters but cannot be
+// folded into the result, so the op is not lowered instead of giving a wrong
+// result.
+static FailureOr<ReduceInit> getReduceInit(Value init, Operation *bodyOp, Type elementType) {
+    if (isScfAccumulator(init))
+        return ReduceInit{{}, init};
+    Value source = getInitSource(init);
+    if (source.getDefiningOp<tensor::EmptyOp>())
+        return ReduceInit{};
+    if (TypedAttr value = getInitSplatValue(source)) {
+        if (isReduceIdentity(value, bodyOp))
+            return ReduceInit{};
+        if (!canCombineInit(bodyOp, elementType, /*isConstant=*/true))
+            return failure();
+        return ReduceInit{value, {}};
+    }
+    if (!canCombineInit(bodyOp, elementType, /*isConstant=*/false))
+        return failure();
+    return ReduceInit{{}, init};
+}
+
+// The scale_bias operand of a reduce that applies no bias: bias 0, scale 1.
+template <typename SrcOpT>
+static Value createNoBiasScaleBias(PatternRewriter &rewriter, SrcOpT srcOp) {
+    const std::vector<int32_t> bias = {0};
+    const std::vector<int32_t> scale = {1};
+    return createI32Const(rewriter, srcOp, interleave(bias, scale));
+}
+
+// Emits the torq_hl.reduce of `input` and folds `init` into its result. A
+// constant init of a float sum is added to the f32 accumulator as a scalar fp32
+// bias before rounding, like the sum itself; any other init is merged after the
+// reduce. A new constant is used for a constant init instead of the original
+// one, which addInitToResult cannot see through when it comes from an
+// scf.forall. `noBiasScaleBias` (see createNoBiasScaleBias) is used otherwise,
+// so outputs of one op can share it.
+template <typename SrcOpT>
+static FailureOr<Value> emitReduceWithInit(
+    PatternRewriter &rewriter, SrcOpT srcOp, RankedTensorType resultType, StringRef opName,
+    int64_t axis, Value input, const ReduceInit &init, Value noBiasScaleBias
+) {
+    Value scaleBias = noBiasScaleBias;
+    int32_t outputMin = 0;
+    int32_t outputMax = 0;
+    auto floatInit = dyn_cast_if_present<FloatAttr>(init.constant);
+    bool biasInKernel = floatInit && opName == "reduce_sum";
+    if (biasInKernel) {
+        scaleBias = createConst(
+            std::vector<float>{floatInit.getValue().convertToFloat()}, rewriter, srcOp.getLoc()
+        );
+        // fp32 rescaleClamp interprets clipMin/clipMax as float bit patterns.
+        outputMin = llvm::bit_cast<int32_t>(std::numeric_limits<float>::lowest());
+        outputMax = llvm::bit_cast<int32_t>(std::numeric_limits<float>::max());
+    }
+
+    auto reduceOp = emitTorqReduce(
+        rewriter, srcOp, resultType, opName, axis, scaleBias, outputMin, outputMax, input
+    );
+    Value result = reduceOp.getResult(0);
+
+    Value mergeWith = init.tensor;
+    if (init.constant && !biasInKernel) {
+        mergeWith = arith::ConstantOp::create(
+            rewriter, srcOp.getLoc(), resultType, SplatElementsAttr::get(resultType, init.constant)
+        );
+    }
+    if (!mergeWith)
+        return result;
+    return mergeReductionPartial(srcOp, mergeWith, result, opName, rewriter);
 }
 
 /// Lowers a single-reduction-loop `linalg.generic` to `torq_hl::ReduceOp`
@@ -1162,35 +1385,35 @@ struct GenericReductionConversion : public OpRewritePattern<linalg::GenericOp> {
             srcOp.dump();
         });
 
-        const std::vector<int32_t> bias = {0};
-        const std::vector<int32_t> scale = {1};
-        Value scaleBias = createI32Const(rewriter, srcOp, interleave(bias, scale));
+        // The kernel starts each output from the combine identity, so the init
+        // is folded in by emitReduceWithInit. Check every output before emitting
+        // anything.
+        SmallVector<ReduceInit> inits;
+        for (auto [i, init] : llvm::enumerate(info->inits)) {
+            FailureOr<ReduceInit> reduceInit =
+                getReduceInit(init, info->bodyOps[i], info->resultTypes[i].getElementType());
+            if (failed(reduceInit)) {
+                return rewriter.notifyMatchFailure(srcOp, "init cannot be merged into reduce");
+            }
+            inits.push_back(*reduceInit);
+        }
+
+        Value scaleBias = createNoBiasScaleBias(rewriter, srcOp);
 
         // Emit one torq_hl.reduce per output. For a combined min+max reduce both
         // reduces read the same `input`; block-local load dedup collapses that to
         // a single DMA per tile, so min and max share one streaming pass.
         SmallVector<Value> results;
         results.reserve(info->inits.size());
-        for (auto [i, init] : llvm::enumerate(info->inits)) {
-            auto reduceOp = emitTorqReduce(
-                rewriter, srcOp, info->resultTypes[i], info->opNames[i], info->axis, scaleBias,
-                /*outputMin*/ 0, /*outputMax*/ 0, info->input
+        for (auto [i, init] : llvm::enumerate(inits)) {
+            FailureOr<Value> result = emitReduceWithInit(
+                rewriter, srcOp, info->resultTypes[i], info->opNames[i], info->axis, info->input,
+                init, scaleBias
             );
-            Value result = reduceOp.getResult(0);
-
-            // When tiled, the reduce produces a per-tile partial that must fold
-            // into the scf.for accumulator with the reduction's own combine op.
-            if (isScfAccumulator(init)) {
-                FailureOr<Value> merged =
-                    mergeReductionPartial(srcOp, init, result, info->opNames[i], rewriter);
-                if (failed(merged)) {
-                    return rewriter.notifyMatchFailure(
-                        srcOp, "failed to accumulate tiled reduction into scf iter_arg"
-                    );
-                }
-                result = *merged;
+            if (failed(result)) {
+                return rewriter.notifyMatchFailure(srcOp, "failed to merge init into reduce");
             }
-            results.push_back(result);
+            results.push_back(*result);
         }
 
         rewriter.replaceOp(srcOp, results);
@@ -1266,46 +1489,37 @@ struct ReduceOpConversion : public OpRewritePattern<linalg::ReduceOp> {
             return rewriter.notifyMatchFailure(srcOp, "Unsupported reduction operation");
         }
 
-        // reduceOp out_min and out_max is defined in kernel, here just initialize
+        // The kernel starts from the combine identity; the init is folded in by
+        // emitReduceWithInit.
+        FailureOr<ReduceInit> init =
+            getReduceInit(srcOp.getInits()[0], reduceBodyOp, srcOutputType.getElementType());
+        if (failed(init)) {
+            return rewriter.notifyMatchFailure(srcOp, "init cannot be merged into reduce");
+        }
 
-        // TODO: materialize bias/scale weights for rescale precision
-        const std::vector<int32_t> bias = {0};
-        const std::vector<int32_t> scale = {1};
-
-        // For bf16 reduce_sum with f32 output, preserve f32 type for better precision
-        // If output is bf16, keep it as bf16 (user's choice for memory/performance)
-        RankedTensorType resultType = srcOutputType;
-
-        Value scaleBias = createI32Const(rewriter, srcOp, interleave(bias, scale));
-
+        Value scaleBias = createNoBiasScaleBias(rewriter, srcOp);
+        int64_t axis = dimensions.front();
         if (multiDim && !foldDims) {
-            // Reduce the highest axis first so lower axis indices stay valid.
+            // Reduce the higher axes first so lower axis indices stay valid. The
+            // last step, over `axis`, is emitted below with the init.
             // A bf16 sum keeps its partial sums in f32 between steps, as one
             // torq_hl.reduce does in its accumulator; only the last step rounds.
-            Type partialElementType = resultType.getElementType();
+            Type partialElementType = srcOutputType.getElementType();
             if (inputElementType.isBF16() && *opName == "reduce_sum") {
                 partialElementType = rewriter.getF32Type();
             }
-            Value cur = input;
-            for (int64_t d : llvm::reverse(dimensions)) {
-                SmallVector<int64_t> shape(cast<RankedTensorType>(cur.getType()).getShape());
+            for (int64_t d : llvm::reverse(ArrayRef(dimensions).drop_front())) {
+                SmallVector<int64_t> shape(cast<RankedTensorType>(input.getType()).getShape());
                 shape.erase(shape.begin() + d);
-                Type stepElementType =
-                    d == dimensions.front() ? resultType.getElementType() : partialElementType;
-                auto stepType = RankedTensorType::get(shape, stepElementType);
+                auto stepType = RankedTensorType::get(shape, partialElementType);
                 auto step = emitTorqReduce(
                     rewriter, srcOp, stepType, *opName, d, scaleBias, /*outputMin*/ 0,
-                    /*outputMax*/ 0, cur
+                    /*outputMax*/ 0, input
                 );
-                cur = step.getResult(0);
+                input = step.getResult(0);
             }
-            assert(cur.getType() == resultType && "chained reduce must yield the result type");
-            rewriter.replaceOp(srcOp, cur);
-            return success();
         }
-
-        int64_t axis = dimensions.front();
-        if (foldDims) {
+        else if (foldDims) {
             // Fold the contiguous reduced dims [front, back] into the single axis `front`.
             SmallVector<ReassociationIndices> reassoc;
             for (int64_t d = 0; d < inputType.getRank(); ++d) {
@@ -1319,11 +1533,13 @@ struct ReduceOpConversion : public OpRewritePattern<linalg::ReduceOp> {
             input = tensor::CollapseShapeOp::create(rewriter, srcOp.getLoc(), input, reassoc);
         }
 
-        auto reduceOp = emitTorqReduce(
-            rewriter, srcOp, resultType, *opName, axis, scaleBias, /*outputMin*/ 0, /*outputMax*/ 0,
-            input
+        FailureOr<Value> result = emitReduceWithInit(
+            rewriter, srcOp, srcOutputType, *opName, axis, input, *init, scaleBias
         );
-        rewriter.replaceOp(srcOp, reduceOp.getResult(0));
+        if (failed(result)) {
+            return rewriter.notifyMatchFailure(srcOp, "failed to merge init into reduce");
+        }
+        rewriter.replaceOp(srcOp, *result);
 
         return success();
     }
@@ -2480,6 +2696,11 @@ struct TensorPadOpConversion : public OpRewritePattern<tensor::PadOp> {
 };
 
 } // namespace
+
+bool isIdentityReduceInit(Value init, Operation *combineOp) {
+    FailureOr<ReduceInit> reduceInit = getReduceInit(init, combineOp, getElementTypeOrSelf(init));
+    return succeeded(reduceInit) && !reduceInit->constant && !reduceInit->tensor;
+}
 
 struct GenericToBroadcastOpConversion : public OpRewritePattern<linalg::GenericOp> {
   public:

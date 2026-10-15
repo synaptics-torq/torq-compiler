@@ -42,8 +42,6 @@ class LinalgOp;
 
 namespace mlir::syna::torq {
 
-inline constexpr llvm::StringLiteral TORQ_REDUCTION_TILING_LOOP = "torq-reduction-tiling-loop";
-
 // Iteration domains that can be tiled, in the order they should be tiled.
 struct TilingInfo {
     llvm::SmallSetVector<int64_t, 4> tilingOrder;

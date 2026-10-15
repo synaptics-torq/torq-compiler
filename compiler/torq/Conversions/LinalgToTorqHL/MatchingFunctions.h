@@ -31,4 +31,9 @@ bool isLogicNotOp(Operation *op, std::string &failReason);
 // Does NOT support other reduce operations (max, min, etc.) - those are handled differently.
 bool isTorqReduceSumOp(Operation *op, std::string &failReason);
 
+// True if starting the accumulation of `combineOp` from the reduction init
+// `init` changes nothing: `init` is a splat of the identity of `combineOp` or a
+// tensor.empty, seen through slices, casts and tiling loops.
+bool isIdentityReduceInit(Value init, Operation *combineOp);
+
 } // namespace mlir::syna::torq

@@ -135,6 +135,12 @@ struct ReduceMeanPattern : public OpRewritePattern<linalg::GenericOp> {
                 reducesumOp, "ReducesumPattern Expected AddFOp reduction"
             );
         }
+        // The lowered mean sums from zero, so a sum with another init would lose it.
+        if (!isIdentityReduceInit(
+                reducesumOp.getDpsInits()[0], reducesumYield.getValues()[0].getDefiningOp()
+            )) {
+            return rewriter.notifyMatchFailure(reducesumOp, "ReducesumPattern Expected zero init");
+        }
 
         SmallVector<unsigned> reductionDims;
         reducesumOp.getReductionDims(reductionDims);
@@ -288,6 +294,9 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
         if (!sumYield ||
             !llvm::isa_and_nonnull<arith::AddFOp>(sumYield.getValues()[0].getDefiningOp()))
             return rewriter.notifyMatchFailure(sumOp, "Expected AddFOp reduction");
+        // The lowered mean sums from zero, so a sum with another init would lose it.
+        if (!isIdentityReduceInit(sumOp.getDpsInits()[0], sumYield.getValues()[0].getDefiningOp()))
+            return rewriter.notifyMatchFailure(sumOp, "Expected zero init");
 
         auto loc = meanOp.getLoc();
         Value input = sumOp.getInputs()[0];

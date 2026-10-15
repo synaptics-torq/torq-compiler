@@ -4771,7 +4771,7 @@ FailureOr<Value> buildWeightWithZp(Value weights, Value weightZp, PatternRewrite
     return rescaledWeights;
 }
 
-static Attribute getConstantSplatAttr(mlir::Value val) {
+Attribute getConstantSplatAttr(mlir::Value val) {
     assert(llvm::isa<mlir::RankedTensorType>(val.getType()) && "expected RankedTensorType");
 
     // 1. Matches constant splat tensor

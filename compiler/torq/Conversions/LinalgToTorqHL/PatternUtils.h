@@ -21,6 +21,9 @@ namespace mlir::syna::torq {
 
 extern const std::string TORQ_FUSE_GROUP_ID;
 extern const std::string TORQ_FUSE_GROUP;
+// Set on the scf.for loops ReductionTilingPass creates. Each loop writes each
+// slot of its partial-result buffer once.
+inline constexpr llvm::StringLiteral TORQ_REDUCTION_TILING_LOOP = "torq-reduction-tiling-loop";
 // Marks a generic rewritten from a batch-invariant-weight batch_matmul
 // (replaceBatchMatmulWithBroadcastGeneric): still a matmul to the tiling heuristics.
 extern const std::string TORQ_BROADCAST_MATMUL;
@@ -446,6 +449,10 @@ Value makeElementWiseBinary(
     linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input0, Value input1,
     torq_hl::ElementwiseOpEnum opType
 );
+
+// The splat value of `val` if it is a constant splat, a constant fill, or a slice
+// or cast of one; null otherwise. `val` must have a RankedTensorType.
+Attribute getConstantSplatAttr(Value val);
 
 // Return true if `value` is all zeros. The function can only recognize simple cases. It does not do
 // any computation. In particular, the function does handles extract_slice from an all zeros tensor,
