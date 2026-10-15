@@ -4,8 +4,10 @@ test_onnx_model_torq[final_norm_full_model-astra_machina-sl2610-v1] synaptics-to
 test_onnx_model_torq[lm_head_full_model-astra_machina-sl2610-v1] synaptics-torq/torq-compiler-dev/issues/1994
 test_onnx_model_torq[source_full_model-astra_machina-sl2610-v1] synaptics-torq/torq-compiler-dev/issues/1994
 
-# Known IREE 3.12 upgrade failures on sim, pending proper fixes
+# IREE 3.12: full models compile now (RaiseUnitBatchMatmulPattern restores the
+# batch form for the blocked-dequant matmuls) but fail at runtime: a dispatch
+# exceeds the HAL binding limit (binding count 40 > 32, hal/module.c). The
+# binding-limit fix lives on the iree wip branch only; keep these xfailed
+# until it lands on torq-3.12 proper and the gitlink picks it up.
 test_onnx_model_torq[source_full_model-sim-sl2610-v1]
-test_onnx_model_torq[hybrid_decoder_block-sim-sl2610-v1]
-test_onnx_model_torq[hybrid_lm_head-sim-sl2610-v1]
 test_onnx_model_torq[hybrid_int4_int8_full_model-sim-sl2610-v1]

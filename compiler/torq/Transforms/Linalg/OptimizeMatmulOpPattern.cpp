@@ -1333,67 +1333,93 @@ static LogicalResult replaceBatchMatmulWithBroadcastGeneric(
 }
 
 /// At the IREE 3.12 pin the unit batch of a [1,M,K] x [K,N] matmul is collapsed
-/// before this pass runs: the chain arrives as a rank-2 linalg.matmul whose
-/// result is re-expanded to [1,M,N]. Downstream patterns (the block-quant input
-/// rewriting here, MixedQuantMatmulRewrite in LinalgToTorqHL) only recognize
+/// before this pass runs. Downstream patterns (the block-quant input rewriting
+/// here, MixedQuantMatmulRewrite in LinalgToTorqHL) only recognize
 /// linalg.batch_matmul, so restore the canonical rank-3 form and let them fire
-/// as they did at 3.10. A rank-2 matmul without the unit-batch expand user is a
-/// genuine GEMM and is left alone.
+/// as they did at 3.10. Two rank-2 forms are recognized:
+/// (a) the result's only user is an expand_shape back to [1,M,N] -- replace the
+///     expand with the batch result;
+/// (b) the weight arrives as the collapse of a rank-3 blocked dequant chain
+///     (the mixed-quant signature) and the result feeds other reshapes (e.g.
+///     the attention-heads split) -- insert a collapse back to [M,N] after the
+///     batch result for the original consumers.
+/// Any other rank-2 matmul is a genuine GEMM and is left alone.
 class RaiseUnitBatchMatmulPattern : public OpRewritePattern<linalg::MatmulOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
 
     LogicalResult matchAndRewrite(linalg::MatmulOp srcOp, PatternRewriter &rewriter) const {
         Value result = srcOp.getResult(0);
-        if (!result.hasOneUse())
-            return failure();
-
-        auto expandOp = dyn_cast<tensor::ExpandShapeOp>(*result.user_begin());
-        if (!expandOp)
-            return failure();
-
-        auto resultType = dyn_cast<RankedTensorType>(expandOp.getResultType());
-        auto matmulType = dyn_cast<RankedTensorType>(result.getType());
-        if (!resultType || !matmulType || resultType.getRank() != 3 ||
-            resultType.getShape()[0] != 1 || ShapedType::isDynamicShape(resultType.getShape()) ||
-            resultType.getShape().drop_front() != matmulType.getShape())
-            return failure();
-
-        auto reassoc = expandOp.getReassociationIndices();
-        if (reassoc.size() != 2 || reassoc[0] != ReassociationIndices{0, 1} ||
-            reassoc[1] != ReassociationIndices{2})
-            return failure();
-
         Value lhs = srcOp.getInputs()[0];
         Value rhs = srcOp.getInputs()[1];
         auto lhsType = dyn_cast<RankedTensorType>(lhs.getType());
         auto rhsType = dyn_cast<RankedTensorType>(rhs.getType());
-        if (!lhsType || !rhsType || lhsType.getRank() != 2 || rhsType.getRank() != 2 ||
-            ShapedType::isDynamicShape(lhsType.getShape()) ||
-            ShapedType::isDynamicShape(rhsType.getShape()))
+        auto matmulType = dyn_cast<RankedTensorType>(result.getType());
+        if (!lhsType || !rhsType || !matmulType || lhsType.getRank() != 2 ||
+            rhsType.getRank() != 2 || ShapedType::isDynamicShape(lhsType.getShape()) ||
+            ShapedType::isDynamicShape(rhsType.getShape()) ||
+            ShapedType::isDynamicShape(matmulType.getShape()))
+            return failure();
+
+        tensor::ExpandShapeOp expandOp;
+        if (result.hasOneUse())
+            expandOp = dyn_cast<tensor::ExpandShapeOp>(*result.user_begin());
+
+        bool matchedUnitBatchExpand = false;
+        if (expandOp) {
+            auto resultType = dyn_cast<RankedTensorType>(expandOp.getResultType());
+            auto reassoc = expandOp.getReassociationIndices();
+            matchedUnitBatchExpand =
+                resultType && resultType.getRank() == 3 && resultType.getShape()[0] == 1 &&
+                !ShapedType::isDynamicShape(resultType.getShape()) &&
+                resultType.getShape().drop_front() == matmulType.getShape() &&
+                reassoc.size() == 2 && reassoc[0] == ReassociationIndices{0, 1} &&
+                reassoc[1] == ReassociationIndices{2};
+        }
+
+        bool matchedBlockedWeight = false;
+        if (!matchedUnitBatchExpand) {
+            if (auto collapse = rhs.getDefiningOp<tensor::CollapseShapeOp>()) {
+                auto srcType = dyn_cast<RankedTensorType>(collapse.getSrcType());
+                matchedBlockedWeight =
+                    srcType && srcType.getRank() == 3 &&
+                    collapse.getSrc().getDefiningOp<linalg::GenericOp>() != nullptr;
+            }
+        }
+
+        if (!matchedUnitBatchExpand && !matchedBlockedWeight)
             return failure();
 
         Location loc = srcOp.getLoc();
         int64_t M = matmulType.getShape()[0];
         int64_t N = matmulType.getShape()[1];
         int64_t K = lhsType.getShape()[1];
-        SmallVector<ReassociationIndices> expandReassoc = {{0, 1}, {2}};
+        SmallVector<ReassociationIndices> batchReassoc = {{0, 1}, {2}};
 
         auto expandToBatch = [&](Value v, int64_t d1, int64_t d2) {
             auto elemType = cast<RankedTensorType>(v.getType()).getElementType();
             auto expType = RankedTensorType::get({1, d1, d2}, elemType);
-            return tensor::ExpandShapeOp::create(rewriter, loc, expType, v, expandReassoc)
+            return tensor::ExpandShapeOp::create(rewriter, loc, expType, v, batchReassoc)
                 .getResult();
         };
 
         Value lhs3 = expandToBatch(lhs, M, K);
         Value rhs3 = expandToBatch(rhs, K, N);
         Value init3 = expandToBatch(srcOp.getDpsInits()[0], M, N);
-        auto batchType = RankedTensorType::get(resultType.getShape(), matmulType.getElementType());
+        auto batchType = RankedTensorType::get({1, M, N}, matmulType.getElementType());
         auto batchOp = linalg::BatchMatmulOp::create(
             rewriter, loc, TypeRange{batchType}, ValueRange{lhs3, rhs3}, ValueRange{init3}
         );
-        rewriter.replaceOp(expandOp, batchOp.getResult(0));
+
+        if (matchedUnitBatchExpand) {
+            rewriter.replaceOp(expandOp, batchOp.getResult(0));
+        }
+        else {
+            auto collapsed = tensor::CollapseShapeOp::create(
+                rewriter, loc, matmulType, batchOp.getResult(0), batchReassoc
+            );
+            rewriter.replaceAllUsesWith(result, collapsed.getResult());
+        }
         rewriter.eraseOp(srcOp);
         return success();
     }
