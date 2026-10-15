@@ -113,8 +113,6 @@ void emitDefaultReduce(
 
 template <>
 LogicalResult ReducePattern::transform(torq_hl::ReduceOp op, PatternRewriter &rewriter) const {
-    auto ctx = op.getContext();
-
     // Get operation details
     std::string opName = op.getName().str();
     int axis = op.getAxis();
@@ -183,17 +181,7 @@ LogicalResult ReducePattern::transform(torq_hl::ReduceOp op, PatternRewriter &re
         emitDefaultReduce(slice, input, output, axis, hwOp1Mode);
     }
 
-    rewriter.replaceOpWithNewOp<torq_hw::SliceTaskOp>(
-        op,                            // Operation to replace
-        opName,                        // Task name
-        ValueRange{op.getInput()},     // Input tensor
-        ValueRange{op.getWeights()},   // Weights
-        ValueRange{op.getScaleBias()}, // BiasScale tensor
-        ValueRange{op.getInit()},      // Output tensor initializer
-        ValueRange{},                  // Symbols
-        slice.getCfgAttr(ctx),         // Slice configuration
-        slice.getNdls()                // NDLs
-    );
+    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
 
     LLVM_DEBUG(llvm::dbgs() << "Successfully lowered " << opName << " to ReducePattern\n");
     return success();

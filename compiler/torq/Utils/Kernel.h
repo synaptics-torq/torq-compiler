@@ -895,12 +895,6 @@ class Slice {
     // stride_offset=1: the first output pixel aligns with an odd-indexed input pixel.
     void setStrideOffset(int stride_offset);
 
-    // Segment the output in 4 quadrants of shape {N, C, 4, H/2, W/2}
-    // outShape: NCHW shape of the output tensor. if empty the output is not segmented.
-    // channelStride: stride of the channel dimension
-    // Note: loops on channel data if any must have been marked with MemDimTag::A
-    void segment(const std::vector<int> &nchw, int channelStride);
-
     // Get the slice configuration
     torq_hw::SliceCFGAttr getCfgAttr(MLIRContext *ctx) const;
 

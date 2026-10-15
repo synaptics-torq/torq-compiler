@@ -3057,49 +3057,6 @@ void Slice::setOutputChannelShape(int height, int width) {
     d->_outputChannelWidth = width;
 }
 
-void Slice::segment(const std::vector<int> &nchw, int channelStride) {
-    if (nchw.empty()) {
-        return;
-    }
-
-    assert(nchw.size() == 4 && "Invalid segmentation nchw dimensions");
-    int h = nchw[2];
-    int w = nchw[3];
-    assert(h % 2 == 0 && w % 2 == 0 && "Segmentation must be even");
-    assert(channelStride > 0 && "Channel stride must be positive");
-    assert(channelStride % 4 == 0 && "Channel stride must be multiple of 4");
-
-    // Re-edit DEQW dimensions to segment the output in 4 quadrants
-    // Look for the inside-channel dimensions (A TAG) and clear their stride
-    // (Inside-channel offset will advance with special X,Y dimensions)
-    auto &ndlDims = d->_ndls.getMemNdl(NdlType::DEQW)->dims;
-    bool hasInsideChannelDims = false;
-    for (auto i = 0; i < ndlDims.size(); i++) {
-        if (ndlDims[i].tag == MemDimTag::A) {
-            ndlDims[i].setIntStride(0);
-            hasInsideChannelDims = true;
-        }
-    }
-    if (!hasInsideChannelDims) {
-        // No inside-channel dimensions: assume there are no channel dimensions and clear all
-        // existing H strides
-        for (auto &dim : ndlDims) {
-            if (dim.type == DimType::H) {
-                dim.setIntStride(0);
-            }
-        }
-        // Add a new explicit channel dimension with the specified stride
-        ndlDims.push_back({DimType::H, MemDimTag::G, nchw[1], channelStride});
-    }
-
-    // The previous dimension is the channel dimension, divide its stride by 4
-    auto segmentStride = channelStride / 4;
-    ndlDims.push_back({DimType::S, MemDimTag::X, 2, segmentStride});
-    ndlDims.push_back({DimType::S, MemDimTag::X, w / 2, 1});
-    ndlDims.push_back({DimType::S, MemDimTag::Y, 2, segmentStride * 2});
-    ndlDims.push_back({DimType::S, MemDimTag::Y, h / 2, w / 2});
-}
-
 torq_hw::SliceCFGAttr Slice::getCfgAttr(MLIRContext *ctx) const {
     bool usingSet1 = d->_ndls.getMemNdl(NdlType::DEDR, 0, 1) != nullptr;
     SliceCFGAttr cfgAttr = d->_cfg.toSliceCFGAttr(ctx, usingSet1);
