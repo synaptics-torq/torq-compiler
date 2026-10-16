@@ -1417,41 +1417,25 @@ static void revertSharedReadOnlyReuses(FunctionOpInterface funcOp) {
     }
 }
 
-// True if `funcOp`'s LRAM addresses can be assigned without narrowing. The trial
-// runs on a throwaway clone so the real IR is untouched, and its diagnostics are
-// suppressed.
+// True if a plain (no re-planning) LRAM placement exists for `funcOp`. This is the
+// only way allocateLramAddresses can fail with allowRelocation=true: the swap
+// conversion applies the plan and always succeeds, and the commit only records
+// offsets on the allocations the plan came from. The check is therefore the pure
+// plan over the collected buffers -- it never mutates IR, so it runs on `funcOp`
+// itself. The trial used to clone the whole function and run the pass on the copy;
+// the clone carries every nested program region, which took hours on whole-net
+// single-dispatch functions for a bit the plan already computes.
 static bool lramAllocationSucceeds(FunctionOpInterface funcOp) {
-    Operation *clone = funcOp->clone();
-    bool ok;
-    {
-        const uint64_t ownerThreadId = llvm::get_threadid();
-        mlir::ScopedDiagnosticHandler swallow(
-            funcOp->getContext(),
-            [ownerThreadId](mlir::Diagnostic &) -> LogicalResult {
-                // Swallow only the diagnostics from this trial. The handler is on the
-                // shared context. Swallowing everything would hide another thread's error.
-                if (llvm::get_threadid() != ownerThreadId)
-                    return llvm::failure();
-                return llvm::success();
-            }
-        );
-        // without re-planning, so recovery applies whenever the plain plan fails and
-        // re-planning handles what the recovered IR still cannot place
-        ok = succeeded(allocateLramAddresses(
-            cast<FunctionOpInterface>(clone), /*replan=*/false, /*allowRelocation=*/true
-        ));
-    }
-    clone->erase();
-    return ok;
+    const int64_t usable = TorqHw::get().getLramSize() - HwInfo::nss_max_program_size * 2;
+    return planPlacement(collectLramBuffers(funcOp), usable, /*replan=*/false).has_value();
 }
 
 std::optional<int64_t> lramSwapBytes(FunctionOpInterface funcOp) {
-    if (!lramAllocationSucceeds(funcOp))
-        return std::nullopt;
-    // the plan that lramAllocationSucceeds found, so it exists
     const int64_t usable = TorqHw::get().getLramSize() - HwInfo::nss_max_program_size * 2;
     std::optional<Placement> placement =
         planPlacement(collectLramBuffers(funcOp), usable, /*replan=*/false);
+    if (!placement)
+        return std::nullopt;
     int64_t bytes = 0;
     for (const auto &[opIdx, swaps] : placement->schedule) {
         // one entry is one DMA, so a relocation counts its buffer out and back in
