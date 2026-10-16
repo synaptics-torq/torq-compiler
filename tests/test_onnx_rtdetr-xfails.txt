@@ -1,0 +1,133 @@
+# RT-DETR-L int8 (QDQ) known failures.
+#
+# Chips: the CI cmodel lane runs sl2610-v1 (default.group) AND sr200-v1
+# (next.group). SR200 has half the memory and slices (256KB LRAM / 1
+# slice / 800MHz vs SL2610's 512KB / 2), so the dispatch/const plans and
+# the sim speed differ — the failing variant per case is listed in the
+# entry below. All notes re-verified 2026-10-15 on the bare-tests tree
+# (main 9eeeab86) by local repro on both chips.
+#
+# SHARED (fail on both chips):
+# - full_model: dies at the matmul-init assert (Conv2DMatmulPattern
+#   "failed to add init value", exit 134 in a debug-assert build) on
+#   BOTH chips: the T&F tile-fit probe extracts a quantized matmul whose
+#   zero init crosses a fuse-group boundary as a runtime value, the
+#   quantized chain is no longer recognized, and the plain-matmul
+#   fallback asserts on the non-constant init. With the CSS stack
+#   widened to 4KB and that assert guarded, sl2610 gets past it through
+#   the whole linalg stage and per-dispatch codegen and stops at
+#   "failed to allocate LRAM addresses" — the single-dispatch-mode
+#   LRAM-residency wall (the whole 2171-node net in one dispatch
+#   function; this net also needs ~452MB of NSS program data vs the 8MB
+#   default). Shared long-term blocker across the RT-DETR flavors;
+#   needs dispatch splitting or streaming LRAM staging, plus whole-net
+#   sim is ~1h+. See doc/rtd.md.
+# - Where_2152 (select i1/i32): C model SIGABRT in de_act.c:566 — the
+#   NPU select kernel over-reads the ragged tail (300 is not a multiple
+#   of the 16-element vector) and the garbage byte-MAC partials overflow
+#   the ACT reassembly range. The fix routes these selects off the NPU
+#   (the NPU select kernel cannot express ragged tails or broadcast data
+#   inputs; see doc/rtd.md).
+# - LayerNormalization_1148: bf16 outputs garbage (99% of elements
+#   wrong, same per-row mean but ~4x variance vs ONNXRuntime).
+#   Bisection: PASSES on 19c0bbac, FAILS once 9c9a15a8 ("Add
+#   torq_hl.bitcast") is added — independent of the RT-DETR patches.
+#   The bitcast commit changes this dispatch's plan: the tiled
+#   reduction's per-row f32 partials (1x4200x8xf32) are then followed
+#   by 34 linalg.generic f32->bf16 cast/broadcast steps that FALL BACK
+#   TO THE HOST (host_linalg.generic_0/1/2 dylib; the pre-bitcast tree
+#   lowers the whole reduction on-device with 256xf32 LRAM scratch and
+#   no host programs). Either the fallback is mis-selected (should stay
+#   on-device) or the host staging/program is wrong. Chip-conditional on
+#   main 9eeeab86: sl2610 is garbage with 2002520/2150400 over the 0.2
+#   max tol (2037401 with the keepdim-rewrite pass from the next PR —
+#   the plan shifts, the garbage stays); sr200 (192455/2150400 bare)
+#   passes once that keepdim rewrite lands, its plan avoiding the broken
+#   host fallback. (Regression since main 9c9a15a8.)
+# - TopK_1200/2137: compile "'memref.store' op unsupported in function
+#   body" (both chips) — the topk->sort decomposition tiles the CSS
+#   sort into chunks whose offset/size constants get memref.store'd
+#   into the serialized body. wip/rtd-onnx-fold-const-stores fixes it
+#   (unxfail there once it lands).
+# - Gather_1202/1203: the 8400x256 const source overflows the slice
+#   memory (both chips) — Gather_1202: "Memory usage: 67200 exceeds
+#   dtcm size 32256 bytes"; Gather_1203: "failed to allocate LRAM
+#   addresses". The consolidated host-marking pass (next PR in this
+#   stack) routes these gathers to the host (unxfail there once it
+#   lands).
+# - GridSample_1323/1324: compile exceeds the 300s budget (both chips;
+#   the const-outline walk on the large tables). GridSample_1325:
+#   compile "Memory usage: 204808 exceeds dtcm size 32256 bytes" (both
+#   chips; the const table stays on CSS). All three are fixed by the
+#   consolidated host-marking pass (next PR in this stack): the
+#   grid-sample gather is marked host before tiling, so the table
+#   never stages through CSS DTCM (unxfail there once it lands).
+#
+# SR200-only (chip size/perf; pass on sl2610):
+# - Gemm_1195: compile "failed to allocate LRAM addresses" — the
+#   dispatch footprint does not fit sr200's 256KB LRAM (fits SL2610's
+#   512KB). No stacked PR claims it.
+# - Conv_830/985/1007: sim run exceeds the 240s budget — 80x80x256 bf16
+#   convs on 1 slice @800MHz. Same mechanism as the HF-flavor sr200
+#   conv xfails (diagnosed in wip/rtd-4-torq-conversions ce7f17d9):
+#   the small LRAM forces tiny conv tiles that re-read the input
+#   feature map from DRAM ~9x more often
+#   than sl2610 (270M-455M NPU cycles/layer vs 24M-221M); at the C
+#   model's ~1M cycles/s that is 4.5-7.5 min per layer. 985/1007 exceed
+#   it even locally with 4 workers; 830 is load-sensitive: 216s under a
+#   light local lane on main 9eeeab86, but it timed out in the 18-worker
+#   CI lane and sits close to the 240s budget — kept xfailed until it is
+#   stable under load.
+#
+# SL2610-only main regression (do NOT fail on sr200; verified on
+# pure-main or near-pure builds — these passed on the Oct-1 main):
+# - Conv_508/560/569/769/778: compiler SIGABRT in KeepConcatInLram
+#   (FoldConvertPass): getEncodedTotalSizeBytes() on a dynamic im2col
+#   remainder slice (tensor<1x128x?x160xbf16>) hits the
+#   ShapedType::getNumElements hasStaticShape assert. Missing static-
+#   shape guard in the pattern. (Regression since main 19c0bbac; still
+#   alive on 9eeeab86.)
+#
+# Fixed by main since 7bdae7a6 (unxfail 2026-10-15): Gemm_855/857/890/
+# 911 — the bf16 gemm garbage (max abs diff ~5e33, ~67% of elements
+# wrong; suspected the Oct 5-6 matmul commits aa445e04 "Cast-Only
+# MatMul for Quantized Weights + BF16 Activations" / 0aa0569c "Load
+# constants into LRAM while the previous program runs") no longer
+# reproduces on 9eeeab86 on either chip.
+#
+# GridSample layers pass only with smooth in-range inputs (see the
+# rtdetr_gridsample_input_data fixture): a white-noise feature map
+# amplifies bf16 grid rounding past the gate, and ~10% of a uniform
+# (-1,1) grid falls in the edge half-pixels where the compiler
+# zero-pads out-of-range samples (torch border='zeros') while
+# ONNXRuntime extrapolates (ONNX semantics).
+
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_full_model-sim-sl2610-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_Where_2152-sim-sl2610-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_Conv_508-sim-sl2610-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_Conv_560-sim-sl2610-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_Conv_569-sim-sl2610-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_Conv_769-sim-sl2610-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_Conv_778-sim-sl2610-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_LayerNormalization_1148-sim-sl2610-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_TopK_1200-sim-sl2610-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_TopK_2137-sim-sl2610-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_Gather_1202-sim-sl2610-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_Gather_1203-sim-sl2610-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_GridSample_1323-sim-sl2610-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_GridSample_1324-sim-sl2610-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_GridSample_1325-sim-sl2610-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_full_model-sim-sr200-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_Where_2152-sim-sr200-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_LayerNormalization_1148-sim-sr200-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_TopK_1200-sim-sr200-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_TopK_2137-sim-sr200-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_Gather_1202-sim-sr200-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_Gather_1203-sim-sr200-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_GridSample_1323-sim-sr200-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_GridSample_1324-sim-sr200-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_GridSample_1325-sim-sr200-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_Gemm_1195-sim-sr200-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_Conv_830-sim-sr200-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_Conv_985-sim-sr200-v1]
+test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_Conv_1007-sim-sr200-v1]
