@@ -248,22 +248,128 @@ def chip_config(request):
     return config
 
 
-def _run_with_group_kill(*popenargs, timeout=None, **kwargs):
+class CommandFailedError(subprocess.CalledProcessError):
+    """CalledProcessError whose str() appends the captured output tail, so the
+    failure's own message is visible in the pytest traceback under any
+    --show-capture setting (plain prints can be hidden by --show-capture=no)."""
+
+    def __str__(self):
+        msg = super().__str__()
+        if self.output:
+            text = self.output if isinstance(self.output, str) else self.output.decode("utf-8", errors="replace")
+            msg += "\n----- last lines of command output -----\n" + text
+        return msg
+
+
+class CommandTimeoutError(subprocess.TimeoutExpired):
+    """TimeoutExpired whose str() appends the captured output tail and the
+    stuck process's state dump."""
+
+    def __str__(self):
+        msg = super().__str__()
+        if self.output:
+            text = self.output if isinstance(self.output, str) else self.output.decode("utf-8", errors="replace")
+            msg += "\n----- last lines of command output -----\n" + text
+        if self.stderr:
+            text = self.stderr if isinstance(self.stderr, str) else self.stderr.decode("utf-8", errors="replace")
+            msg += "\n----- stuck process state -----\n" + text
+        return msg
+
+
+def _collect_stuck_process_diagnostics(proc):
+    """Best-effort state dump of a timed-out process and its children, returned
+    as text (pure /proc reads: ptrace/gdb is blocked by yama scope for
+    non-ancestors)."""
+
+    import glob
+
+    lines = []
+
+    def dump_status(pid):
+        try:
+            with open(f"/proc/{pid}/cmdline") as f:
+                lines.append(f"pid {pid}: {f.read().replace(chr(0), ' ').strip()}")
+            with open(f"/proc/{pid}/status") as f:
+                lines.extend("  " + l.strip() for l in f if l.startswith(("State:", "Threads:", "VmRSS:")))
+            for task in glob.glob(f"/proc/{pid}/task/*"):
+                tid = task.rsplit("/", 1)[1]
+                state, wchan = "?", "?"
+                try:
+                    with open(f"{task}/stat") as f:
+                        state = f.read().rsplit(")", 1)[1].split()[0]
+                except Exception:
+                    pass
+                try:
+                    with open(f"{task}/wchan") as f:
+                        wchan = f.read().strip()
+                except Exception:
+                    pass
+                lines.append(f"  tid {tid}: state={state} wchan={wchan}")
+        except Exception:
+            pass
+
+    pids = {proc.pid}
+    try:
+        for stat_path in glob.glob("/proc/[0-9]*/stat"):
+            with open(stat_path) as f:
+                fields = f.read().rsplit(")", 1)[1].split()
+            if int(fields[1]) == proc.pid:  # ppid -> direct children
+                pids.add(int(stat_path.split("/")[2]))
+    except Exception:
+        pass
+    for pid in sorted(pids):
+        dump_status(pid)
+    return "\n".join(lines)
+
+
+def _run_with_group_kill(*popenargs, timeout=None, error_tail_lines=None, **kwargs):
     """Like subprocess.check_call, but kills the whole process group on timeout so
-    helpers spawned by the tool (e.g. the qemu CSS simulator) do not outlive it."""
+    helpers spawned by the tool (e.g. the qemu CSS simulator) do not outlive it.
+
+    With error_tail_lines, the command's stdout/stderr is captured to a temp
+    file; on timeout or non-zero exit the raised exception's message includes
+    the last lines (and, on timeout, the stuck process's state), so a CI
+    failure shows its own cause in the traceback under any capture setting."""
+
+    import tempfile
+
+    output_file = None
+    if error_tail_lines is not None:
+        output_file = tempfile.NamedTemporaryFile(mode="w+b", prefix="torq-cmd-", delete=False)
+        kwargs["stdout"] = output_file
+        kwargs["stderr"] = subprocess.STDOUT
 
     proc = subprocess.Popen(*popenargs, start_new_session=True, **kwargs)
+    failure = None
     try:
         retcode = proc.wait(timeout=timeout)
+        if retcode:
+            failure = CommandFailedError(retcode, popenargs[0])
     except subprocess.TimeoutExpired:
+        diagnostics = _collect_stuck_process_diagnostics(proc)
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         proc.wait()
-        raise
-    if retcode:
-        raise subprocess.CalledProcessError(retcode, popenargs[0])
+        failure = CommandTimeoutError(popenargs[0], timeout, stderr=diagnostics)
+
+    if failure is not None and output_file is not None:
+        try:
+            output_file.flush()
+            with open(output_file.name, "rb") as f:
+                lines = f.read().decode("utf-8", errors="replace").splitlines()
+            failure.output = "\n".join(lines[-error_tail_lines:])
+        except Exception:
+            pass
+    if output_file is not None:
+        output_file.close()
+        try:
+            os.unlink(output_file.name)
+        except OSError:
+            pass
+    if failure is not None:
+        raise failure
 
 
 def _find_iree_tool(env_var, tool_name):
@@ -695,7 +801,7 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
     print("Compiling for TORQ with: " + " ".join(cmds))
 
     with measure_time(versioned_dir, 'compilation_time'):
-        _run_with_group_kill(cmds, cwd=str(versioned_dir), timeout=torq_compiler_timeout)
+        _run_with_group_kill(cmds, cwd=str(versioned_dir), timeout=torq_compiler_timeout, error_tail_lines=120)
 
     # save the size of the model
     model_stats = compute_model_stats(model_file, versioned_dir)
@@ -900,14 +1006,14 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, torq_input_dat
 
         with measure_time(versioned_dir, 'e2e_inference_time'):
             print("Running for TORQ with: " + " ".join(run_cmd))
-            _run_with_group_kill(run_cmd, timeout=torq_runtime_timeout)
+            _run_with_group_kill(run_cmd, timeout=torq_runtime_timeout, error_tail_lines=80)
 
         # the re-run the module with the benchmark tool if benchmarking is enabled, this will generate a benchmark.json
         if benchmark_output_dir is not None:            
             benchmark_file = versioned_dir / 'benchmark.json'
             benchmark_cmd = [str(torq_benchmark), "--benchmark_out=" + str(benchmark_file), "--benchmark_out_format=json", *cmds]
             print("Running benchmark for TORQ with: " + " ".join(benchmark_cmd))
-            _run_with_group_kill(benchmark_cmd, timeout=torq_runtime_timeout)
+            _run_with_group_kill(benchmark_cmd, timeout=torq_runtime_timeout, error_tail_lines=80)
     
     remote_addr = request.config.getoption("--torq-addr")
     remote_port = request.config.getoption("--torq-port")
