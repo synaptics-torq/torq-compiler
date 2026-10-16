@@ -70,6 +70,12 @@ fi
 #
 #     Build the python bindings
 #
+#  -DIREE_BUILD_TESTS=OFF
+#
+#     Skip IREE's own unit/lint tests: only the torq suites run here, and
+#     this also removes the pyright executable hard-requirement IREE 3.12
+#     adds for the runtime python bindings tests (same as the SoC build).
+#
 #  -DPython3_EXECUTABLE="$(which python3)"
 #
 #     Use the currently active python interpreted (uses the interpreter of a virtualenv if that is enabled)
@@ -95,6 +101,7 @@ cmake -B $BUILD_DIR \
             -DIREE_HAL_DRIVER_LOCAL_TASK=ON \
             ${LAUNCHER_OPTS} \
             -DIREE_BUILD_PYTHON_BINDINGS=ON \
+            -DIREE_BUILD_TESTS=OFF \
             -DTORQ_ENABLE_SIMULATOR=ON \
             -DTORQ_ENABLE_AWS_FPGA=ON \
             -DPython3_EXECUTABLE="$(which python3)"
