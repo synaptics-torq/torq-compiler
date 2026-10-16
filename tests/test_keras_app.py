@@ -104,6 +104,8 @@ def case_config(request, runtime_hw_type, chip_config):
       'xception_block2_sepconv2',
       'vgg16_block2_conv1',
       'vgg16_block2_conv2',
+      'vgg16_block1_conv2',
+      'vgg16_block3_conv2',
       'inceptionv3_conv2d_30',
       'inceptionresnetv2_conv2d_173',
       'inceptionresnetv2_conv2d_170',

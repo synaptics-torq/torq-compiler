@@ -614,34 +614,28 @@ static Value extendToI32(Value value, PatternRewriter &rewriter, Location loc, b
 /// scale and zero point as [1,1,N] splats. A uint8 weight is re-encoded as
 /// int8 (w ^ 0x80, zp - 128), which preserves w - zp, so that consumers that
 /// read the weight as signed (the mixed-quant matmul) accept it.
-static LogicalResult matchPerTensorDequantMatmulInput(
-    Value input, RankedTensorType &inputType, BlockQuantizedMatmulInputMatch &match,
-    PatternRewriter &rewriter, Location loc
-) {
-    inputType = dyn_cast<RankedTensorType>(input.getType());
-    if (!inputType || inputType.getRank() != 3 || inputType.getDimSize(0) != 1 ||
-        !inputType.hasStaticShape())
-        return failure();
-    Value lifted;
-    if (auto expand = input.getDefiningOp<tensor::ExpandShapeOp>()) {
-        lifted = expand.getSrc();
-    }
-    else if (auto lift = input.getDefiningOp<linalg::GenericOp>()) {
-        auto maps = lift.getIndexingMapsArray();
-        if (lift.getNumDpsInputs() != 1 || !isYieldedBlockArgument(lift, 0) ||
-            !isFinalMatmulRhsBroadcastMap(maps[0]) || !isIdentityMap(maps[1], 3))
-            return failure();
-        lifted = lift.getInputs()[0];
-    }
-    auto dq = lifted ? lifted.getDefiningOp<linalg::GenericOp>() : linalg::GenericOp();
+/// Facts matched out of a constant per-tensor dequant generic (see
+/// matchConstantPerTensorDequant).
+struct PerTensorDequantMatch {
+    Attribute weightAttr;
+    RankedTensorType weightType;
+    FloatAttr scaleAttr;
+    int64_t zeroPoint = 0;
+    bool isUnsigned = false;
+};
+
+/// Matches a linalg.generic computing mulf(sitofp([subi](ext(w), zp)), scale)
+/// with identity maps over a constant int8 weight and nothing else -- the form
+/// the importer emits for a per-tensor DequantizeLinear. The zero point is
+/// adjusted for the uint8 -> int8 re-encode (zp - 128) and checked against the
+/// 8-bit range.
+static LogicalResult
+matchConstantPerTensorDequant(linalg::GenericOp dq, PerTensorDequantMatch &dequant) {
     if (!dq || dq.getNumDpsInputs() != 1 || dq.getNumResults() != 1 ||
-        dq.getResult(0).getType() !=
-            RankedTensorType::get(inputType.getShape().drop_front(), inputType.getElementType()) ||
         !llvm::all_of(dq.getIndexingMapsArray(), [](AffineMap m) { return m.isIdentity(); }))
         return failure();
-
-    Attribute weightAttr;
     auto weightType = dyn_cast<RankedTensorType>(dq.getInputs()[0].getType());
+    Attribute weightAttr;
     if (!weightType || !weightType.getElementType().isInteger(8) ||
         !matchPattern(dq.getInputs()[0], m_Constant(&weightAttr)))
         return failure();
@@ -675,6 +669,47 @@ static LogicalResult matchPerTensorDequantMatmulInput(
         zeroPoint -= 128;
     if (zeroPoint < -128 || zeroPoint > 127)
         return failure();
+    dequant.weightAttr = weightAttr;
+    dequant.weightType = weightType;
+    dequant.scaleAttr = scaleAttr;
+    dequant.zeroPoint = zeroPoint;
+    dequant.isUnsigned = isUnsigned;
+    return success();
+}
+
+static LogicalResult matchPerTensorDequantMatmulInput(
+    Value input, RankedTensorType &inputType, BlockQuantizedMatmulInputMatch &match,
+    PatternRewriter &rewriter, Location loc
+) {
+    inputType = dyn_cast<RankedTensorType>(input.getType());
+    if (!inputType || inputType.getRank() != 3 || inputType.getDimSize(0) != 1 ||
+        !inputType.hasStaticShape())
+        return failure();
+    Value lifted;
+    if (auto expand = input.getDefiningOp<tensor::ExpandShapeOp>()) {
+        lifted = expand.getSrc();
+    }
+    else if (auto lift = input.getDefiningOp<linalg::GenericOp>()) {
+        auto maps = lift.getIndexingMapsArray();
+        if (lift.getNumDpsInputs() != 1 || !isYieldedBlockArgument(lift, 0) ||
+            !isFinalMatmulRhsBroadcastMap(maps[0]) || !isIdentityMap(maps[1], 3))
+            return failure();
+        lifted = lift.getInputs()[0];
+    }
+    auto dq = lifted ? lifted.getDefiningOp<linalg::GenericOp>() : linalg::GenericOp();
+    if (!dq ||
+        dq.getResult(0).getType() !=
+            RankedTensorType::get(inputType.getShape().drop_front(), inputType.getElementType()))
+        return failure();
+
+    PerTensorDequantMatch dequant;
+    if (failed(matchConstantPerTensorDequant(dq, dequant)))
+        return failure();
+    Attribute weightAttr = dequant.weightAttr;
+    RankedTensorType weightType = dequant.weightType;
+    FloatAttr scaleAttr = dequant.scaleAttr;
+    int64_t zeroPoint = dequant.zeroPoint;
+    bool isUnsigned = dequant.isUnsigned;
 
     // The constants of the single-block form.
     int64_t N = weightType.getDimSize(1);
@@ -1387,7 +1422,18 @@ class RaiseUnitBatchMatmulPattern : public OpRewritePattern<linalg::MatmulOp> {
             }
         }
 
-        if (!matchedUnitBatchExpand && !matchedBlockedWeight)
+        // The per-tensor dequant matcher only recognizes the [1,K,N] batch
+        // form; raise the rank-2 matmul 3.12 collapsed to so it can fire (a
+        // decode matmul then lowers to mixed_quant_matmul).
+        bool matchedPerTensorDequantWeight = false;
+        if (!matchedUnitBatchExpand && !matchedBlockedWeight) {
+            PerTensorDequantMatch dequant;
+            matchedPerTensorDequantWeight = succeeded(
+                matchConstantPerTensorDequant(rhs.getDefiningOp<linalg::GenericOp>(), dequant)
+            );
+        }
+
+        if (!matchedUnitBatchExpand && !matchedBlockedWeight && !matchedPerTensorDequantWeight)
             return failure();
 
         Location loc = srcOp.getLoc();

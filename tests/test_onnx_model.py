@@ -42,7 +42,7 @@ Quantization:
 """
 
 @pytest.fixture
-def case_config(request, chip_config):
+def case_config(request, chip_config, runtime_hw_type):
 
     example_tc = [
         # unnecessary to run, only for executor discovery test
@@ -51,10 +51,19 @@ def case_config(request, chip_config):
     if any(s in request.node.nodeid for s in example_tc):
         pytest.xfail("Skipped Example Cases")
 
+    extra_args = {}
+    # unrolled_concat_layer_Concat_120 is only ~2s of sim work locally, but
+    # under -n 18 --dist worksteal on the CI runners its runtime invocation
+    # has repeatedly stalled past the 240s default (contention on the shared
+    # sim runtime). Sim-only budget; fpga/hardware keeps the strict default.
+    if runtime_hw_type.data == "sim" and "unrolled_concat_layer_Concat_120" in request.node.nodeid:
+        extra_args["torq_runtime_timeout"] = 600
+
     return {
          "onnx_model": "onnx_layer_model",
          "mlir_model_file": "onnx_mlir_model_file",
          "input_data": "tweaked_random_input_data",
+         **extra_args,
     }
 
 
