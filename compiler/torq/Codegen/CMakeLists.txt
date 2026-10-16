@@ -16,6 +16,8 @@ set(sources
     BufferizationUtils.cpp
     BufferizePeeledForallInPlacePass.cpp
     CheckCssStackSizePass.cpp
+    NarrowFloatSelectPass.cpp
+    SwapSelectsToIfPass.cpp
     CoalesceElementwiseChainsPass.cpp
     FuseTransposeIntoGroupPass.cpp
     CompileCpuProgramsPass.cpp

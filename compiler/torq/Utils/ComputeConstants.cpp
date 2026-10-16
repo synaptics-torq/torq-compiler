@@ -240,8 +240,18 @@ static void setupPipeline(PassManager &pm) {
         .addPass(createMemrefCopyToLinalgPass)
         .addPass(createConvertLinalgToLoopsPass)
         .addPass(createConvertBf16ArithToF32Pass)
-        // bf16 storage goes through natively at 3.12 (the
-        // ConvertBf16ToUInt16Buffers pass was removed upstream)
+        // Same bf16 -> i16 buffer conversion as addCssLoweringPasses (see
+        // CompileCpuProgramsPass.cpp); fp8 types go through natively.
+        .addPass([]() {
+            ConvertUnsupportedFloatToIntBuffersPassOptions options;
+            options.includeBf16 = true;
+            options.includeF8E5M2 = false;
+            options.includeF8E4M3FN = false;
+            options.includeF8E5M2FNUZ = false;
+            options.includeF8E4M3FNUZ = false;
+            options.includeF8E8M0FNU = false;
+            return createConvertUnsupportedFloatToIntBuffersPass(options);
+        })
         .addPass(createCanonicalizerPass)
         .addPass(createCSEPass);
 

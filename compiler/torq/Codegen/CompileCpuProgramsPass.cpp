@@ -371,9 +371,29 @@ static void addCssLoweringPasses(OpPassManager &pipeline) {
         // Linalg -> SCF
         .addPass(createMemrefCopyToLinalgPass)
         .addPass(createConvertLinalgToLoopsPass)
+        // The LinalgExt sort sweep is select-based since 3.12; turn the
+        // in-place swap motif back into a conditional swap so soft-float CSS
+        // targets don't pay a duplicated compare libcall per sweep step.
+        .addPass(createSwapSelectsToIfPass)
         .addPass(createConvertBf16ArithToF32Pass)
-        // bf16 storage goes through natively at 3.12 (the
-        // ConvertBf16ToUInt16Buffers pass was removed upstream)
+        // 3.12's replacement for the removed ConvertBf16ToUInt16Buffers pass.
+        // Without it bf16 buffers stay bf16 and every access widens to f32,
+        // costing ~2.5x executed instructions on soft-float CSS sims. fp8
+        // types go through natively, as in the upstream LLVMCPU pipeline.
+        .addPass([]() {
+            ConvertUnsupportedFloatToIntBuffersPassOptions options;
+            options.includeBf16 = true;
+            options.includeF8E5M2 = false;
+            options.includeF8E4M3FN = false;
+            options.includeF8E5M2FNUZ = false;
+            options.includeF8E4M3FNUZ = false;
+            options.includeF8E8M0FNU = false;
+            return createConvertUnsupportedFloatToIntBuffersPass(options);
+        })
+        // Undo the f32 widening of selects left behind by the bf16 arith
+        // conversion (e.g. the select-based LinalgExt sort sweep); the
+        // canonicalizer then folds the truncf(extf) store paths away.
+        .addPass(createNarrowFloatSelectPass)
         .addPass(createCanonicalizerPass)
         .addPass(createCSEPass);
 
