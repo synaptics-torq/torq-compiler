@@ -2,12 +2,18 @@ import re
 import subprocess
 from pathlib import Path
 
+import ml_dtypes
 import numpy as np
 import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
 from torq.testing.onnx import convert_onnx_to_mlir
+
+try:
+    from iree.compiler import ir as _iree_ir
+except ImportError:
+    _iree_ir = None
 
 # Must-fire checks for narrowly matched linalg rewrites. A numerics test still
 # passes when a rewrite silently stops matching its target block (e.g. after an
@@ -405,3 +411,181 @@ def test_per_tensor_dequant_matmul_near_misses(torq_compiler, tmp_path, variant)
         module = module.replace("129 : i32", "256 : i32" if variant == "zero_point_256" else "-1 : i32")
     out = run_optimize_pass_standalone(torq_compiler, tmp_path, module, "torq-optimize-linalg-for-torq")
     assert "arith.extui" in out and "xi8>" in out and "1x4x3xi8" not in out, out
+
+
+# --- Float ACT tail fold (LinalgToTorqHL conversion) -------------------------
+#
+# The checks below pin down foldForwardScaleClamp's float tail walk (a
+# [f32->bf16 truncf] [scalar const add] [clamp(s)] chain absorbed into the
+# consumer's ACT) and its consumers. Unlike the ONNX-driven checks above, the
+# input is the exact linalg chain the patterns see, so no importer sits in
+# between; each testdata file's header states the expected end IR.
+
+LINALG_TO_TORQHL = "torq-linalg-to-torqhl-conversion"
+PATTERN_FIRES_DIR = Path(__file__).parent / "testdata" / "linalg_pattern_fires"
+HARDSIGMOID = Path(__file__).parent / "testdata" / "linalg_ops" / "hardsigmoid-bf16.mlir"
+
+
+def count_ops(ir_text, op):
+    # torq_hl ops print in generic form ("torq_hl.mul"); linalg.generic in
+    # pretty form.
+    if op.startswith("torq_hl."):
+        return len(re.findall(rf'"{re.escape(op)}"', ir_text))
+    return len(re.findall(rf"\b{re.escape(op)}\b", ir_text))
+
+
+def op_lines(ir_text, op):
+    if op.startswith("torq_hl."):
+        pat = rf'"{re.escape(op)}"'
+    else:
+        pat = rf"\b{re.escape(op)}\b"
+    return [line for line in ir_text.splitlines() if re.search(pat, line)]
+
+
+@pytest.mark.ci
+def test_hardsigmoid_chain_folds_to_single_mul(torq_compiler, tmp_path):
+    """The four-generic HardSigmoid chain (mul -> add -> min -> max) must
+    become one torq_hl.mul whose ACT carries the beta bias and the [0, 1]
+    clip, with no linalg left."""
+    out = run_optimize_pass_standalone(torq_compiler, tmp_path,
+                                       HARDSIGMOID.read_text(), LINALG_TO_TORQHL)
+    assert count_ops(out, "torq_hl.mul") == 1, out
+    assert count_ops(out, "linalg.generic") == 0, out
+    mul = op_lines(out, "torq_hl.mul")[0]
+    # clip: min 0.0f, max 1.0f (f32 bit patterns)
+    assert "output_min = 0 : i32" in mul, mul
+    assert "output_max = 1065353216 : i32" in mul, mul
+    # the beta bias is recorded in f32
+    assert "dense<5.000000e-01> : tensor<1xf32>" in out, out
+
+
+@pytest.mark.ci
+def test_perchannel_mul_bias_absorbs_scalar_add_and_clamp(torq_compiler, tmp_path):
+    """per-channel mulf + addf (same fuse group) + scalar add + ReLU must
+    become one torq_hl.mul: the scalar add is absorbed into the per-channel
+    bias constant (rebuilt in f32) and the ReLU becomes the clip.
+
+    Catches both the drop of the tail's scalar add (the rebuilt bias would
+    read [0.1, 0.2, 0.3, 0.4] instead of [0.6, 0.7, 0.8, 0.9]) and the
+    dangling per-channel add (the conversion crashes).
+    """
+    case = (PATTERN_FIRES_DIR / "perchannel-mul-bias-scalar-add-clamp-bf16.mlir").read_text()
+    out = run_optimize_pass_standalone(torq_compiler, tmp_path, case, LINALG_TO_TORQHL)
+    assert count_ops(out, "torq_hl.mul") == 1, out
+    assert count_ops(out, "torq_hl.add") == 0, out
+    assert count_ops(out, "linalg.generic") == 0, out
+    # bias rebuilt in f32 with the scalar add (0.5) absorbed
+    assert "dense<[0.600097656, 0.700195313, 0.80078125, 0.900390625]> : tensor<4xf32>" in out, out
+    mul = op_lines(out, "torq_hl.mul")[0]
+    assert "output_min = 0 : i32" in mul, mul
+    # ReLU: open top at the largest finite f32
+    assert "output_max = 2139095039 : i32" in mul, mul
+
+
+@pytest.mark.ci
+def test_perchannel_mul_resblob_bias_keeps_scalar_add_tail(torq_compiler, tmp_path):
+    """When the per-channel bias is a dense_resource blob (how ONNX
+    initializers arrive), it cannot be rebuilt to absorb the tail's scalar
+    add: the tail must be kept alive (a torq_hl.add with the +0.5 bias and
+    the ReLU clip), not silently dropped from the single torq_hl.mul.
+    """
+    if _iree_ir is None:
+        pytest.skip("iree python bindings unavailable")
+    text = (PATTERN_FIRES_DIR / "perchannel-mul-bias-scalar-add-clamp-bf16.mlir").read_text()
+    placeholder = "%bias = arith.constant dense<0.000000e+00> : tensor<4xbf16>"
+    text = text.replace(
+        "%bias = arith.constant dense<[0.100000e+00, 0.200000e+00, 0.300000e+00, 0.400000e+00]> : tensor<4xbf16>",
+        placeholder,
+    )
+    assert placeholder in text
+    # dense_resource<perch_bias> : tensor<4xbf16>, values [1.0, 2.0, 3.0, 4.0]
+    with _iree_ir.Context() as ctx, _iree_ir.Location.unknown(ctx) as loc:
+        ty = _iree_ir.RankedTensorType.get([4], _iree_ir.BF16Type.get())
+        attr = _iree_ir.DenseResourceElementsAttr.get_from_buffer(
+            ml_dtypes.bfloat16(np.array([1, 2, 3, 4], dtype=np.int16)).view(np.uint16).tobytes(),
+            "perch_bias", ty,
+        )
+        mod = _iree_ir.Module.parse(text)
+        block = mod.body.operations[0].regions[0].blocks[0]
+        for op in block.operations:
+            if op.name != "arith.constant":
+                continue
+            cst = op.attributes["value"]
+            if cst.type == ty and str(cst) == "dense<0.000000e+00> : tensor<4xbf16>":
+                op.attributes["value"] = attr
+                break
+        else:
+            raise AssertionError("bias placeholder constant not found")
+        mlir_file = tmp_path / "perchannel-resblob.mlir"
+        with open(mlir_file, "wb") as fh:
+            mod.operation.write_bytecode(fh)
+    iree_opt = Path(torq_compiler.file_path).parent / "iree-opt"
+    proc = subprocess.run(
+        [str(iree_opt), str(mlir_file),
+         "--pass-pipeline", f"builtin.module(func.func({LINALG_TO_TORQHL}))"],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, f"conversion failed:\n{proc.stderr}"
+    out = proc.stdout
+    # the blob bias survives (not rebuilt) behind an f2f act feeding the mul
+    assert "dense_resource<perch_bias>" in out, out
+    assert count_ops(out, "torq_hl.mul") == 1, out
+    assert count_ops(out, "torq_hl.add") == 1, out
+    assert count_ops(out, "linalg.generic") == 0, out
+    # the kept tail: the scalar add and the ReLU live on the add
+    add = op_lines(out, "torq_hl.add")[0]
+    assert "output_min = 0 : i32" in add, add
+    assert "output_max = 2139095039 : i32" in add, add
+    assert "dense<5.000000e-01> : tensor<1xf32>" in out, out
+
+
+@pytest.mark.ci
+def test_conv1d_folds_truncf_add_clamp_tail(torq_compiler, tmp_path):
+    """A Conv1D (5D generic) followed by truncf + scalar add + ReLU must
+    become one torq_hl.conv1d whose ACT carries the +0.5 bias (per channel,
+    f32) and the [0, .] clip, with a bf16 output feeding the Kw reduce.
+
+    The conv1d pattern runs in the pre-conversion, whose bias probe evaluates
+    constants through the full compile context (standalone iree-opt cannot
+    load the dialects it needs), so this goes through torq-compile (with
+    slicing disabled, which would pull the tail out of the dispatch).
+    """
+    case = PATTERN_FIRES_DIR / "conv1d-add-clamp-tail-bf16.mlir"
+    cmd = [str(torq_compiler.file_path), str(case), "-o", str(tmp_path / "model.vmfb"),
+           "--torq-disable-host", "--torq-disable-css", "--torq-hw=SL2610",
+           "--torq-disable-slicing", "--mlir-disable-threading",
+           f"--mlir-print-ir-after=torq-linalg-to-torqhl-pre-conversion"]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    dumps = [d for d in ir_dumps(proc.stderr, "After") if "main_dispatch" in d]
+    assert dumps, "no dump of the dispatch after torq-linalg-to-torqhl-pre-conversion"
+    dump = dumps[-1]
+    assert count_ops(dump, "torq_hl.conv1d") == 1, dump
+    assert count_ops(dump, "linalg.generic") == 0, dump
+    conv = op_lines(dump, "torq_hl.conv1d")[0]
+    # bf16 output (the truncf tail was absorbed) with the ReLU clip
+    assert "-> tensor<1x2x1x3x3xbf16>" in conv, conv
+    assert "output_min = 0 : i32" in conv, conv
+    assert "output_max = 2139095039 : i32" in conv, conv
+    # the scalar add folded into the f32 per-channel bias (F=2)
+    assert "dense<5.000000e-01> : tensor<2xf32>" in dump, dump
+
+
+@pytest.mark.ci
+def test_tail_stops_at_width_converting_clamp(torq_compiler, tmp_path):
+    """A clamp that converts width (ReLU in bf16, extf to the f32 result --
+    the form the elementwise fusion leaves at a model's f32 boundary) must
+    stop the forward float tail fold: the mul keeps its bf16 result, and the
+    clamp lowers on its own to a bf16-in / f32-out act.
+    """
+    case = (PATTERN_FIRES_DIR / "clamp-extf-result-bf16.mlir").read_text()
+    out = run_optimize_pass_standalone(torq_compiler, tmp_path, case, LINALG_TO_TORQHL)
+    assert count_ops(out, "torq_hl.mul") == 1, out
+    assert count_ops(out, "linalg.generic") == 0, out
+    mul = op_lines(out, "torq_hl.mul")[0]
+    # the tail ended on an f32 type pre-fix, turning this into an
+    # f32-result mul (or invalid IR); it must stay bf16
+    assert "-> tensor<1x4x1x4xbf16>" in mul, mul
+    # the width-converting clamp survived as its own act
+    acts = op_lines(out, "torq_hl.act")
+    assert any("name = \"clamp\"" in a and "-> tensor<1x4x1x4xf32>" in a for a in acts), out

@@ -29,7 +29,7 @@ namespace mlir::syna::torq {
 
 namespace {
 
-enum class ClampVariant { Ordered, NaiveOrdered, Unordered, ReLU };
+enum class ClampVariant { IntOrdered, Float };
 
 struct ClampInfo {
     ClampVariant variant;
@@ -37,411 +37,38 @@ struct ClampInfo {
     int32_t maxInt = 0;
     float minFloat = 0.0f;
     float maxFloat = 0.0f;
+    // Which input carries the data (0 unless the clamp is a bound-first form
+    // like ins(%bound, %data)).
+    int dataInputIdx = 0;
 };
 
-static float toFloat(arith::ConstantOp cst) {
-    return mlir::cast<FloatAttr>(cst.getValue()).getValue().convertToFloat();
-}
-
-// Resolve a clamp bound to its scalar float value. The bound may be either an
-// inlined arith.constant in the body, or a linalg input block argument backed by
-// a splat constant operand. The latter is how torch lowers an ONNX Clip/ReLU6
-// whose min/max are constant tensors: the bounds become 0-D constant tensor
-// inputs (block args) instead of inlined constants in the body.
-static std::optional<float> resolveConstBound(Value v, linalg::GenericOp op) {
-    auto fromConst = [](arith::ConstantOp cst) -> std::optional<float> {
-        if (auto f = dyn_cast<FloatAttr>(cst.getValue()))
-            return f.getValue().convertToFloat();
-        if (auto d = dyn_cast<DenseElementsAttr>(cst.getValue()))
-            if (d.isSplat() && isa<FloatType>(d.getElementType()))
-                return d.getSplatValue<APFloat>().convertToFloat();
-        return std::nullopt;
-    };
-
-    if (auto cst = v.getDefiningOp<arith::ConstantOp>())
-        return fromConst(cst);
-
-    // Block arguments [0, numInputs) map 1:1 to the generic's input operands.
-    auto barg = dyn_cast<BlockArgument>(v);
-    if (!barg || barg.getArgNumber() >= op.getInputs().size())
-        return std::nullopt;
-    if (auto cst = op.getInputs()[barg.getArgNumber()].getDefiningOp<arith::ConstantOp>())
-        return fromConst(cst);
-    return std::nullopt;
-}
-
-// Shared precondition for the two cmpf/select matchers: single f32/bf16 input,
-// single output, exactly 5 ops in the body.
-static bool isFloatClampCandidate(linalg::GenericOp op) {
-    if (op.getInputs().size() != 1 || op.getOutputs().size() != 1)
-        return false;
-    auto inputType = dyn_cast<RankedTensorType>(op.getInputs()[0].getType());
-    if (!inputType)
-        return false;
-    auto elemTy = inputType.getElementType();
-    return (elemTy.isF32() || elemTy.isBF16()) &&
-           op.getRegion().front().getOperations().size() == 5;
-}
-
-// Ordered clamp: arith.minimumf/maximumf (float) or arith.minsi/maxsi (int).
-//
-//   %0 = linalg.generic ... ins(%in : tensor<Nxf32>) outs(%out : tensor<Nxf32>) {
-//   ^bb0(%arg0: f32, %arg1: f32):
-//     %min = arith.minimumf %arg0, %cst_max : f32
-//     %max = arith.maximumf %min, %cst_min : f32
-//     linalg.yield %max : f32
-//   }
-static bool matchOrderedClamp(linalg::GenericOp srcOp, ClampInfo &info) {
+// Integer clamp: minsi/maxsi with in-body constants (the float forms are
+// handled by matchFloatClampRange).
+static bool matchIntClamp(linalg::GenericOp srcOp, ClampInfo &info) {
     std::string failReason;
     if (!isTorqClampOp(srcOp, info.minInt, info.maxInt, info.minFloat, info.maxFloat, failReason))
         return false;
-    info.variant = ClampVariant::Ordered;
-    return true;
-}
-
-// Naive ordered clamp from BfloatTanhPattern.
-//
-//   %0 = linalg.generic ... ins(%in : tensor<Nxbf16>) outs(%out : tensor<Nxbf16>) {
-//   ^bb0(%arg0: bf16, %arg1: bf16):
-//     %cmp0 = arith.cmpf olt, %cst_max, %arg0 : bf16
-//     %sel0 = arith.select %cmp0, %cst_max, %arg0 : bf16
-//     %cmp1 = arith.cmpf ogt, %cst_min, %sel0 : bf16
-//     %sel1 = arith.select %cmp1, %cst_min, %sel0 : bf16
-//     linalg.yield %sel1 : bf16
-//   }
-static bool matchNaiveOrderedClamp(linalg::GenericOp srcOp, ClampInfo &info) {
-    if (!isFloatClampCandidate(srcOp))
-        return false;
-
-    auto &block = srcOp.getRegion().front();
-
-    auto cmpfOlt = dyn_cast<arith::CmpFOp>(block.front());
-    if (!cmpfOlt || cmpfOlt.getPredicate() != arith::CmpFPredicate::OLT)
-        return false;
-    auto cstMax = cmpfOlt.getLhs().getDefiningOp<arith::ConstantOp>();
-    auto inArg = dyn_cast<BlockArgument>(cmpfOlt.getRhs());
-    if (!cstMax || !inArg || inArg.getArgNumber() != 0)
-        return false;
-
-    auto select1 = dyn_cast<arith::SelectOp>(cmpfOlt->getNextNode());
-    if (!select1 || select1.getCondition() != cmpfOlt.getResult())
-        return false;
-    if (!select1.getTrueValue().getDefiningOp<arith::ConstantOp>())
-        return false;
-    auto inArg2 = dyn_cast<BlockArgument>(select1.getFalseValue());
-    if (!inArg2 || inArg2.getArgNumber() != 0)
-        return false;
-
-    auto cmpfOgt = dyn_cast<arith::CmpFOp>(select1->getNextNode());
-    if (!cmpfOgt || cmpfOgt.getPredicate() != arith::CmpFPredicate::OGT)
-        return false;
-    auto cstMin = cmpfOgt.getLhs().getDefiningOp<arith::ConstantOp>();
-    if (!cstMin || cmpfOgt.getRhs() != select1.getResult())
-        return false;
-
-    auto select2 = dyn_cast<arith::SelectOp>(cmpfOgt->getNextNode());
-    if (!select2 || select2.getCondition() != cmpfOgt.getResult())
-        return false;
-    if (!select2.getTrueValue().getDefiningOp<arith::ConstantOp>())
-        return false;
-    if (select2.getFalseValue() != select1.getResult())
-        return false;
-
-    auto yieldOp = dyn_cast<linalg::YieldOp>(select2->getNextNode());
-    if (!yieldOp || yieldOp.getValues().size() != 1 ||
-        yieldOp.getValues()[0] != select2.getResult())
-        return false;
-
-    info.variant = ClampVariant::NaiveOrdered;
-    info.minFloat = toFloat(cstMin);
-    info.maxFloat = toFloat(cstMax);
-    return true;
-}
-
-// Unordered clamp from IREE ConvertElementwiseToLinalgPass (ONNX Clip/ReLU6).
-//
-//   %0 = linalg.generic ... ins(%in : tensor<Nxbf16>) outs(%out : tensor<Nxbf16>) {
-//   ^bb0(%arg0: bf16, %arg1: bf16):
-//     %cmp0 = arith.cmpf ult, %arg0, %cst_min : bf16
-//     %sel0 = arith.select %cmp0, %cst_min, %arg0 : bf16
-//     %cmp1 = arith.cmpf ugt, %sel0, %cst_max : bf16
-//     %sel1 = arith.select %cmp1, %cst_max, %sel0 : bf16
-//     linalg.yield %sel1 : bf16
-//   }
-static bool matchUnorderedClamp(linalg::GenericOp srcOp, ClampInfo &info) {
-    if (!isFloatClampCandidate(srcOp))
-        return false;
-
-    auto &block = srcOp.getRegion().front();
-
-    auto cmpfUlt = dyn_cast<arith::CmpFOp>(block.front());
-    if (!cmpfUlt || cmpfUlt.getPredicate() != arith::CmpFPredicate::ULT)
-        return false;
-    auto cstMin = cmpfUlt.getRhs().getDefiningOp<arith::ConstantOp>();
-    auto inArg = dyn_cast<BlockArgument>(cmpfUlt.getLhs());
-    if (!cstMin || !inArg || inArg.getArgNumber() != 0)
-        return false;
-
-    auto select1 = dyn_cast<arith::SelectOp>(cmpfUlt->getNextNode());
-    if (!select1 || select1.getCondition() != cmpfUlt.getResult())
-        return false;
-    if (!select1.getTrueValue().getDefiningOp<arith::ConstantOp>())
-        return false;
-    auto inArg2 = dyn_cast<BlockArgument>(select1.getFalseValue());
-    if (!inArg2 || inArg2.getArgNumber() != 0)
-        return false;
-
-    auto cmpfUgt = dyn_cast<arith::CmpFOp>(select1->getNextNode());
-    if (!cmpfUgt || cmpfUgt.getPredicate() != arith::CmpFPredicate::UGT)
-        return false;
-    auto cstMax = cmpfUgt.getRhs().getDefiningOp<arith::ConstantOp>();
-    if (!cstMax || cmpfUgt.getLhs() != select1.getResult())
-        return false;
-
-    auto select2 = dyn_cast<arith::SelectOp>(cmpfUgt->getNextNode());
-    if (!select2 || select2.getCondition() != cmpfUgt.getResult())
-        return false;
-    if (!select2.getTrueValue().getDefiningOp<arith::ConstantOp>())
-        return false;
-    if (select2.getFalseValue() != select1.getResult())
-        return false;
-
-    auto yieldOp = dyn_cast<linalg::YieldOp>(select2->getNextNode());
-    if (!yieldOp || yieldOp.getValues().size() != 1 ||
-        yieldOp.getValues()[0] != select2.getResult())
-        return false;
-
-    info.variant = ClampVariant::Unordered;
-    info.minFloat = toFloat(cstMin);
-    info.maxFloat = toFloat(cstMax);
-    return true;
-}
-
-// Unordered clamp whose bounds are passed as splat-constant *inputs* (block
-// args) rather than inlined constants. This is how torch lowers an ONNX Clip /
-// ReLU6 whose min/max are constant tensors:
-//
-//   %0 = linalg.generic ... ins(%data, %cstMin, %cstMax) outs(%out) {
-//   ^bb0(%in: bf16, %inMin: bf16, %inMax: bf16, %out: bf16):
-//     %cmp0 = arith.cmpf ult, %in, %inMin : bf16
-//     %sel0 = arith.select %cmp0, %inMin, %in : bf16
-//     %cmp1 = arith.cmpf ugt, %sel0, %inMax : bf16
-//     %sel1 = arith.select %cmp1, %inMax, %sel0 : bf16
-//     linalg.yield %sel1 : bf16
-//   }
-//
-// Structurally identical to matchUnorderedClamp, but the bounds are resolved
-// through the input operands instead of from inlined constants, so it keeps the
-// op on the NSS slice instead of falling through to the Host/CSS path.
-static bool matchUnorderedClampConstInputs(linalg::GenericOp srcOp, ClampInfo &info) {
-    if (srcOp.getInputs().empty() || srcOp.getOutputs().size() != 1)
-        return false;
     auto inputType = dyn_cast<RankedTensorType>(srcOp.getInputs()[0].getType());
-    if (!inputType)
+    if (!inputType || !inputType.getElementType().isInteger())
         return false;
-    auto elemTy = inputType.getElementType();
-    if ((!elemTy.isF32() && !elemTy.isBF16()) ||
-        srcOp.getRegion().front().getOperations().size() != 5)
-        return false;
-
-    auto &block = srcOp.getRegion().front();
-
-    auto cmpfUlt = dyn_cast<arith::CmpFOp>(block.front());
-    if (!cmpfUlt || cmpfUlt.getPredicate() != arith::CmpFPredicate::ULT)
-        return false;
-    auto inArg = dyn_cast<BlockArgument>(cmpfUlt.getLhs());
-    auto minVal = resolveConstBound(cmpfUlt.getRhs(), srcOp);
-    if (!inArg || inArg.getArgNumber() != 0 || !minVal)
-        return false;
-
-    auto select1 = dyn_cast<arith::SelectOp>(cmpfUlt->getNextNode());
-    if (!select1 || select1.getCondition() != cmpfUlt.getResult())
-        return false;
-    if (!resolveConstBound(select1.getTrueValue(), srcOp))
-        return false;
-    auto inArg2 = dyn_cast<BlockArgument>(select1.getFalseValue());
-    if (!inArg2 || inArg2.getArgNumber() != 0)
-        return false;
-
-    auto cmpfUgt = dyn_cast<arith::CmpFOp>(select1->getNextNode());
-    if (!cmpfUgt || cmpfUgt.getPredicate() != arith::CmpFPredicate::UGT)
-        return false;
-    auto maxVal = resolveConstBound(cmpfUgt.getRhs(), srcOp);
-    if (!maxVal || cmpfUgt.getLhs() != select1.getResult())
-        return false;
-
-    auto select2 = dyn_cast<arith::SelectOp>(cmpfUgt->getNextNode());
-    if (!select2 || select2.getCondition() != cmpfUgt.getResult())
-        return false;
-    if (!resolveConstBound(select2.getTrueValue(), srcOp))
-        return false;
-    if (select2.getFalseValue() != select1.getResult())
-        return false;
-
-    auto yieldOp = dyn_cast<linalg::YieldOp>(select2->getNextNode());
-    if (!yieldOp || yieldOp.getValues().size() != 1 ||
-        yieldOp.getValues()[0] != select2.getResult())
-        return false;
-
-    info.variant = ClampVariant::Unordered;
-    info.minFloat = *minVal;
-    info.maxFloat = *maxVal;
+    info.variant = ClampVariant::IntOrdered;
     return true;
 }
 
-// ReLU: a one-sided lower clamp expressed as a single cmpf/select pair.
-//
-//   %0 = linalg.generic ... ins(%in : tensor<Nxbf16>) outs(%out : tensor<Nxbf16>) {
-//   ^bb0(%arg0: bf16, %arg1: bf16):
-//     %cmp = arith.cmpf ugt, %arg0, %cst_min : bf16
-//     %sel = arith.select %cmp, %arg0, %cst_min : bf16
-//     linalg.yield %sel : bf16
-//   }
-//
-// This is equivalent to clamp(x, cst_min, +inf), i.e. ReLU when cst_min == 0.
-static bool matchReLU(linalg::GenericOp srcOp, ClampInfo &info) {
-    if (srcOp.getInputs().size() != 1 || srcOp.getOutputs().size() != 1)
-        return false;
-    auto inputType = dyn_cast<RankedTensorType>(srcOp.getInputs()[0].getType());
-    if (!inputType)
-        return false;
-    auto elemTy = inputType.getElementType();
-    if (!elemTy.isF32() && !elemTy.isBF16())
-        return false;
-    // Body must have exactly 3 ops: cmpf, select, yield.
-    if (srcOp.getRegion().front().getOperations().size() != 3)
-        return false;
-
-    auto &block = srcOp.getRegion().front();
-
-    // First op: arith.cmpf ugt, %arg0, %cst
-    auto cmpOp = dyn_cast<arith::CmpFOp>(block.front());
-    if (!cmpOp || cmpOp.getPredicate() != arith::CmpFPredicate::UGT)
-        return false;
-    auto inArg = dyn_cast<BlockArgument>(cmpOp.getLhs());
-    auto cstMin = cmpOp.getRhs().getDefiningOp<arith::ConstantOp>();
-    if (!inArg || inArg.getArgNumber() != 0 || !cstMin)
-        return false;
-
-    // Second op: arith.select %cmp, %arg0, %cst
-    auto selOp = dyn_cast<arith::SelectOp>(cmpOp->getNextNode());
-    if (!selOp || selOp.getCondition() != cmpOp.getResult())
-        return false;
-    auto selTrueArg = dyn_cast<BlockArgument>(selOp.getTrueValue());
-    if (!selTrueArg || selTrueArg.getArgNumber() != 0)
-        return false;
-    if (!selOp.getFalseValue().getDefiningOp<arith::ConstantOp>())
-        return false;
-
-    // Third op: linalg.yield %sel
-    auto yieldOp = dyn_cast<linalg::YieldOp>(selOp->getNextNode());
-    if (!yieldOp || yieldOp.getValues().size() != 1 || yieldOp.getValues()[0] != selOp.getResult())
-        return false;
-
-    info.variant = ClampVariant::ReLU;
-    info.minFloat = toFloat(cstMin);
-    info.maxFloat = std::numeric_limits<float>::max();
-    return true;
-}
-
-// Operands of a `select(cmpf(pred, cmpLhs, cmpRhs), selTrue, selFalse)`.
-struct SelectCmpF {
-    arith::CmpFPredicate pred;
-    Value cmpLhs, cmpRhs, selTrue, selFalse;
-};
-
-// Match `v = select(cmpf(...), ...)` and return its select/compare operands.
-static std::optional<SelectCmpF> matchSelectCmpF(Value v) {
-    auto sel = v.getDefiningOp<arith::SelectOp>();
-    if (!sel)
-        return std::nullopt;
-    auto cmp = sel.getCondition().getDefiningOp<arith::CmpFOp>();
-    if (!cmp)
-        return std::nullopt;
-    return SelectCmpF{
-        cmp.getPredicate(), cmp.getLhs(), cmp.getRhs(), sel.getTrueValue(), sel.getFalseValue()
-    };
-}
-
-static bool isDataArg(Value v) {
-    auto arg = dyn_cast<BlockArgument>(v);
-    return arg && arg.getArgNumber() == 0;
-}
-
-// Fused relu/relu6 clamp followed by an f32->bf16 truncf, as produced by
-// FuseReluClampWithTruncfPattern:
-//
-//   %0 = linalg.generic ... ins(%in : tensor<Nxf32>) outs(%out : tensor<Nxbf16>) {
-//   ^bb0(%arg0: f32, %arg1: bf16):
-//     // relu6:  s0 = max(in, low); clamped = min(s0, high)   (ult/ugt + selects)
-//     // relu:   clamped = max(in, low)                        (ugt + select)
-//     %t = arith.truncf %clamped : f32 to bf16
-//     linalg.yield %t : bf16
-//   }
-//
-// The clamp is computed in f32 and the result truncated to bf16. This lowers to a
-// single torq_hl.act that clamps with float bounds and emits bf16, which keeps the
-// op on the NSS slice instead of leaving an fp32 elementwise generic that only the
-// Host/CSS path can run.
-static bool matchFusedClampTruncf(linalg::GenericOp srcOp, ClampInfo &info) {
-    if (srcOp.getInputs().size() != 1 || srcOp.getOutputs().size() != 1)
-        return false;
-    auto inputType = dyn_cast<RankedTensorType>(srcOp.getInputs()[0].getType());
-    auto outputType = dyn_cast<RankedTensorType>(srcOp.getResultTypes()[0]);
-    if (!inputType || !outputType)
-        return false;
-    // The fusion only emits an f32-in / bf16-out body.
-    if (!inputType.getElementType().isF32() || !outputType.getElementType().isBF16())
-        return false;
-
-    auto yieldOp = dyn_cast<linalg::YieldOp>(srcOp.getRegion().front().getTerminator());
-    if (!yieldOp || yieldOp.getValues().size() != 1)
-        return false;
-
-    // Body ends with truncf f32 -> bf16 of the clamp result.
-    auto truncfOp = yieldOp.getValues()[0].getDefiningOp<arith::TruncFOp>();
-    if (!truncfOp || !truncfOp.getIn().getType().isF32() || !truncfOp.getType().isBF16())
-        return false;
-
-    std::optional<SelectCmpF> outer = matchSelectCmpF(truncfOp.getIn());
-    if (!outer || outer->pred != arith::CmpFPredicate::UGT)
-        return false;
-
-    // relu6: outer = min(s0, high) = select(ugt(s0, high), high, s0),
-    //        inner = max(in, low)  = select(ult(in, low), low, in).
-    if (outer->selTrue == outer->cmpRhs && outer->cmpLhs == outer->selFalse) {
-        auto highCst = outer->cmpRhs.getDefiningOp<arith::ConstantOp>();
-        std::optional<SelectCmpF> inner = matchSelectCmpF(outer->selFalse);
-        if (highCst && inner && inner->pred == arith::CmpFPredicate::ULT &&
-            inner->selTrue == inner->cmpRhs && inner->cmpLhs == inner->selFalse &&
-            isDataArg(inner->selFalse)) {
-            if (auto lowCst = inner->cmpRhs.getDefiningOp<arith::ConstantOp>()) {
-                info.variant = ClampVariant::Unordered;
-                info.minFloat = toFloat(lowCst);
-                info.maxFloat = toFloat(highCst);
-                return true;
-            }
-        }
-    }
-
-    // simple relu: max(in, low) = select(ugt(in, low), in, low).
-    if (isDataArg(outer->cmpLhs) && outer->selTrue == outer->cmpLhs &&
-        outer->selFalse == outer->cmpRhs) {
-        if (auto lowCst = outer->cmpRhs.getDefiningOp<arith::ConstantOp>()) {
-            info.variant = ClampVariant::ReLU;
-            info.minFloat = toFloat(lowCst);
-            info.maxFloat = std::numeric_limits<float>::max();
-            return true;
-        }
-    }
-
-    return false;
-}
-
+// Float clamp: the canonical matcher (matchFloatClampRange) recognizes every
+// float clamp form -- one- and two-sided, cmpf/select or min/max, ordered or
+// unordered, bounds inlined / outer / constant tensor inputs, data in any
+// input position, optional trailing width conversion -- and lowers to the same
+// single torq_hl.act clamp as the integer form.
 static bool matchClamp(linalg::GenericOp srcOp, ClampInfo &info) {
-    return matchOrderedClamp(srcOp, info) || matchNaiveOrderedClamp(srcOp, info) ||
-           matchUnorderedClamp(srcOp, info) || matchUnorderedClampConstInputs(srcOp, info) ||
-           matchReLU(srcOp, info) || matchFusedClampTruncf(srcOp, info);
+    if (auto range = matchFloatClampRange(srcOp)) {
+        info.variant = ClampVariant::Float;
+        info.minFloat = range->lo;
+        info.maxFloat = range->hi;
+        info.dataInputIdx = range->dataInputIdx;
+        return true;
+    }
+    return matchIntClamp(srcOp, info);
 }
 
 struct ClampOpConversion : public OpRewritePattern<linalg::GenericOp> {
@@ -469,7 +96,7 @@ struct ClampOpConversion : public OpRewritePattern<linalg::GenericOp> {
             llvm::dbgs() << "\n";
         });
 
-        Value input = srcOp.getInputs()[0];
+        Value input = srcOp.getInputs()[clampInfo.dataInputIdx];
         Value output = srcOp.getResultTensors()[0];
 
         // The clamp's own result, captured before buildFusionPlanAndRebindOutput()

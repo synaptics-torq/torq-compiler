@@ -1230,37 +1230,303 @@ bool foldBackwardRescale(Value &value, ScaleInfo &scaleInfo) {
     return true;
 }
 
-// If user of output is a linalg.generic whose body contains
-// an arith.truncf, if its output is BF16 truncation pattern and
-// forward `output` to that genericOp's result.
+// ---------------------------------------------------------------------------
+// Float clamp matching
+//
+// A float clamp is one or two chained bound applications over a single data
+// input:
+//
+//   min:  arith.minimumf(data, c)      or      select(cmpf olt/ult a b, a, b)
+//   max:  arith.maximumf(data, c)      or      select(cmpf ogt/ugt a b, a, b)
+//
+// (either operand order). The bound `c` resolves to a float constant through
+// traceToConstFloat: an outer constant (or an outer arith.truncf/extf of one)
+// captured by the body, or a 0-d / 1-element constant tensor input (or an
+// outer width cast of one). The op-count check below requires the body to be
+// exactly the clamp itself, so an in-body arith.constant or an in-body width
+// cast for a bound is rejected -- canonicalization hoists such constants out
+// of the body, so this is only a theoretical concern.
+// A one-sided clamp leaves the other bound open at the float range limit.
+
+namespace {
+
+// One bound application: computes min(data, bound) or max(data, bound) with a
+// resolvable constant bound. Sets isMin/bound/data on success; increments
+// consumedOps by the number of body ops the application uses.
+bool matchFloatBoundApplication(
+    linalg::GenericOp op, Block &block, Value v, bool &isMin, float &bound, Value &data,
+    int &consumedOps
+) {
+    Operation *def = v.getDefiningOp();
+    if (!def || def->getBlock() != &block)
+        return false;
+
+    // Exactly one of the two operands resolves to a (non-NaN) float constant;
+    // the other is the running data value.
+    auto resolve = [&](Value a, Value b) {
+        auto ca = traceToConstFloat(op, a, SplatPolicy::SingleElement);
+        auto cb = traceToConstFloat(op, b, SplatPolicy::SingleElement);
+        if (ca.has_value() == cb.has_value())
+            return false;
+        if (ca) {
+            data = b;
+            bound = ca->convertToFloat();
+        }
+        else {
+            data = a;
+            bound = cb->convertToFloat();
+        }
+        return !std::isnan(bound);
+    };
+
+    if (auto mnmx = dyn_cast<arith::MinimumFOp>(def)) {
+        isMin = true;
+        consumedOps += 1;
+        return resolve(mnmx.getLhs(), mnmx.getRhs());
+    }
+    if (auto mnmx = dyn_cast<arith::MaximumFOp>(def)) {
+        isMin = false;
+        consumedOps += 1;
+        return resolve(mnmx.getLhs(), mnmx.getRhs());
+    }
+
+    auto sel = dyn_cast<arith::SelectOp>(def);
+    if (!sel)
+        return false;
+    auto cmp = sel.getCondition().getDefiningOp<arith::CmpFOp>();
+    if (!cmp || cmp->getBlock() != &block)
+        return false;
+
+    Value a = cmp.getLhs(), b = cmp.getRhs();
+    // The select's values must be exactly the compare's operands, so the result
+    // is min(a, b) or max(a, b) depending on predicate and order.
+    if (sel.getTrueValue() != a && sel.getTrueValue() != b)
+        return false;
+    if (sel.getFalseValue() != a && sel.getFalseValue() != b)
+        return false;
+    if (sel.getTrueValue() == sel.getFalseValue())
+        return false;
+
+    auto pred = cmp.getPredicate();
+    bool isLt = pred == arith::CmpFPredicate::OLT || pred == arith::CmpFPredicate::ULT;
+    bool isGt = pred == arith::CmpFPredicate::OGT || pred == arith::CmpFPredicate::UGT;
+    if (!isLt && !isGt)
+        return false;
+
+    consumedOps += 2;
+    if (!resolve(a, b))
+        return false;
+    // select(a LT b, a, b) = min, select(a LT b, b, a) = max;
+    // select(a GT b, a, b) = max, select(a GT b, b, a) = min.
+    isMin = isLt ? sel.getTrueValue() == a : sel.getTrueValue() == b;
+    return true;
+}
+
+// A pure f32 -> bf16 width-conversion generic: body exactly
+// {arith.truncf %in, linalg.yield}, same shape in and out.
+bool isWidthConvertGeneric(linalg::GenericOp op) {
+    if (op.getNumDpsInputs() != 1 || op.getNumDpsInits() != 1 || !op.getRegion().hasOneBlock())
+        return false;
+    if (op.getNumParallelLoops() != op.getNumLoops())
+        return false;
+    auto inTy = dyn_cast<RankedTensorType>(op.getInputs()[0].getType());
+    auto outTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!inTy || !outTy || inTy.getShape() != outTy.getShape() || !inTy.getElementType().isF32() ||
+        !outTy.getElementType().isBF16())
+        return false;
+    auto &block = op.getRegion().front();
+    if (block.getOperations().size() != 2)
+        return false;
+    auto yieldOp = dyn_cast<linalg::YieldOp>(block.getTerminator());
+    if (!yieldOp || yieldOp.getNumOperands() != 1)
+        return false;
+    auto truncf = yieldOp.getOperand(0).getDefiningOp<arith::TruncFOp>();
+    if (!truncf)
+        return false;
+    auto arg = dyn_cast<BlockArgument>(truncf.getIn());
+    return arg && arg.getOwner() == &block && arg.getArgNumber() == 0;
+}
+
+// A tail add/sub with a scalar constant: body exactly
+// {arith.addf|arith.subf (data, const) in either order, linalg.yield}, same
+// type in and out, and identity indexing maps on the data input and the
+// output. Returns the ACT bias the op applies (the constant, negated for
+// sub). `value` must be the data input. `c - data` is rejected: the ACT bias
+// cannot flip the sign of the data.
+std::optional<float> matchTailScalarConstAdd(linalg::GenericOp op, Value value) {
+    if (op.getNumDpsInits() != 1 || op.getNumResults() != 1 || !op.getRegion().hasOneBlock())
+        return std::nullopt;
+    if (op.getNumDpsInputs() < 1 || op.getNumDpsInputs() > 2)
+        return std::nullopt;
+    if (op.getNumParallelLoops() != op.getNumLoops())
+        return std::nullopt;
+
+    auto inTy = dyn_cast<RankedTensorType>(value.getType());
+    auto outTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!inTy || !outTy || inTy != outTy)
+        return std::nullopt;
+
+    auto &block = op.getRegion().front();
+    if (block.getOperations().size() != 2)
+        return std::nullopt;
+    auto yieldOp = dyn_cast<linalg::YieldOp>(block.getTerminator());
+    if (!yieldOp || yieldOp.getNumOperands() != 1)
+        return std::nullopt;
+    Operation *yieldDef = yieldOp.getOperand(0).getDefiningOp();
+    if (!yieldDef)
+        return std::nullopt;
+    auto add = dyn_cast<arith::AddFOp>(yieldDef);
+    auto sub = dyn_cast<arith::SubFOp>(yieldDef);
+    if (!add && !sub)
+        return std::nullopt;
+    Value x = (add ? add->getOperand(0) : sub->getOperand(0));
+    Value y = (add ? add->getOperand(1) : sub->getOperand(1));
+
+    auto dataArg = dyn_cast<BlockArgument>(x);
+    bool dataIsX = dataArg && dataArg.getOwner() == &block &&
+                   dataArg.getArgNumber() < op.getNumDpsInputs() &&
+                   op.getInputs()[dataArg.getArgNumber()] == value;
+    unsigned dataArgNo = dataIsX ? dataArg.getArgNumber() : 0;
+    if (!dataIsX) {
+        auto argY = dyn_cast<BlockArgument>(y);
+        dataIsX = false;
+        if (!(argY && argY.getOwner() == &block && argY.getArgNumber() < op.getNumDpsInputs() &&
+              op.getInputs()[argY.getArgNumber()] == value))
+            return std::nullopt;
+        dataArgNo = argY.getArgNumber();
+    }
+    // The fold replaces the op with a plain elementwise ACT bias, so the data
+    // input and the output must be identity-mapped: a permuted map on a square
+    // tensor, e.g. (d0, d1) -> (d1, d0), would be silently dropped.
+    if (!op.getIndexingMapsArray()[dataArgNo].isIdentity() ||
+        !op.getIndexingMapsArray()[op.getNumDpsInputs()].isIdentity())
+        return std::nullopt;
+    Value constOperand = dataIsX ? y : x;
+    auto cf = traceToConstFloat(op, constOperand, SplatPolicy::SingleElement);
+    if (!cf || std::isnan(cf->convertToFloat()))
+        return std::nullopt;
+    float bias = cf->convertToFloat();
+    if (sub) {
+        if (!dataIsX)
+            return std::nullopt; // const - data: sign flip, not an ACT bias
+        bias = -bias;
+    }
+    return bias;
+}
+
+} // namespace
+
+// If the single user of `value` is a pure f32 -> bf16 width-conversion generic,
+// advance `value` to its result (the conversion is fused into the consumer's ACT).
 static void foldForwardTruncFOp(Value &value) {
     if (auto genericOp = getSingleUser<linalg::GenericOp>(value)) {
-        Block *body = genericOp.getBody();
-
-        // Strict check: body has a truncf
-        if (isa<arith::TruncFOp>(body->front())) {
-            if (dyn_cast<arith::TruncFOp>(body->front()).getOut().getType().isBF16()) {
-                value = genericOp.getResult(0);
-            }
-            else {
-                LLVM_DEBUG({ llvm::dbgs() << "truncFOp output type request bf16\n"; });
-            }
-        }
+        if (isWidthConvertGeneric(genericOp))
+            value = genericOp.getResult(0);
     }
 }
 
-// ScaleClamp is normally expressed as a linalg generic with the following body for integer:
-// ^bb0(%in: i32, %in_3: i32, %in_4: i8, %out: i8):
-//  [%16 = arith.subi %in, %c196_i32 : i32] optional
-//   %17 = tosa.apply_scale %16, %in_3, %in_4 {double_round = true} : (i32, i32, i8) -> i32
-//   %18 = arith.addi %17, %c-128_i32 : i32
-//   %19 = arith.maxsi %18, %c-128_i32 : i32
-//   %20 = arith.minsi %19, %c127_i32 : i32
-//   %21 = arith.trunci %20 : i32 to i8
-//   linalg.yield %21 : i8
-// The 2nd and 3rd args to apply_scale can be vectors or scalars
-// The addi is used to add the zero point and is optional
+std::optional<FloatClampRange> matchFloatClampRange(linalg::GenericOp op) {
+    if (!op)
+        return std::nullopt;
+    if (op.getNumDpsInits() != 1 || op.getNumResults() != 1 || !op.getRegion().hasOneBlock())
+        return std::nullopt;
+    if (op.getNumParallelLoops() != op.getNumLoops())
+        return std::nullopt;
+    if (op.getNumDpsInputs() < 1 || op.getNumDpsInputs() > 3)
+        return std::nullopt;
 
+    auto resultTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    if (!resultTy)
+        return std::nullopt;
+    Type resultElem = resultTy.getElementType();
+    if (!resultElem.isF32() && !resultElem.isBF16())
+        return std::nullopt;
+
+    Block &block = op.getRegion().front();
+    auto yieldOp = dyn_cast<linalg::YieldOp>(block.getTerminator());
+    if (!yieldOp || yieldOp.getNumOperands() != 1)
+        return std::nullopt;
+
+    int consumedOps = 1; // the yield
+    Value v = yieldOp.getOperand(0);
+
+    // Optional trailing width conversion of the clamped value into the result
+    // element type (the f32-clamp -> bf16-result form).
+    bool convertsWidth = false;
+    if (Operation *vDef = v.getDefiningOp()) {
+        if (auto conv = dyn_cast<arith::TruncFOp>(vDef)) {
+            v = conv.getIn();
+            convertsWidth = true;
+            consumedOps++;
+        }
+        else if (auto conv = dyn_cast<arith::ExtFOp>(vDef)) {
+            v = conv.getIn();
+            convertsWidth = true;
+            consumedOps++;
+        }
+    }
+
+    float lo = std::numeric_limits<float>::lowest();
+    float hi = std::numeric_limits<float>::max();
+    int applications = 0;
+
+    // Walk the bound applications backward from the yield. The first one met
+    // is the outer (its data is the inner application's result); only the
+    // final `v` after the loop is the data input's block argument.
+    while (true) {
+        bool isMin;
+        float bound;
+        Value data;
+        if (!matchFloatBoundApplication(op, block, v, isMin, bound, data, consumedOps))
+            break;
+        applications++;
+        if (applications > 2)
+            return std::nullopt;
+        if (isMin)
+            hi = std::min(hi, bound);
+        else
+            lo = std::max(lo, bound);
+        v = data;
+    }
+
+    if (applications < 1)
+        return std::nullopt;
+    if (lo > hi)
+        return std::nullopt;
+
+    // The innermost data must be a block argument (the data input).
+    auto dataArg = dyn_cast<BlockArgument>(v);
+    if (!dataArg || dataArg.getOwner() != &block || dataArg.getArgNumber() >= op.getNumDpsInputs())
+        return std::nullopt;
+    unsigned dataInputIdx = dataArg.getArgNumber();
+
+    // The body must be exactly the clamp (nothing else computes into it).
+    if (static_cast<int>(block.getOperations().size()) != consumedOps)
+        return std::nullopt;
+
+    // The data input is elementwise with the result: identity map, same shape,
+    // and (without a trailing conversion) the same element type.
+    auto dataTy = dyn_cast<RankedTensorType>(op.getInputs()[dataInputIdx].getType());
+    if (!dataTy || dataTy.getShape() != resultTy.getShape())
+        return std::nullopt;
+    if (!op.getIndexingMapsArray()[dataInputIdx].isIdentity() ||
+        !op.getIndexingMapsArray()[op.getNumDpsInputs()].isIdentity())
+        return std::nullopt;
+    if (!convertsWidth && dataTy.getElementType() != resultElem)
+        return std::nullopt;
+    if (convertsWidth && dataTy.getElementType() == resultElem)
+        return std::nullopt;
+
+    return FloatClampRange{lo, hi, dataInputIdx, convertsWidth};
+}
+
+// Forward float ACT tail: from the producer's result, walk the single-user
+// elementwise tail in ACT order (the ACT computes clamp(data * weight + bias,
+// lo, hi)):
+//   [f32->bf16 width conversion] [scalar const add/sub -> sci.floatBias]
+//   [one- or two-sided clamp(s) -> sci.min/max f32 bit patterns]
+// advancing `value` to the tail end and recording the consumed ops in
+// sci.floatTailOps for the consumer to replace/erase.
 static ScaleClampInfo foldForwardFloatTruncClamp(Value &value) {
     ScaleClampInfo sci;
     auto valueType = dyn_cast<ShapedType>(value.getType());
@@ -1273,80 +1539,56 @@ static ScaleClampInfo foldForwardFloatTruncClamp(Value &value) {
         return {};
     }
 
-    // For floating point tensors the scale operation is not mandatory so we initialize
-    // it with meaningful default values
+    // For floating point tensors the scale operation is not mandatory so we
+    // initialize with the open clip range (full float range).
     float max = std::numeric_limits<float>::max();
     sci.max = reinterpret_cast<int32_t &>(max);
     float min = std::numeric_limits<float>::lowest();
     sci.min = reinterpret_cast<int32_t &>(min);
 
-    foldForwardTruncFOp(value);
-
-    // check output clamp
-    valueType = dyn_cast<ShapedType>(value.getType());
-    if (!valueType) {
-        LLVM_DEBUG({ llvm::errs() << "matching error value is not a ShapedType!\n"; });
-        return {};
+    // Step 1: a pure f32 -> bf16 width conversion generic.
+    if (auto g = getSingleUser<linalg::GenericOp>(value)) {
+        if (isWidthConvertGeneric(g)) {
+            value = g.getResult(0);
+            sci.floatTailOps.push_back(g.getOperation());
+        }
     }
 
-    if (valueType.getElementType().isBF16()) {
-
-        linalg::GenericOp maybeClampOp = getSingleUser<linalg::GenericOp>(value);
-        if (!maybeClampOp) {
-            LLVM_DEBUG({
-                llvm::dbgs() << "must have a single GenericOp of cmp and select for clamp\n";
-            });
-            return sci;
-        }
-
-        if (maybeClampOp.getNumDpsInits() != 1 || maybeClampOp.getNumDpsInputs() != 1) {
-            LLVM_DEBUG({
-                llvm::dbgs() << "must have a single GenericOp of cmp and select for clamp\n";
-            });
-            return sci;
-        }
-
-        auto yieldOp = dyn_cast<linalg::YieldOp>(maybeClampOp.getBody()->getTerminator());
-        if (!yieldOp) {
-            LLVM_DEBUG({ llvm::dbgs() << "matching error yieldOp is not a yield!\n"; });
-            return sci;
-        }
-
-        // relax clamp check: iterate genericOp to find two selectOp otherwise it is not clampOp
-        Region &bodyRegion = maybeClampOp->getRegion(0);
-        Block &entryBlock = bodyRegion.front();
-        SmallVector<float, 2> vals;
-
-        // TODO: if there are more than 2 selectOp for some algo, need to add more check
-        int cnt = 2;
-
-        for (Operation &op : entryBlock) {
-
-            if (op.hasTrait<OpTrait::IsTerminator>())
-                continue;
-
-            if (auto selectOp = dyn_cast<arith::SelectOp>(op)) {
-                if (cnt <= 0) {
-                    llvm::errs() << "NOTE: there are more than 2 selectOp for clamp op\n";
-                }
-                cnt--;
-
-                auto trueValue = selectOp.getTrueValue();
-                auto val = getFloatValue(trueValue);
-                if (!val) {
-                    continue;
-                }
-                vals.push_back(*val);
+    // The ACT clip path is exercised for bf16 producers only (the f32 elementwise
+    // producers stay on the Host/CSS fallback), so keep the working type bf16.
+    if (cast<ShapedType>(value.getType()).getElementType().isBF16()) {
+        // Step 2: a scalar const add/sub (the ACT bias). Only before any clamp:
+        // the ACT adds the bias before clipping.
+        if (auto g = getSingleUser<linalg::GenericOp>(value)) {
+            if (auto bias = matchTailScalarConstAdd(g, value)) {
+                sci.floatBias = *bias;
+                value = g.getResult(0);
+                sci.floatTailOps.push_back(g.getOperation());
             }
         }
 
-        if (!vals.empty() && vals.size() == 2 && vals[0] != vals[1]) {
-            sci.max = llvm::bit_cast<uint32_t>(vals[0] > vals[1] ? vals[0] : vals[1]);
-            sci.min = llvm::bit_cast<uint32_t>(vals[0] < vals[1] ? vals[0] : vals[1]);
-
-            value = maybeClampOp.getResult(0);
+        // Step 3: one-sided and two-sided clamps, composed.
+        while (auto g = getSingleUser<linalg::GenericOp>(value)) {
+            auto range = matchFloatClampRange(g);
+            // A width-converting clamp (bf16 in / f32 out, the form where a
+            // final ReLU/clamp is fused with the f32 conversion of a bf16
+            // output) would end the tail on a different type than the producer;
+            // stop before it so consumers keep the bf16 tail they expect.
+            if (!range || range->convertsWidth || g.getInputs()[range->dataInputIdx] != value)
+                break;
+            float lo = llvm::bit_cast<float>(sci.min);
+            float hi = llvm::bit_cast<float>(sci.max);
+            sci.min = llvm::bit_cast<int32_t>(std::max(lo, range->lo));
+            sci.max = llvm::bit_cast<int32_t>(std::min(hi, range->hi));
+            value = g.getResult(0);
+            sci.floatTailOps.push_back(g.getOperation());
         }
-        LLVM_DEBUG({ llvm::dbgs() << "sci.max: " << sci.max << " sci.min: " << sci.min << "\n"; });
+
+        LLVM_DEBUG({
+            llvm::dbgs() << "foldForwardFloatTail: lo=" << llvm::bit_cast<float>(sci.min)
+                         << " hi=" << llvm::bit_cast<float>(sci.max)
+                         << " bias=" << (sci.floatBias ? *sci.floatBias : 0.0f) << "\n";
+        });
     }
 
     return sci;
@@ -1595,6 +1837,17 @@ static int maxCommonScaleShift(ArrayRef<int32_t> multiplier, ArrayRef<int8_t> to
     return shift;
 }
 
+// ScaleClamp is normally expressed as a linalg generic with the following body for integer:
+// ^bb0(%in: i32, %in_3: i32, %in_4: i8, %out: i8):
+//  [%16 = arith.subi %in, %c196_i32 : i32] optional
+//   %17 = tosa.apply_scale %16, %in_3, %in_4 {double_round = true} : (i32, i32, i8) -> i32
+//   %18 = arith.addi %17, %c-128_i32 : i32
+//   %19 = arith.maxsi %18, %c-128_i32 : i32
+//   %20 = arith.minsi %19, %c127_i32 : i32
+//   %21 = arith.trunci %20 : i32 to i8
+//   linalg.yield %21 : i8
+// The 2nd and 3rd args to apply_scale can be vectors or scalars
+// The addi is used to add the zero point and is optional
 ScaleClampInfo foldForwardScaleClamp(
     Value &value, int scaleValuesCount, int shift8b, int shift16b, bool isElementWiseOp
 ) {
@@ -2991,10 +3244,21 @@ Operation *getElementwiseBinaryOp(linalg::GenericOp op, bool allowConstants) {
         rhs = extsi.getIn();
     }
 
+    // The two operands are block args (data) or constants. With
+    // allowConstants a constant may also be width-cast in the body
+    // (arith.truncf/extf of an in-body/outer constant or of a 0-d constant
+    // tensor input) -- the importer decomposes f32 scalars over bf16 data
+    // that way; traceToConstFloat/Int fold the cast at pattern time.
+    auto isConstLike = [&](Value v) {
+        return traceToConstFloat(op, v, SplatPolicy::SingleElement).has_value() ||
+               traceToConstInt(op, v, SplatPolicy::SingleElement).has_value();
+    };
     bool lhsOK =
-        isa<BlockArgument>(lhs) || (allowConstants && isa<arith::ConstantOp>(lhs.getDefiningOp()));
+        isa<BlockArgument>(lhs) ||
+        (allowConstants && (isa<arith::ConstantOp>(lhs.getDefiningOp()) || isConstLike(lhs)));
     bool rhsOK =
-        isa<BlockArgument>(rhs) || (allowConstants && isa<arith::ConstantOp>(rhs.getDefiningOp()));
+        isa<BlockArgument>(rhs) ||
+        (allowConstants && (isa<arith::ConstantOp>(rhs.getDefiningOp()) || isConstLike(rhs)));
     if (!(lhsOK && rhsOK)) {
         LLVM_DEBUG({
             llvm::dbgs() << "lhs is block arg: " << lhsOK << ", rhsOK is block arg: " << rhsOK

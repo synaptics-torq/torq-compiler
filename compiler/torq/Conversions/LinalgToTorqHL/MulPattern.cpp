@@ -24,71 +24,6 @@
 
 namespace mlir::syna::torq {
 
-static Value create1DimTensorFromScalar(
-    arith::ConstantOp constOp, const Type &elementType, PatternRewriter &rewriter
-) {
-    if (!constOp)
-        return {};
-
-    if (elementType.isInteger()) {
-
-        int32_t data = 0;
-        if (!getIntegerConstantValue(constOp, &data)) {
-            llvm::errs() << "cannot get constant value\n";
-            return {};
-        }
-
-        RankedTensorType constType = RankedTensorType::get({1}, elementType);
-        DenseElementsAttr value;
-
-        if (elementType.isInteger(16)) {
-            value = DenseIntElementsAttr::get(constType, static_cast<int16_t>(data));
-        }
-        else if (elementType.isInteger(32)) {
-            value = DenseIntElementsAttr::get(constType, data);
-        }
-        else if (elementType.isInteger(8))
-            value = DenseIntElementsAttr::get(constType, static_cast<int8_t>(data));
-        else {
-            return {};
-        }
-
-        return arith::ConstantOp::create(rewriter, constOp.getLoc(), constType, value).getResult();
-    }
-    else if (elementType.isBF16() || elementType.isF32()) {
-
-        auto attr = constOp.getValue();
-        RankedTensorType constType = RankedTensorType::get({1}, elementType);
-        DenseElementsAttr value;
-
-        if (auto fpAttr = dyn_cast<FloatAttr>(attr)) {
-            value = DenseElementsAttr::get(constType, fpAttr.getValue());
-        }
-        else if (auto denseAttr = dyn_cast<DenseFPElementsAttr>(attr)) {
-            if (denseAttr.isSplat()) {
-                value = DenseElementsAttr::get(constType, denseAttr.getSplatValue<APFloat>());
-            }
-            else if (denseAttr.getType() == constType) {
-                value = denseAttr;
-            }
-            else {
-                llvm::errs() << "constant is not scalar \n";
-                return {};
-            }
-        }
-        else {
-            llvm::errs() << "unsupported constant type \n";
-            return {};
-        }
-
-        return arith::ConstantOp::create(rewriter, constOp.getLoc(), constType, value).getResult();
-    }
-    else {
-        return {};
-    }
-    return {};
-}
-
 class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
   private:
     const bool _markFuseGroups;
@@ -152,28 +87,73 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
         auto lhs = mulOp->getOperand(0);
         auto rhs = mulOp->getOperand(1);
 
-        auto constOp = lhs.getDefiningOp<arith::ConstantOp>();
-        if (constOp) {
-            input2 = input1;
-            input1 = nullptr;
-        }
-        else {
-            constOp = rhs.getDefiningOp<arith::ConstantOp>();
-            if (constOp) {
-                input2 = nullptr;
+        // A constant operand may be inlined in the body, an outer constant
+        // referenced from it, a single-element constant tensor input, or a
+        // width cast (arith.truncf/extf) of any of those -- the importer
+        // decomposes f32 scalars over bf16 data that way. The traced value
+        // already carries the cast the body applies, so the 1-element tensor
+        // built here is exactly what the old direct-constant path built.
+        auto constValue = [&](Value v) -> Value {
+            if (auto f = traceToConstFloat(srcOp, v, SplatPolicy::SingleElement))
+                // The traced value carries the body's element semantics, which
+                // is the input element type for a type-correct mulf/muli.
+                return createConst(std::vector<APFloat>{*f}, rewriter, srcOp.getLoc());
+            if (auto i = traceToConstInt(srcOp, v, SplatPolicy::SingleElement)) {
+                // DenseIntElementsAttr requires values of the element's bit
+                // width; traceToConstInt sign-extends to i64.
+                auto intTy = dyn_cast<IntegerType>(input1ElementType);
+                if (!intTy)
+                    return {};
+                RankedTensorType constType = RankedTensorType::get({1}, input1ElementType);
+                Attribute value;
+                if (intTy.getWidth() == 8)
+                    value = DenseIntElementsAttr::get(constType, static_cast<int8_t>(*i));
+                else if (intTy.getWidth() == 16)
+                    value = DenseIntElementsAttr::get(constType, static_cast<int16_t>(*i));
+                else if (intTy.getWidth() == 32)
+                    value = DenseIntElementsAttr::get(constType, static_cast<int32_t>(*i));
+                else
+                    value = DenseIntElementsAttr::get(constType, *i);
+                return arith::ConstantOp::create(rewriter, srcOp.getLoc(), cast<TypedAttr>(value))
+                    .getResult();
             }
+            return {};
+        };
+
+        Value lhsCst = constValue(lhs);
+        if (lhsCst) {
+            input2 = input1;
+            input1 = lhsCst;
+        }
+        else if (Value rhsCst = constValue(rhs)) {
+            input2 = rhsCst;
         }
 
-        if (constOp) {
-            Value v = create1DimTensorFromScalar(constOp, input1ElementType, rewriter);
-            if (!v) {
-                return rewriter.notifyMatchFailure(srcOp, "");
-            }
-            if (input1 == nullptr) {
-                input1 = v;
-            }
-            else {
-                input2 = v;
+        // Float tail fold: for bf16 the ACT computes data * weight + floatBias
+        // clamped to [lo, hi], so a trailing scalar add and/or clamp(s) are
+        // absorbed into the torq_hl.mul (f32 bias record in BRAM + f32 clip
+        // bit patterns) and the consumed generics are dropped. input1/input2
+        // carry the extracted constant weight, if any.
+        if (scInfo.hasFloatTail()) {
+            auto tailOutType = cast<RankedTensorType>(output.getType());
+            if (tailOutType.getElementType().isBF16()) {
+                std::vector<float> biasF32{scInfo.floatBias.value_or(0.0f)};
+                Value biasCst = createConst(biasF32, rewriter, srcOp.getLoc());
+                Value torqOut = torq_hl::MulOp::create(
+                                    rewriter, srcOp.getLoc(), tailOutType,
+                                    createInitTensor(srcOp, rewriter, tailOutType),
+                                    /*output_zp=*/0, scInfo.min, scInfo.max, biasCst, /*shift=*/0,
+                                    input1, input2
+                )
+                                    .getResult(0);
+                rewriter.replaceOp(output.getDefiningOp(), torqOut);
+                // Mark every consumed tail op: the driver must not reprocess it
+                // as a root (a second rewrite of the same op would double-commit).
+                for (auto *op : llvm::reverse(scInfo.floatTailOps))
+                    if (op != output.getDefiningOp())
+                        rewriter.eraseOp(op);
+                rewriter.eraseOp(srcOp);
+                return success();
             }
         }
 
@@ -278,6 +258,41 @@ class MulPerChannelBiasPattern : public OpRewritePattern<linalg::GenericOp> {
 
         Value output = addOp.getResult(0);
         ScaleClampInfo scInfo = foldForwardScaleClamp(output, 1, 12, 12);
+
+        auto biasCst = bias.getDefiningOp<arith::ConstantOp>();
+        auto dense = dyn_cast_or_null<DenseFPElementsAttr>(biasCst ? biasCst.getValue() : nullptr);
+
+        // A scalar add folded from the tail can only be absorbed into the
+        // per-channel bias when that bias is a compile-time constant with an
+        // inlined (Dense) value: a dense_resource blob (how ONNX initializers
+        // usually arrive) cannot be rebuilt, and absorbing would silently drop
+        // the +k. Keep the add (and anything past it) alive otherwise:
+        // AddOpPattern picks the chain up from there, clamp and all.
+        if (scInfo.floatBias && !dense) {
+            scInfo.floatTailOps.clear();
+            scInfo.floatBias = std::nullopt;
+            float fullLo = std::numeric_limits<float>::lowest();
+            float fullHi = std::numeric_limits<float>::max();
+            scInfo.min = llvm::bit_cast<int32_t>(fullLo);
+            scInfo.max = llvm::bit_cast<int32_t>(fullHi);
+            output = addOp.getResult(0);
+        }
+        if (scInfo.floatBias) {
+            // Absorb the tail's scalar add into the per-channel bias constant,
+            // rebuilt in f32 (the BRAM bias type) to avoid an extra rounding.
+            auto biasTy = cast<RankedTensorType>(bias.getType());
+            auto f32Ty = RankedTensorType::get(biasTy.getShape(), rewriter.getF32Type());
+            SmallVector<APFloat> elems;
+            for (APFloat f : dense.getValues<APFloat>()) {
+                APFloat f32(f.convertToFloat());
+                f32.add(APFloat(*scInfo.floatBias), APFloat::rmNearestTiesToEven);
+                elems.push_back(f32);
+            }
+            bias = arith::ConstantOp::create(
+                       rewriter, srcOp.getLoc(), DenseFPElementsAttr::get(f32Ty, elems)
+            )
+                       .getResult();
+        }
         SmallVector<Operation *> foldedOps;
         for (Value current = addOp.getResult(0); current != output;) {
             Operation *next = getSingleUser(current);
@@ -323,7 +338,7 @@ class MulPerChannelBiasPattern : public OpRewritePattern<linalg::GenericOp> {
         }
 
         auto [outMin, outMax] = getDTypeRange(outType.getElementType());
-        if (!foldedOps.empty()) {
+        if (!foldedOps.empty() || scInfo.hasFloatTail()) {
             outMin = scInfo.min;
             outMax = scInfo.max;
         }
@@ -335,12 +350,17 @@ class MulPerChannelBiasPattern : public OpRewritePattern<linalg::GenericOp> {
                             .getResult(0);
         Operation *outputOp = output.getDefiningOp();
         rewriter.replaceOp(outputOp, torqOut);
-        if (!foldedOps.empty())
-            foldedOps.pop_back();
+        // Erase the consumed chain ops newest-first: the rewriter commits
+        // deferred (so at pattern time use_empty() cannot see consumers this
+        // pattern just consumed), and each op's single user is the next chain
+        // op, which unlinks before it is destroyed. The tail op itself was
+        // just replaced. When the tail advanced past the per-channel add, the
+        // add is consumed too: it is the multiply's only remaining user and
+        // would otherwise dangle on the erased multiply.
         for (Operation *foldedOp : llvm::reverse(foldedOps))
-            if (foldedOp->use_empty())
+            if (foldedOp != outputOp)
                 rewriter.eraseOp(foldedOp);
-        if (outputOp != addOp && addOp->use_empty())
+        if (outputOp != addOp)
             rewriter.eraseOp(addOp);
         rewriter.eraseOp(srcOp);
         return success();

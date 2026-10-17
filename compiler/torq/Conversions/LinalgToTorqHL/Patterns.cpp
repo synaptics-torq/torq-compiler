@@ -1680,6 +1680,18 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         bool rhs_is_scalar = false;
 
+        // Fold the forward ACT tail: a trailing clamp (and any second scalar
+        // add) is absorbed into the torq_hl.add's clip range / ACT bias, and
+        // the consumed generics are dropped. The torq_hl.add lowering already
+        // applies act.rescaleClamp with these bounds.
+        Value output = srcOp.getResult(0);
+        ScaleClampInfo scInfo = foldForwardScaleClamp(output, 1, 12, 12, true);
+        // Default: the open clip range (full float range).
+        float min_f = std::numeric_limits<float>::lowest();
+        int32_t output_min = *reinterpret_cast<int32_t *>(&min_f);
+        float max_f = std::numeric_limits<float>::max();
+        int32_t output_max = *reinterpret_cast<int32_t *>(&max_f);
+
         const llvm::fltSemantics &bf16 = APFloat::BFloat();
         std::vector<llvm::APFloat> weights(2, llvm::APFloat(bf16, "1.0"));
         // for sub, set weight of 2nd input to -1.0
@@ -1713,6 +1725,13 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
             // Pattern: %input + cst
             biasScale[0] = newBias;
         }
+        // A second scalar add folded from the tail adds to the ACT bias.
+        if (scInfo.floatBias)
+            biasScale[0] += *scInfo.floatBias;
+        if (scInfo.hasFloatTail()) {
+            output_min = scInfo.min;
+            output_max = scInfo.max;
+        }
         // Pattern: cst - %input
         // When the constant stays scalar and is folded into bias, keep the old scalar encoding:
         // (-1 * %input) + cst. When the constant has already been broadcast into a non-scalar
@@ -1730,23 +1749,35 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         auto srcResultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
 
-        // special handling for float min/max
-        float min_f = std::numeric_limits<float>::lowest();
-        int32_t output_min_f = *reinterpret_cast<int32_t *>(&min_f);
-        float max_f = std::numeric_limits<float>::max();
-        int32_t output_max_f = *reinterpret_cast<int32_t *>(&max_f);
         auto torqWeights = createConst(weights, rewriter, srcOp.getLoc());
 
-        rewriter.replaceOpWithNewOp<torq_hl::AddOp>(
-            srcOp, srcOp.getResult(0).getType(), createInitTensor(srcOp, rewriter, srcResultType),
+        auto addOp = torq_hl::AddOp::create(
+            rewriter, srcOp.getLoc(),
+            scInfo.hasFloatTail() ? cast<RankedTensorType>(output.getType()) : srcResultType,
+            createInitTensor(
+                srcOp, rewriter,
+                scInfo.hasFloatTail() ? cast<RankedTensorType>(output.getType()) : srcResultType
+            ),
             opName,
             0, // input_zp
             0, // output_zp
-            output_min_f, output_max_f,
+            output_min, output_max,
             0, // shift_factor
             torqWeights, createConst(biasScale, rewriter, srcOp.getLoc()), input0, input1, false,
             rhs_is_scalar
         );
+        if (scInfo.hasFloatTail()) {
+            rewriter.replaceOp(output.getDefiningOp(), addOp.getResult(0));
+            // Mark every consumed tail op: the driver must not reprocess it as
+            // a root (a second rewrite of the same op would double-commit).
+            for (auto *op : llvm::reverse(scInfo.floatTailOps))
+                if (op != output.getDefiningOp())
+                    rewriter.eraseOp(op);
+            rewriter.eraseOp(srcOp);
+        }
+        else {
+            rewriter.replaceOp(srcOp, addOp.getResult(0));
+        }
         return success();
     }
 

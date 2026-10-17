@@ -68,6 +68,13 @@ struct ScaleClampInfo {
     // Useful when we need to combine multiple scale values together before converting to int
     std::vector<double> scaleDouble;
 
+    // Float ACT tail (set by the float forward fold): a scalar bias folded from a
+    // trailing const add/sub, and the tail ops the fold walked over (width conversion,
+    // that add/sub, clamps). A consumer that absorbs the tail must apply floatBias and
+    // the min/max clip bits, then replace/erase floatTailOps.
+    std::optional<float> floatBias;
+    llvm::SmallVector<Operation *> floatTailOps;
+
     // Invalid if no scale value
     operator bool() const { return !scaleNpu.empty(); }
 
@@ -76,7 +83,42 @@ struct ScaleClampInfo {
         return min != std::numeric_limits<int32_t>::min() ||
                max != std::numeric_limits<int32_t>::max();
     }
+
+    // True if the float forward fold consumed a trailing add and/or clamp.
+    bool hasFloatTail() const { return !floatTailOps.empty() || floatBias.has_value(); }
 };
+
+// A float clamp range: clamp(data, lo, hi), with the open side at the float range
+// limit. Resolved from one or two bound applications in a linalg.generic body.
+struct FloatClampRange {
+    float lo;
+    float hi;
+    // Index of the DPS input that carries the data (all other inputs are constant
+    // bounds).
+    unsigned dataInputIdx;
+    // True if the body clamps in f32 and width-converts the result to the output
+    // element type (f32 in / bf16 out form).
+    bool convertsWidth;
+};
+
+// Canonical float clamp matcher: does this elementwise linalg.generic compute
+// clamp(data, lo, hi) for some single data input?
+//
+// The body is 1 or 2 chained bound applications, each either
+//   arith.minimumf/maximumf(data, c)   (c the constant bound)
+// or
+//   arith.select(arith.cmpf olt/ult/ogt/ugt, ...)   (either operand order)
+// where the bound resolves to a finite float constant through traceToConstFloat
+// -- an outer constant captured by the body, or a 0-d / single-element
+// constant tensor input, each possibly behind an outer arith.truncf/extf. The
+// op-count check requires the body to be exactly the clamp itself, so an
+// in-body constant or in-body width cast for a bound is rejected
+// (canonicalization hoists such constants out of the body, so this is only a
+// theoretical concern). An optional trailing arith.truncf/extf of the clamped
+// value into the result element type is accepted. A one-sided clamp leaves
+// the other bound at the float range limit.
+// Returns nullopt if the body is not a pure float clamp.
+std::optional<FloatClampRange> matchFloatClampRange(linalg::GenericOp op);
 
 struct PaddingInfo {
     llvm::SmallVector<int64_t> lrtbPad = llvm::SmallVector<int64_t>(4, 0);
@@ -316,6 +358,13 @@ int maximizeScaleShift(
 // shift16b is the shift amount of the scale values for 16bits computations
 // isElementWiseOp indicates if this is called for element-wise operations (add/sub) vs convolution
 // return valid ScaleClampInfo if success
+//
+// For float producers the fold walks the single-user elementwise tail in ACT order
+// (the ACT computes clamp(data * weight + bias, lo, hi)):
+//   [f32->bf16 width conversion] [scalar const add/sub -> ScaleClampInfo::floatBias]
+//   [one-sided or two-sided clamp(s) -> ScaleClampInfo min/max f32 bit patterns]
+// advancing `value` to the tail end and recording the consumed ops in
+// ScaleClampInfo::floatTailOps for the consumer to replace/erase.
 ScaleClampInfo foldForwardScaleClamp(
     Value &value, int scaleValuesCount, int shift8b, int shift16b, bool isElementWiseOp = false
 );

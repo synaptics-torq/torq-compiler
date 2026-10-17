@@ -6,6 +6,7 @@
 
 #include "PassesDetail.h"
 #include "torq/Conversions/LinalgToTorqHL/MatchingFunctions.h"
+#include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -116,7 +117,9 @@ class LinalgOpPattern : public OpInterfaceRewritePattern<linalg::LinalgOp> {
             }
             else if (isTorqClampOp(
                          srcOp, minIntValue, maxIntValue, minFloatValue, maxFloatValue, failReason
-                     )) {
+                     ) ||
+                     matchFloatClampRange(dyn_cast_or_null<linalg::GenericOp>(srcOp.getOperation()))
+                         .has_value()) {
                 canExecuteOnTorq = true;
             }
             else if (isTorqFloorOp(srcOp, failReason)) {

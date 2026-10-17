@@ -294,7 +294,12 @@ struct LinalgGenericConv1DToTorqHLConv1DPattern : public OpRewritePattern<linalg
         SmallVector<int64_t> stride = {strideValue};
         SmallVector<int64_t> dilation = {dilationValue};
 
-        // Create bias tensor
+        // Create bias tensor. A scalar bias folded from the float tail (a
+        // trailing const add) is broadcast over all channels.
+        if (!isInt && scInfo.floatBias) {
+            for (auto &b : bias.floats)
+                b += *scInfo.floatBias;
+        }
         Value biasValue = isInt ? createConst(interleave(bias.ints, scInfo.scaleNpu), rewriter, loc)
                                 : createConst(bias.floats, rewriter, loc);
 
@@ -313,11 +318,17 @@ struct LinalgGenericConv1DToTorqHLConv1DPattern : public OpRewritePattern<linalg
         // Replace the generic op with torq_hl.conv1d
         rewriter.replaceOp(genericOp, torqConv1dOp.getResults());
 
-        // If we fused a following truncf generic, erase it as well since conv1d now outputs bf16
-        if (followingTruncfGeneric) {
-            // The truncf generic's users should now use the conv1d result directly
-            // Since we already replaced genericOp with conv1d, and truncf was using genericOp,
-            // we need to make sure truncf's users are redirected to conv1d's bf16 output
+        // The forward fold walked over a width conversion and/or a trailing
+        // add + clamp(s); conv1d now computes them in its ACT, so redirect
+        // their users to the conv1d result and drop the consumed generics.
+        bool truncfInTail = false;
+        for (Operation *tailOp : llvm::reverse(scInfo.floatTailOps)) {
+            auto tailGeneric = cast<linalg::GenericOp>(tailOp);
+            if (followingTruncfGeneric && tailGeneric == followingTruncfGeneric)
+                truncfInTail = true;
+            rewriter.replaceOp(tailGeneric, torqConv1dOp.getResults());
+        }
+        if (followingTruncfGeneric && !truncfInTail) {
             rewriter.replaceOp(followingTruncfGeneric, torqConv1dOp.getResults());
         }
 
