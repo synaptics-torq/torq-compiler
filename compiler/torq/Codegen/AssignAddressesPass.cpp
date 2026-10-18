@@ -416,13 +416,16 @@ class PlacementSimulation {
     };
 
     ArrayRef<LramBuffer> buffers_;
+    // The function body the buffers were collected from, so a failure can name
+    // the op at a given index and its source line.
+    Block *body_;
     std::priority_queue<Event, std::vector<Event>, EventLater> events_;
     Occupancy occupancy_;
     SwapSchedule schedule_;
     PlacementFailure failure_;
 
-    PlacementSimulation(ArrayRef<LramBuffer> buffers, int64_t usable)
-        : buffers_(buffers), occupancy_(buffers, usable) {
+    PlacementSimulation(ArrayRef<LramBuffer> buffers, int64_t usable, Block *body)
+        : buffers_(buffers), body_(body), occupancy_(buffers, usable) {
         for (auto [i, buffer] : llvm::enumerate(buffers_)) {
             events_.push({buffer.birth, EventKind::Birth, (BufferIdx)i});
             events_.push({buffer.death, EventKind::Death, (BufferIdx)i});
@@ -461,8 +464,8 @@ class PlacementSimulation {
     // placement exists.
     static std::optional<Placement>
     run(ArrayRef<LramBuffer> buffers, int64_t usable, ArrayRef<ForcedCompaction> forcedCompactions,
-        PlacementFailure &failure) {
-        PlacementSimulation simulation(buffers, usable);
+        PlacementFailure &failure, Block *body) {
+        PlacementSimulation simulation(buffers, usable, body);
         if (!simulation.sweep(forcedCompactions)) {
             failure = simulation.failure_;
             return std::nullopt;
@@ -536,15 +539,27 @@ void PlacementSimulation::recordFailure(BufferIdx idx, OpIdx opIdx, PlacementFai
     auto residents = occupancy_.residents();
     failure_.pinned.assign(residents.begin(), residents.end());
     LLVM_DEBUG({
+        // Name the op at `opIdx` and its source line so the failure can be
+        // located in the IR, not just by its index in the function body.
+        std::string opDesc;
+        if (body_ && opIdx >= 0 && opIdx < (int)body_->getOperations().size()) {
+            Operation &op = *std::next(body_->getOperations().begin(), opIdx);
+            opDesc = " (op " + op.getName().getStringRef().str();
+            if (auto loc = dyn_cast<FileLineColLoc>(op.getLoc()))
+                opDesc += " at " + loc.getFilename().getValue().str() + ":" +
+                          std::to_string(loc.getLine());
+            opDesc += ")";
+        }
         llvm::dbgs() << "LRAM plan infeasible ("
                      << (cause == PlacementFailure::Cause::Fragmentation ? "fragmentation"
                                                                          : "byte pressure")
-                     << ") at op " << opIdx << ": cannot place buffer " << idx << " ("
-                     << buffers_[idx].size << " bytes), resident " << occupancy_.bytes() << " of "
-                     << occupancy_.usable() << " bytes\n";
+                     << ") at op " << opIdx << opDesc << ": cannot place buffer " << idx << " ("
+                     << buffers_[idx].size << " bytes, " << buffers_[idx].value << "), resident "
+                     << occupancy_.bytes() << " of " << occupancy_.usable() << " bytes\n";
         for (BufferIdx pinned : residents) {
             llvm::dbgs() << "  pinned buffer " << pinned << " size " << buffers_[pinned].size
-                         << " offset " << occupancy_.offset(pinned) << "\n";
+                         << " offset " << occupancy_.offset(pinned) << " ("
+                         << buffers_[pinned].value << ")\n";
         }
     });
 }
@@ -735,13 +750,14 @@ static std::optional<OpIdx> lastMovablePosition(
 // With `replan`, a fragmentation failure forces a compaction where lastMovablePosition says
 // and the placement is planned again, once per attempt.
 static std::optional<Placement>
-planPlacement(ArrayRef<LramBuffer> buffers, int64_t usable, bool replan) {
+planPlacement(ArrayRef<LramBuffer> buffers, int64_t usable, bool replan, Block *body) {
     // each attempt adds one forced compaction; a stack of repeated layers needs a few per layer
     constexpr int maxReplans = 256;
     SmallVector<ForcedCompaction> forcedCompactions;
     for (int attempt = 0; attempt <= maxReplans; attempt++) {
         PlacementFailure failure;
-        auto placement = PlacementSimulation::run(buffers, usable, forcedCompactions, failure);
+        auto placement =
+            PlacementSimulation::run(buffers, usable, forcedCompactions, failure, body);
         if (placement) {
             return placement;
         }
@@ -801,7 +817,8 @@ static BoolAttr getTileFitProbeAttr(FunctionOpInterface funcOp) {
 
 bool lramPlacementFitsWithoutSwaps(FunctionOpInterface funcOp, int64_t usableBytes) {
     SmallVector<LramBuffer> buffers = collectLramBuffers(funcOp);
-    std::optional<Placement> placement = planPlacement(buffers, usableBytes, /*replan=*/true);
+    std::optional<Placement> placement =
+        planPlacement(buffers, usableBytes, /*replan=*/true, &funcOp.getFunctionBody().front());
     return placement && placement->schedule.empty();
 }
 
@@ -823,7 +840,8 @@ static LogicalResult allocateLramAddresses(
     const int64_t usable = poolSize - reservedBase;
 
     SmallVector<LramBuffer> buffers = collectLramBuffers(funcOp);
-    std::optional<Placement> placement = planPlacement(buffers, usable, replan);
+    std::optional<Placement> placement =
+        planPlacement(buffers, usable, replan, &funcOp.getFunctionBody().front());
     if (!placement) {
         return failure();
     }
@@ -1427,13 +1445,17 @@ static void revertSharedReadOnlyReuses(FunctionOpInterface funcOp) {
 // single-dispatch functions for a bit the plan already computes.
 static bool lramAllocationSucceeds(FunctionOpInterface funcOp) {
     const int64_t usable = TorqHw::get().getLramSize() - HwInfo::nss_max_program_size * 2;
-    return planPlacement(collectLramBuffers(funcOp), usable, /*replan=*/false).has_value();
+    std::optional<Placement> placement = planPlacement(
+        collectLramBuffers(funcOp), usable, /*replan=*/false, &funcOp.getFunctionBody().front()
+    );
+    return placement.has_value();
 }
 
 std::optional<int64_t> lramSwapBytes(FunctionOpInterface funcOp) {
     const int64_t usable = TorqHw::get().getLramSize() - HwInfo::nss_max_program_size * 2;
-    std::optional<Placement> placement =
-        planPlacement(collectLramBuffers(funcOp), usable, /*replan=*/false);
+    std::optional<Placement> placement = planPlacement(
+        collectLramBuffers(funcOp), usable, /*replan=*/false, &funcOp.getFunctionBody().front()
+    );
     if (!placement)
         return std::nullopt;
     int64_t bytes = 0;
