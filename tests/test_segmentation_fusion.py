@@ -8,7 +8,7 @@ from torq.testing.iree import MODELS_DIR
 # On one slice a torq_hl.segmentation lands directly on its producer conv (sr200 layout). On two
 # slices the producer is in an scf.forall over output channels, and
 # torq-torqhl-optimize-segmentation folds the segmentation through that loop.
-ONE_SLICE_HW = "0x1:256:1:coral_v2::8:0.65:native:host:host"
+ONE_SLICE_HW = "SR200"
 TWO_SLICE_HW = "SL2610"
 
 CONV_RE = re.compile(r'"torq_hl\.(conv2d|depthwise_conv2d)".*?stride = array<i64: ([0-9, ]+)>')

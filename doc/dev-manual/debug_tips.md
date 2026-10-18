@@ -199,6 +199,40 @@
     producer is computed once and its result read back from DRAM. This flag fuses such producers
     anyway. Use it to compare performance, or to rule this behaviour out when debugging tiling.
 
+  - ``--torq-prefetch-algorithm=auto|none|constant-loads|stream-schedule`` (default ``auto``):
+    how DMA transfers are moved to overlap slice compute. Only one algorithm runs in a compile.
+    - ``auto``: currently ``constant-loads``.
+    - ``none``: no prefetching.
+    - ``constant-loads``: load each constant into LRAM in front of the wait of the program
+      before its consumer, so the load overlaps that program.
+    - ``stream-schedule``: reschedule the whole NSS stream over both slices, the DMA engine and
+      LRAM, and give matmul tile loops a smaller tile budget so the next weight tile can load
+      meanwhile. Opt-in; mostly benefits LLMs and other models whose weights do not fit in LRAM.
+
+  - ``--torq-constant-prefetch`` (default on): turn it off to skip the ``constant-loads``
+    prefetch while keeping that algorithm selected. Use it to compare performance or to rule the
+    prefetch out when debugging.
+
+  - Tuning of ``--torq-prefetch-algorithm=stream-schedule`` (no effect with other algorithms):
+    - ``--torq-prefetch-tile-budget-percent=<P>`` (default 50): in a function whose constants do
+      not fit in LRAM, the percent of LRAM the tile-fit probe may use. The rest stays free to
+      load the next weights.
+    - ``--torq-prefetch-matmul-tile-budget-percent=<P>`` (default 40): the same budget for a
+      tile loop rooted at a matmul, or another contraction without a sliding window.
+    - ``--torq-list-cap-percent=<P>`` (default 100): the percent of usable LRAM the scheduler may
+      keep live.
+    - ``--torq-list-prefetch-percent=<P>`` (default 40): the percent of that cap that loads for
+      programs beyond the next few may use.
+    - ``--torq-list-urgent-starts=<N>`` (default 4): loads for this many upcoming programs may
+      use the full cap.
+
+  - ``--torq-disable-mixed-quant-raise`` (default off): by default, a matmul whose weights are
+    block-quantized integers dequantized on the fly (as produced by the ONNX importer for
+    quantized LLMs) is converted to a mixed-quant matmul, which streams the integer weights to
+    the kernel and casts them as they load instead of dequantizing them into LRAM. This flag
+    keeps the generic dequantize-then-matmul path. Use it to compare performance or to rule the
+    conversion out when debugging.
+
   - To see all supported Torq flags, run:
 
     ```{code} shell

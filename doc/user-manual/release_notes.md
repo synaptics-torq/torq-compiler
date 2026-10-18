@@ -1,5 +1,66 @@
 # Release Notes
 
+## Version 2.3.0
+
+### Torq changes since v2.2.1
+
+#### Highlights
+- MobileNet-family models are much faster thanks to improvements in tiling, slicing and memory allocation. MobileNetV2 is twice as fast on SL2619 (SL2610 family), and the other CNN models, including the YOLOv8 and YOLO26 families, are 10% to 40% faster depending on the model.
+- LLMs and transformers run faster and use less memory thanks to smarter lowering of mixed-quant matmuls, tiling improvements and XRAM memory optimizations. int4-quantized Gemma3 now runs at up to 17 tokens/s on SL2610 with the new stream-schedule prefetch (`--torq-prefetch-algorithm=stream-schedule`, see below).
+- Opt-in stream-schedule prefetch (`--torq-prefetch-algorithm=stream-schedule`) reschedules the whole NSS stream over both slices, the DMA engine and LRAM: Gemma3 37% and Qwen2.5 45% to 51% faster. The default stays `auto` (constant-load prefetch).
+- New global LRAM allocator that plans LRAM for the whole dispatch, with up to 256 re-plans so larger models such as Quantized EmbeddingGemma-2 compile.
+- TFLite `FULLY_CONNECTED` runs on the FC kernel: 33% to 90% faster.
+- Graph edits previously done by torq-tools are now done by the compiler: transposes that only move size-1 dims become reshapes, unrolled concats collapse into slices, and scalar bf16 matmuls become elementwise multiplies.
+- ONNX GRU, including reverse and bidirectional, lowered through torch-mlir.
+- New `torq-lab debug` command to debug compile errors.
+- New SR200 target (`--torq-hw=SR200`): the TorqV2 NPU with one slice, 256 KB of LRAM and a CSS core with floating point and vector instructions. SR200 is an MCU; its operations that fall back to the host are compiled for its Arm Cortex-M85 with Helium (MVE) and FPU support.
+- int8 add is bit-exact with TFLite, and int16 requantization is fixed.
+
+#### Added
+- GPTQ weights and the ragged LM head of Gemma 3 270M.
+- Block-quantized matmul with slicing and with splat zero points.
+- Scalar quantized mul and batched `MatMulInteger`.
+- `Resize` upscaling by any integer scale.
+- Reductions over several dimensions on the NSS.
+- New compiler flags:
+  - `--torq-eliminate-transpose-mode`, `--torq-collapse-unrolled-concat-mode`, `--torq-fold-scalar-matmul-mode` (all default `enable`).
+  - `--torq-constant-prefetch` (default on).
+  - `--torq-prefetch-algorithm` (`auto`, `none`, `constant-loads`, `stream-schedule`) with `--torq-prefetch-tile-budget-percent`, `--torq-prefetch-matmul-tile-budget-percent`, `--torq-list-cap-percent`, `--torq-list-prefetch-percent` and `--torq-list-urgent-starts`.
+  - `--torq-probe-avoid-relocation`, `--torq-probe-relocation-min-bytes`, `--torq-probe-relocation-max-tile-growth`.
+  - `--torq-disable-mixed-quant-raise`, `--torq-disable-tnf-avoid-producer-recompute`.
+
+#### Changed
+- Reciprocal is sliced and computed in 3 ops (3 ms down to 1 ms); table lookups are fused with the rescale before them; softmax no longer needs bitwise or.
+- Uneven dual slicing (YOLO pose heads 1.2x faster).
+- Reduction tiling moved to a dedicated pass; fuse groups reworked.
+- `--torq-disable-async-slice-wait1` merged into `--torq-disable-async-slice-wait`.
+
+#### Removed
+- About 5,000 lines of dead code, with the flags that selected it. Remove these from your scripts (all prefixed with `--torq-`): `act-based-add`, `act-based-sub`, `conv1d-truncate-for-reduce`, `convert-conv1d-to-conv2d`, `convert-conv1d-to-generic`, `convert-conv1d-to-matmul`, `convert-mul-i32-to-i16`, `convert-table-to-gather`, `css-host`, `disable-eliminate-redundant-lram-loads`, `disable-fit-shrink-reorder`, `dump-descriptors-dir`, `dw-ndl`, `enable-deqw-verify`, `ews-relax-input-stride-check`, `failure-driven-recovery`, `tile-and-fuse-distance-limit`, `vm-annotate-virtual-buffer-ids`.
+
+#### Fixed
+- Wrong results: WRAM loads covering two rows, stacked view offsets, unsigned max/min, NSS reduces with a non-identity init, stride-2 segmented convolution output, fused clamp of a convolution without bias, fast FC bias, and FC per-tensor requantization.
+- Compiler crash on transposes of rank below 3; `FoldDuplicateConversion` firing where it should not; a leaked temporary host library.
+- Runtime: the hardware is quiesced before the network domain is detached.
+
+#### Known issues
+- Some cases are slower: Gemma3 hybrid models on SL2610 (8.6% to 15%), batched matmul with broadcast and reduction tiling (about 12%), qdq mul with a broadcast scale passed as a function input, and int8 to int16 matmul on FPGA (5%).
+- MobileNetV3 squeeze-excite `MEAN`s do not use the avg-pool kernel yet.
+- Integer reductions over more than 32,768 elements give wrong results on the simulator.
+
+#### Testing, CI and tooling
+- Hugging Face transformers models added to the test suite; xfails cleaned up; tests use full-range inputs; tests check that pattern rewrites fire.
+- torq-tools and torq-examples are submodules; dashboard and profiling improvements.
+- `torq.utils` packaged in the wheel.
+
+#### Documentation
+- Architecture decision records.
+- The hardware configuration page describes SR200 and the full `--torq-hw` custom format, including the hardware ID field that the earlier examples were missing.
+- The debug tips document all the new flags.
+
+**Full Changelog**: https://github.com/synaptics-torq/torq-compiler/compare/v2.2.1...v2.3.0
+
+
 ## Version 2.2.1
 
 ### Torq changes since v2.2.0

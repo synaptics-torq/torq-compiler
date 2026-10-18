@@ -67,7 +67,7 @@ def test_no_probe_tile_fits_uses_minimum_tile(model_name, torq_compiler, tmp_pat
 # plan relocates buffers. A relocation stores them to XRAM and loads them straight back,
 # so each relocated buffer gets an XRAM copy.
 RELOCATION_MODEL = MODELS_DIR / "tiling" / "mbv2-block1-relocation-i8.mlir"
-SR200_HW = "0x1:256:1:coral_v2::8:0.65"
+SR200_HW = "SR200"
 
 
 def count_xram_copies(torq_compiler, tmp_path, extra_flags):
