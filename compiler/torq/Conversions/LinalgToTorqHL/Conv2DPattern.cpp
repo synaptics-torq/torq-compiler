@@ -856,6 +856,14 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
                 )
                               .getResult();
             }
+            // The fusion walk steps through linalg.transpose ops, so the group's
+            // terminal can be a transpose whose layout the reconstruction above
+            // does not produce. Rebuild it so the replacement types match; otherwise
+            // an unrealized_conversion_cast is left behind and the conversion fails.
+            if (auto terminalTrans = dyn_cast_or_null<linalg::TransposeOp>(output.getDefiningOp()))
+                torqOut = transposeValue(
+                    torqOut, SmallVector<int64_t>(terminalTrans.getPermutation()), loc, rewriter
+                );
             rewriter.replaceOp(output.getDefiningOp(), torqOut);
 
             // insert_slice was replaced above (its dead fill is DCE'd by canonicalize);
