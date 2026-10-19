@@ -2,3 +2,4 @@
 # quantized_batch_matmul: runtime uniform constants (zp_a, zp_a*K*zp_b) arrive
 # wrong at the CSS epilogue program on 3.12 (uniform staging path).
 test_mlir_files[quantized_batch_matmul.mlir-sim-sl2610-v1]
+test_mlir_files[quantized_batch_matmul.mlir-aws_fpga-sl2610-v1]
