@@ -1,5 +1,6 @@
 
 #include "iree/compiler/Codegen/Common/Passes.h"
+#include "iree/compiler/Codegen/Dialect/CPU/IR/IREECPUTypes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenDialect.h"
 #include "iree/compiler/Codegen/LLVMCPU/Passes.h"
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
@@ -21,7 +22,7 @@
 
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
-#include "mlir/Dialect/Affine/Passes.h"
+#include "mlir/Dialect/Affine/Transforms/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
@@ -121,7 +122,9 @@ static FailureOr<IREE::HAL::ExecutableVariantOp> createModule(
 
     auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
         funcOp.getContext(),
-        mlir::iree_compiler::IREE::Codegen::DispatchLoweringPassPipeline::CPUDefault
+        IREE::CPU::PipelineAttr::get(funcOp.getContext(), IREE::CPU::LoweringPipeline::Default),
+        /*codegenSpec=*/{}, /*workgroupSize=*/{}, /*subgroupSize=*/{},
+        /*configuration=*/{}
     );
 
     succeeded(setTranslationInfo(funcOp, translationInfo));
@@ -237,7 +240,18 @@ static void setupPipeline(PassManager &pm) {
         .addPass(createMemrefCopyToLinalgPass)
         .addPass(createConvertLinalgToLoopsPass)
         .addPass(createConvertBf16ArithToF32Pass)
-        .addPass(createConvertBf16ToUInt16BuffersPass)
+        // Same bf16 -> i16 buffer conversion as addCssLoweringPasses (see
+        // CompileCpuProgramsPass.cpp); fp8 types go through natively.
+        .addPass([]() {
+            ConvertUnsupportedFloatToIntBuffersPassOptions options;
+            options.includeBf16 = true;
+            options.includeF8E5M2 = false;
+            options.includeF8E4M3FN = false;
+            options.includeF8E5M2FNUZ = false;
+            options.includeF8E4M3FNUZ = false;
+            options.includeF8E8M0FNU = false;
+            return createConvertUnsupportedFloatToIntBuffersPass(options);
+        })
         .addPass(createCanonicalizerPass)
         .addPass(createCSEPass);
 
@@ -342,28 +356,27 @@ static void replaceStackAllocationsWithMalloc(IREE::HAL::ExecutableVariantOp evO
 
         auto llvmI64Type = builder.getIntegerType(64);
 
-        // compute the size of the allocation
-        auto elementSize = allocaOp.getElemType().getIntOrFloatBitWidth() / 8;
-        assert(elementSize > 0);
-
-        Value sizeValue = LLVM::ConstantOp::create(
-            builder, allocaOp.getLoc(), llvmI64Type,
-            builder.getIntegerAttr(llvmI64Type, elementSize)
-        );
-
-        if (allocaOp.getArraySize()) {
-
-            Value arraySize = allocaOp.getArraySize();
-
-            // convert the array size to i64 if it's not already
-            if (arraySize.getType().getIntOrFloatBitWidth() < 64) {
-                arraySize =
-                    LLVM::ZExtOp::create(builder, allocaOp.getLoc(), llvmI64Type, arraySize);
-            }
-
-            // multiply by the array size
-            sizeValue = LLVM::MulOp::create(builder, allocaOp.getLoc(), sizeValue, arraySize);
+        // number of elements requested by the alloca
+        Value arraySize = allocaOp.getArraySize();
+        if (!arraySize) {
+            arraySize = LLVM::ConstantOp::create(
+                builder, allocaOp.getLoc(), llvmI64Type, builder.getIntegerAttr(llvmI64Type, 1)
+            );
         }
+        else if (arraySize.getType().getIntOrFloatBitWidth() < 64) {
+            arraySize = LLVM::ZExtOp::create(builder, allocaOp.getLoc(), llvmI64Type, arraySize);
+        }
+
+        // compute the allocation size in bytes with the classic sizeof idiom
+        // ptrtoint(gep(null, count)): works for aggregate element types too
+        // (e.g. !llvm.array<N x i32>, which is how static buffers are emitted)
+        Value nullPtr = LLVM::ZeroOp::create(builder, allocaOp.getLoc(), llvmPtrType);
+        Value sizePtr = LLVM::GEPOp::create(
+            builder, allocaOp.getLoc(), llvmPtrType, allocaOp.getElemType(), nullPtr,
+            ValueRange{arraySize}
+        );
+        Value sizeValue =
+            LLVM::PtrToIntOp::create(builder, allocaOp.getLoc(), llvmI64Type, sizePtr);
 
         // create the malloc call
         auto mallocCall =

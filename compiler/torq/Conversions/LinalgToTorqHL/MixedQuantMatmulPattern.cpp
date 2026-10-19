@@ -131,11 +131,11 @@ int8_t i4At(ArrayRef<char> bytes, bool packed, int64_t i) {
 //    expected blob sizes.
 struct SlicedConstOperand {
     Value parent;
-    std::optional<DenseIntOrFPElementsAttr> dense; // inline backing
-    ArrayRef<char> bytes;                          // blob backing, if !dense
-    int64_t count = 0;                             // parent element count
-    bool splat = false;                            // inline only
-    bool i4Packed = false;                         // blob only: 2 i4 per byte
+    std::optional<DenseTypedElementsAttr> dense; // inline backing
+    ArrayRef<char> bytes;                        // blob backing, if !dense
+    int64_t count = 0;                           // parent element count
+    bool splat = false;                          // inline only
+    bool i4Packed = false;                       // blob only: 2 i4 per byte
     OpFoldResult offN;
 
     Type elemType() const { return cast<ShapedType>(parent.getType()).getElementType(); }
@@ -194,7 +194,7 @@ bool getMqmmConst(Value v, SlicedConstOperand &out) {
     if (!matchPattern(v, m_Constant(&a)))
         return false;
     out.count = cast<ShapedType>(v.getType()).getNumElements();
-    if (auto d = dyn_cast<DenseIntOrFPElementsAttr>(a)) {
+    if (auto d = dyn_cast<DenseTypedElementsAttr>(a)) {
         out.dense = d;
         out.splat = d.isSplat();
         return true;

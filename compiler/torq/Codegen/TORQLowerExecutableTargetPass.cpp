@@ -22,6 +22,9 @@
 
 #include "iree/compiler/Codegen/Common/PassUtils.h"
 #include "iree/compiler/Codegen/Common/Passes.h"
+#include "iree/compiler/Codegen/Utils/Utils.h"
+#include "iree/compiler/Dialect/HAL/IR/HALOps.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
 
 #include "mlir/Bytecode/BytecodeWriter.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -47,8 +50,6 @@ static llvm::cl::opt<bool> clShowPassProgress(
 using namespace mlir::iree_compiler;
 
 namespace mlir::syna::torq {
-
-using CodeGenPipeline = IREE::Codegen::DispatchLoweringPassPipeline;
 
 static llvm::cl::opt<bool> clEnableTorqProfiling(
     "torq-enable-profiling", llvm::cl::desc("enable torq profiling"), llvm::cl::init(false)
@@ -578,6 +579,34 @@ struct TORQLowerExecutableTargetPass
         return runWith(SliceBufferSharing::None);
     }
 
+    // At 3.12 the export workgroup-count region keeps a workgroup_count_from_slice
+    // placeholder unless a codegen pass resolves it. The pass that did this for us
+    // (TileAndDistributeToWorkgroupsPass) was removed upstream. TORQ dispatches are
+    // a single host-visible workgroup — the slice programs carry the real
+    // parallelism — matching what the old pass produced. Resolve leftover
+    // placeholders to (1, 1, 1) so the op never leaks into host code, where it has
+    // no VM lowering.
+    static void resolveWorkgroupCountRegion(FunctionOpInterface funcOp) {
+        std::optional<IREE::HAL::ExecutableExportOp> exportOp = getEntryPoint(funcOp);
+        if (!exportOp)
+            return;
+        Block *body = exportOp->getWorkgroupCountBody();
+        if (!body)
+            return;
+        SmallVector<IREE::TensorExt::DispatchWorkgroupCountFromSliceOp> placeholderOps;
+        body->walk([&](IREE::TensorExt::DispatchWorkgroupCountFromSliceOp op) {
+            placeholderOps.push_back(op);
+        });
+        for (auto op : placeholderOps) {
+            OpBuilder builder(op);
+            SmallVector<Value> ones(
+                op.getNumResults(), arith::ConstantIndexOp::create(builder, op.getLoc(), 1)
+            );
+            op->replaceAllUsesWith(ones);
+            op->erase();
+        }
+    }
+
     void runOnOperation() override {
 
         LLVM_DEBUG({ llvm::dbgs() << "Lowering dispatch " << getOperation().getSymName() << "\n"; }
@@ -613,13 +642,16 @@ struct TORQLowerExecutableTargetPass
                 std::make_unique<torq::ProgressLogger>(dispatchName + "::workgroups")
             );
         }
-        distributeToWorkgroupsPipeline.addPass(createTileAndDistributeToWorkgroupsPass());
+        distributeToWorkgroupsPipeline.addPass(createTileAndDistributeToWorkgroupsUsingForallOpPass(
+        ));
         distributeToWorkgroupsPipeline.enableTiming(timingScope);
         if (failed(mlir::applyPassManagerCLOptions(distributeToWorkgroupsPipeline)))
             return signalPassFailure();
         if (failed(distributeToWorkgroupsPipeline.run(*maybeDispatchFuncOp))) {
             return signalPassFailure();
         }
+
+        resolveWorkgroupCountRegion(*maybeDispatchFuncOp);
 
         auto runPipeline = [&](function_ref<void(OpPassManager &)> addPasses) {
             PassManager pipeline(getOperation().getContext(), getOperation().getOperationName());

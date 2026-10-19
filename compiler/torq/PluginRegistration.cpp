@@ -17,7 +17,6 @@
 #include "torq/Target/TorqTarget.h"
 #include "torq/Transforms/Linalg/Passes.h"
 #include "torq/Transforms/TorqHL/Passes.h"
-#include "torq/Utils/SlicingThresholds.h"
 
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
@@ -27,6 +26,7 @@
 #include "iree/compiler/PluginAPI/Client.h"
 
 #include "torch-mlir/Conversion/TorchOnnxToTorch/Passes.h"
+#include "torq/Utils/SlicingThresholds.h"
 
 #include <algorithm>
 #include <stdio.h>

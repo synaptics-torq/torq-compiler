@@ -243,8 +243,7 @@ struct ConvertOpBufferizableOpInterface
             return op->emitError("unable to bufferize result operand");
         }
 
-        auto ret =
-            options.createMemCpy(rewriter, op->getLoc(), *maybeInputBuffer, *maybeOutputBuffer);
+        auto ret = options.memCpyFn(rewriter, op->getLoc(), *maybeInputBuffer, *maybeOutputBuffer);
 
         if (failed(ret)) {
             return op->emitError("unable to create memcpy from ")

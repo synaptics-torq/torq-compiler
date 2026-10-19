@@ -127,7 +127,10 @@ static iree_status_t iree_hal_torq_driver_dump_device_info(
 static iree_status_t iree_hal_torq_driver_create_device_by_id(
     iree_hal_driver_t* base_driver, iree_hal_device_id_t device_id,
     iree_host_size_t param_count, const iree_string_pair_t* params,
+    const iree_hal_device_create_params_t* create_params,
     iree_allocator_t host_allocator, iree_hal_device_t** out_device) {
+  // The torq device creates its own inline proactor pool; |create_params|
+  // (which may carry a shared one) is not consulted.
   iree_hal_torq_driver_t* driver = iree_hal_torq_driver_cast(base_driver);
   return iree_hal_torq_device_create(
       driver->identifier, &driver->default_params, driver->loader_count,
@@ -137,15 +140,16 @@ static iree_status_t iree_hal_torq_driver_create_device_by_id(
 static iree_status_t iree_hal_torq_driver_create_device_by_path(
     iree_hal_driver_t* base_driver, iree_string_view_t driver_name,
     iree_string_view_t device_path, iree_host_size_t param_count,
-    const iree_string_pair_t* params, iree_allocator_t host_allocator,
-    iree_hal_device_t** out_device) {
+    const iree_string_pair_t* params,
+    const iree_hal_device_create_params_t* create_params,
+    iree_allocator_t host_allocator, iree_hal_device_t** out_device) {
   if (!iree_string_view_is_empty(device_path)) {
     return iree_make_status(IREE_STATUS_NOT_FOUND,
                             "device paths not yet implemented");
   }
   return iree_hal_torq_driver_create_device_by_id(
       base_driver, IREE_HAL_DEVICE_ID_DEFAULT, param_count, params,
-      host_allocator, out_device);
+      create_params, host_allocator, out_device);
 }
 
 static const iree_hal_driver_vtable_t iree_hal_torq_driver_vtable = {

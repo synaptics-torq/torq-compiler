@@ -6,17 +6,46 @@
 
 #pragma once
 
-#include "iree-dialects/Transforms/TransformMatchers.h"
-
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Value.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 
+#include <functional>
 #include <type_traits>
 
 namespace mlir::syna::torq {
+
+namespace detail {
+
+// Minimal local replacement for transform_ext::ConcreteOpMatcher from
+// iree-dialects/Transforms/TransformMatchers.h, which was removed upstream
+// (gone at IREE 3.12). Provides the only API surface TorqStructuredOpMatcher
+// uses: an initial isa<OpTy> predicate, fluent addPredicate, and match().
+template <typename Derived, typename OpTy> class ConcreteOpMatcher {
+  public:
+    ConcreteOpMatcher() {
+        predicates_.push_back([](Operation *op) { return isa<OpTy>(op); });
+    }
+
+    // Adds a predicate for the matched operation to satisfy.
+    template <typename FnTy> Derived &addPredicate(FnTy &&predicate) {
+        predicates_.push_back([inner = std::forward<FnTy>(predicate)](Operation *op) {
+            return inner(cast<OpTy>(op));
+        });
+        return static_cast<Derived &>(*this);
+    }
+
+    bool match(Operation *op) const {
+        return llvm::all_of(predicates_, [op](const auto &pred) { return pred(op); });
+    }
+
+  private:
+    llvm::SmallVector<std::function<bool(Operation *)>> predicates_;
+};
+
+} // namespace detail
 
 template <typename T> inline bool matchYieldDagPath(Value value) {
     return value.getDefiningOp<T>() != nullptr;
@@ -37,9 +66,9 @@ inline bool matchYieldDagPath(Value value) {
 
 template <typename OpTy = linalg::GenericOp>
 class TorqStructuredOpMatcher
-    : public transform_ext::ConcreteOpMatcher<TorqStructuredOpMatcher<OpTy>, OpTy> {
+    : public detail::ConcreteOpMatcher<TorqStructuredOpMatcher<OpTy>, OpTy> {
   public:
-    using Base = transform_ext::ConcreteOpMatcher<TorqStructuredOpMatcher<OpTy>, OpTy>;
+    using Base = detail::ConcreteOpMatcher<TorqStructuredOpMatcher<OpTy>, OpTy>;
     using Base::addPredicate;
 
     // ------------------- IREE-compatible predicates -------------------

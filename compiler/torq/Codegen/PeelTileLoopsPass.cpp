@@ -38,6 +38,38 @@ namespace mlir::syna::torq {
 
 namespace {
 
+// Unconditionally peel the last iteration of a loop with a constant trip
+// count: split at ub - step so the tail iteration becomes a separate loop.
+// (mlir::scf::peelForLoopLastIteration was removed upstream; this mirrors the
+// split logic of the internal peelForLoop in LoopSpecialization.cpp.)
+static LogicalResult
+peelLastIteration(RewriterBase &rewriter, scf::ForOp forOp, scf::ForOp &lastIteration) {
+    RewriterBase::InsertionGuard guard(rewriter);
+
+    AffineExpr sym0, sym1, sym2;
+    bindSymbols(rewriter.getContext(), sym0, sym1, sym2);
+    auto map = AffineMap::get(0, 3, {sym1 - sym2}); // ub - step
+    SmallVector<Value> operands{forOp.getLowerBound(), forOp.getUpperBound(), forOp.getStep()};
+    rewriter.setInsertionPoint(forOp);
+    auto loc = forOp.getLoc();
+    Value splitBound = rewriter.createOrFold<affine::AffineApplyOp>(loc, map, operands);
+    if (splitBound.getType() != forOp.getLowerBound().getType())
+        splitBound = rewriter.createOrFold<arith::IndexCastOp>(
+            loc, forOp.getLowerBound().getType(), splitBound
+        );
+
+    // Tail loop runs [splitBound, ub) with the main loop's results as init.
+    rewriter.setInsertionPointAfter(forOp);
+    lastIteration = cast<scf::ForOp>(rewriter.clone(*forOp.getOperation()));
+    lastIteration.getLowerBoundMutable().assign(splitBound);
+    rewriter.replaceAllUsesWith(forOp.getResults(), lastIteration->getResults());
+    lastIteration.getInitArgsMutable().assign(forOp->getResults());
+
+    // Main loop runs [lb, splitBound).
+    rewriter.modifyOpInPlace(forOp, [&]() { forOp.getUpperBoundMutable().assign(splitBound); });
+    return success();
+}
+
 // If forOp has dynamic shapes:
 // - if the upper bound is not aligned with step, peel the last iteration;
 // - otherwise, peel one iteration from the start and one from the end.
@@ -71,7 +103,7 @@ bool peelLoop(IRRewriter &rewriter, mlir::scf::ForOp forOp) {
     }
 
     if (tripCount->getSExtValue() > 2) {
-        if (failed(mlir::scf::peelForLoopLastIteration(rewriter, forOp, lastIteration))) {
+        if (failed(peelLastIteration(rewriter, forOp, lastIteration))) {
             forOp->emitWarning("can not peel an scf.for with dynamic shapes.");
         }
     }

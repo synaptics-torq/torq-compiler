@@ -9,7 +9,7 @@
 
 #if IREE_FILE_IO_ENABLE
 #include "iree/base/alignment.h"
-#include "iree/base/internal/flags.h"
+#include "iree/base/tooling/flags.h"
 #include "iree/base/internal/flatcc/parsing.h"
 #include "torq_executable_def_reader.h"
 

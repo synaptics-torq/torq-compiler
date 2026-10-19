@@ -614,34 +614,28 @@ static Value extendToI32(Value value, PatternRewriter &rewriter, Location loc, b
 /// scale and zero point as [1,1,N] splats. A uint8 weight is re-encoded as
 /// int8 (w ^ 0x80, zp - 128), which preserves w - zp, so that consumers that
 /// read the weight as signed (the mixed-quant matmul) accept it.
-static LogicalResult matchPerTensorDequantMatmulInput(
-    Value input, RankedTensorType &inputType, BlockQuantizedMatmulInputMatch &match,
-    PatternRewriter &rewriter, Location loc
-) {
-    inputType = dyn_cast<RankedTensorType>(input.getType());
-    if (!inputType || inputType.getRank() != 3 || inputType.getDimSize(0) != 1 ||
-        !inputType.hasStaticShape())
-        return failure();
-    Value lifted;
-    if (auto expand = input.getDefiningOp<tensor::ExpandShapeOp>()) {
-        lifted = expand.getSrc();
-    }
-    else if (auto lift = input.getDefiningOp<linalg::GenericOp>()) {
-        auto maps = lift.getIndexingMapsArray();
-        if (lift.getNumDpsInputs() != 1 || !isYieldedBlockArgument(lift, 0) ||
-            !isFinalMatmulRhsBroadcastMap(maps[0]) || !isIdentityMap(maps[1], 3))
-            return failure();
-        lifted = lift.getInputs()[0];
-    }
-    auto dq = lifted ? lifted.getDefiningOp<linalg::GenericOp>() : linalg::GenericOp();
+/// Facts matched out of a constant per-tensor dequant generic (see
+/// matchConstantPerTensorDequant).
+struct PerTensorDequantMatch {
+    Attribute weightAttr;
+    RankedTensorType weightType;
+    FloatAttr scaleAttr;
+    int64_t zeroPoint = 0;
+    bool isUnsigned = false;
+};
+
+/// Matches a linalg.generic computing mulf(sitofp([subi](ext(w), zp)), scale)
+/// with identity maps over a constant int8 weight and nothing else -- the form
+/// the importer emits for a per-tensor DequantizeLinear. The zero point is
+/// adjusted for the uint8 -> int8 re-encode (zp - 128) and checked against the
+/// 8-bit range.
+static LogicalResult
+matchConstantPerTensorDequant(linalg::GenericOp dq, PerTensorDequantMatch &dequant) {
     if (!dq || dq.getNumDpsInputs() != 1 || dq.getNumResults() != 1 ||
-        dq.getResult(0).getType() !=
-            RankedTensorType::get(inputType.getShape().drop_front(), inputType.getElementType()) ||
         !llvm::all_of(dq.getIndexingMapsArray(), [](AffineMap m) { return m.isIdentity(); }))
         return failure();
-
-    Attribute weightAttr;
     auto weightType = dyn_cast<RankedTensorType>(dq.getInputs()[0].getType());
+    Attribute weightAttr;
     if (!weightType || !weightType.getElementType().isInteger(8) ||
         !matchPattern(dq.getInputs()[0], m_Constant(&weightAttr)))
         return failure();
@@ -675,6 +669,47 @@ static LogicalResult matchPerTensorDequantMatmulInput(
         zeroPoint -= 128;
     if (zeroPoint < -128 || zeroPoint > 127)
         return failure();
+    dequant.weightAttr = weightAttr;
+    dequant.weightType = weightType;
+    dequant.scaleAttr = scaleAttr;
+    dequant.zeroPoint = zeroPoint;
+    dequant.isUnsigned = isUnsigned;
+    return success();
+}
+
+static LogicalResult matchPerTensorDequantMatmulInput(
+    Value input, RankedTensorType &inputType, BlockQuantizedMatmulInputMatch &match,
+    PatternRewriter &rewriter, Location loc
+) {
+    inputType = dyn_cast<RankedTensorType>(input.getType());
+    if (!inputType || inputType.getRank() != 3 || inputType.getDimSize(0) != 1 ||
+        !inputType.hasStaticShape())
+        return failure();
+    Value lifted;
+    if (auto expand = input.getDefiningOp<tensor::ExpandShapeOp>()) {
+        lifted = expand.getSrc();
+    }
+    else if (auto lift = input.getDefiningOp<linalg::GenericOp>()) {
+        auto maps = lift.getIndexingMapsArray();
+        if (lift.getNumDpsInputs() != 1 || !isYieldedBlockArgument(lift, 0) ||
+            !isFinalMatmulRhsBroadcastMap(maps[0]) || !isIdentityMap(maps[1], 3))
+            return failure();
+        lifted = lift.getInputs()[0];
+    }
+    auto dq = lifted ? lifted.getDefiningOp<linalg::GenericOp>() : linalg::GenericOp();
+    if (!dq ||
+        dq.getResult(0).getType() !=
+            RankedTensorType::get(inputType.getShape().drop_front(), inputType.getElementType()))
+        return failure();
+
+    PerTensorDequantMatch dequant;
+    if (failed(matchConstantPerTensorDequant(dq, dequant)))
+        return failure();
+    Attribute weightAttr = dequant.weightAttr;
+    RankedTensorType weightType = dequant.weightType;
+    FloatAttr scaleAttr = dequant.scaleAttr;
+    int64_t zeroPoint = dequant.zeroPoint;
+    bool isUnsigned = dequant.isUnsigned;
 
     // The constants of the single-block form.
     int64_t N = weightType.getDimSize(1);
@@ -1332,6 +1367,110 @@ static LogicalResult replaceBatchMatmulWithBroadcastGeneric(
     return success();
 }
 
+/// At the IREE 3.12 pin the unit batch of a [1,M,K] x [K,N] matmul is collapsed
+/// before this pass runs. Downstream patterns (the block-quant input rewriting
+/// here, MixedQuantMatmulRewrite in LinalgToTorqHL) only recognize
+/// linalg.batch_matmul, so restore the canonical rank-3 form and let them fire
+/// as they did at 3.10. Two rank-2 forms are recognized:
+/// (a) the result's only user is an expand_shape back to [1,M,N] -- replace the
+///     expand with the batch result;
+/// (b) the weight arrives as the collapse of a rank-3 blocked dequant chain
+///     (the mixed-quant signature) and the result feeds other reshapes (e.g.
+///     the attention-heads split) -- insert a collapse back to [M,N] after the
+///     batch result for the original consumers.
+/// Any other rank-2 matmul is a genuine GEMM and is left alone.
+class RaiseUnitBatchMatmulPattern : public OpRewritePattern<linalg::MatmulOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(linalg::MatmulOp srcOp, PatternRewriter &rewriter) const {
+        Value result = srcOp.getResult(0);
+        Value lhs = srcOp.getInputs()[0];
+        Value rhs = srcOp.getInputs()[1];
+        auto lhsType = dyn_cast<RankedTensorType>(lhs.getType());
+        auto rhsType = dyn_cast<RankedTensorType>(rhs.getType());
+        auto matmulType = dyn_cast<RankedTensorType>(result.getType());
+        if (!lhsType || !rhsType || !matmulType || lhsType.getRank() != 2 ||
+            rhsType.getRank() != 2 || ShapedType::isDynamicShape(lhsType.getShape()) ||
+            ShapedType::isDynamicShape(rhsType.getShape()) ||
+            ShapedType::isDynamicShape(matmulType.getShape()))
+            return failure();
+
+        tensor::ExpandShapeOp expandOp;
+        if (result.hasOneUse())
+            expandOp = dyn_cast<tensor::ExpandShapeOp>(*result.user_begin());
+
+        bool matchedUnitBatchExpand = false;
+        if (expandOp) {
+            auto resultType = dyn_cast<RankedTensorType>(expandOp.getResultType());
+            auto reassoc = expandOp.getReassociationIndices();
+            matchedUnitBatchExpand =
+                resultType && resultType.getRank() == 3 && resultType.getShape()[0] == 1 &&
+                !ShapedType::isDynamicShape(resultType.getShape()) &&
+                resultType.getShape().drop_front() == matmulType.getShape() &&
+                reassoc.size() == 2 && reassoc[0] == ReassociationIndices{0, 1} &&
+                reassoc[1] == ReassociationIndices{2};
+        }
+
+        bool matchedBlockedWeight = false;
+        if (!matchedUnitBatchExpand) {
+            if (auto collapse = rhs.getDefiningOp<tensor::CollapseShapeOp>()) {
+                auto srcType = dyn_cast<RankedTensorType>(collapse.getSrcType());
+                matchedBlockedWeight =
+                    srcType && srcType.getRank() == 3 &&
+                    collapse.getSrc().getDefiningOp<linalg::GenericOp>() != nullptr;
+            }
+        }
+
+        // The per-tensor dequant matcher only recognizes the [1,K,N] batch
+        // form; raise the rank-2 matmul 3.12 collapsed to so it can fire (a
+        // decode matmul then lowers to mixed_quant_matmul).
+        bool matchedPerTensorDequantWeight = false;
+        if (!matchedUnitBatchExpand && !matchedBlockedWeight) {
+            PerTensorDequantMatch dequant;
+            matchedPerTensorDequantWeight = succeeded(
+                matchConstantPerTensorDequant(rhs.getDefiningOp<linalg::GenericOp>(), dequant)
+            );
+        }
+
+        if (!matchedUnitBatchExpand && !matchedBlockedWeight && !matchedPerTensorDequantWeight)
+            return failure();
+
+        Location loc = srcOp.getLoc();
+        int64_t M = matmulType.getShape()[0];
+        int64_t N = matmulType.getShape()[1];
+        int64_t K = lhsType.getShape()[1];
+        SmallVector<ReassociationIndices> batchReassoc = {{0, 1}, {2}};
+
+        auto expandToBatch = [&](Value v, int64_t d1, int64_t d2) {
+            auto elemType = cast<RankedTensorType>(v.getType()).getElementType();
+            auto expType = RankedTensorType::get({1, d1, d2}, elemType);
+            return tensor::ExpandShapeOp::create(rewriter, loc, expType, v, batchReassoc)
+                .getResult();
+        };
+
+        Value lhs3 = expandToBatch(lhs, M, K);
+        Value rhs3 = expandToBatch(rhs, K, N);
+        Value init3 = expandToBatch(srcOp.getDpsInits()[0], M, N);
+        auto batchType = RankedTensorType::get({1, M, N}, matmulType.getElementType());
+        auto batchOp = linalg::BatchMatmulOp::create(
+            rewriter, loc, TypeRange{batchType}, ValueRange{lhs3, rhs3}, ValueRange{init3}
+        );
+
+        if (matchedUnitBatchExpand) {
+            rewriter.replaceOp(expandOp, batchOp.getResult(0));
+        }
+        else {
+            auto collapsed = tensor::CollapseShapeOp::create(
+                rewriter, loc, matmulType, batchOp.getResult(0), batchReassoc
+            );
+            rewriter.replaceAllUsesWith(result, collapsed.getResult());
+        }
+        rewriter.eraseOp(srcOp);
+        return success();
+    }
+};
+
 /// Optimization pattern for batch matrix multiplication operations.
 ///
 /// This pattern optimizes linalg::BatchMatmulOp by folding unnecessary operations
@@ -1446,6 +1585,7 @@ class BatchMatmulOpPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
 };
 
 void populateOptimizeMatmuOpPatterns(MLIRContext *context, RewritePatternSet &patterns) {
+    patterns.add<RaiseUnitBatchMatmulPattern>(context);
     patterns.add<BatchMatmulOpPattern>(context);
 }
 

@@ -292,6 +292,43 @@ static LogicalResult matchZpSubtractedOperand(
     return success();
 }
 
+// Peel a compile-time i32 constant back to i8. Constant folding can collapse
+// the whole zp-subtract + widening chain (always for a zero weight zero point),
+// leaving a plain i32 `arith.constant` where the chain would otherwise show a
+// bare widening generic or a zp-subtracted pair. The folded values are already
+// zp-corrected, so this reads as w_zp = 0. Signedness comes from the value
+// range: [-128,127] is an si8 weight, [0,255] a ui8 one; anything wider means
+// the fold baked in a non-trivial zero point we cannot recover -- no match.
+// Sets `isUnsigned` accordingly. Null when `v` is not such a constant.
+static Value peelFoldedWideConstant(Value v, bool &isUnsigned) {
+    auto cst = v.getDefiningOp<arith::ConstantOp>();
+    if (!cst)
+        return nullptr;
+    auto ty = dyn_cast<RankedTensorType>(v.getType());
+    auto dense = dyn_cast_or_null<DenseIntElementsAttr>(cst.getValue());
+    if (!ty || !dense || !ty.getElementType().isInteger(32))
+        return nullptr;
+    bool fitsSigned = true, fitsUnsigned = true;
+    for (const APInt &val : dense.getValues<APInt>()) {
+        int64_t sext = val.getSExtValue();
+        fitsSigned &= sext >= -128 && sext <= 127;
+        fitsUnsigned &= sext >= 0 && sext <= 255;
+    }
+    if (!fitsSigned && !fitsUnsigned)
+        return nullptr;
+    isUnsigned = !fitsSigned;
+    SmallVector<APInt> vals;
+    vals.reserve(dense.getNumElements());
+    for (const APInt &val : dense.getValues<APInt>())
+        vals.push_back(APInt(8, val.getSExtValue() & 0xFF));
+    auto i8Ty = RankedTensorType::get(ty.getShape(), IntegerType::get(v.getContext(), 8));
+    OpBuilder builder(cst);
+    return arith::ConstantOp::create(
+               builder, v.getLoc(), i8Ty, DenseIntElementsAttr::get(i8Ty, vals)
+    )
+        .getResult();
+}
+
 // Extract a scalar float constant.
 static std::optional<APFloat> getScalarFloatConst(Value v) {
     auto cst = v.getDefiningOp<arith::ConstantOp>();
@@ -447,9 +484,27 @@ class RaiseMatMulInteger : public OpRewritePattern<linalg::GenericOp> {
         }
         if (slicedBeforeCast ? !allUsersAreColumnSlices(matmulResult) : !matmulResult.hasOneUse())
             return rewriter.notifyMatchFailure(op, "matmul is shared by other consumers");
+        // A unit batch may have been collapsed away ahead of this pass: an
+        // expand_shape then sits between the rank-2 matmul and the cast, and the
+        // activation arrives through the matching collapse_shape. Peel the expand
+        // here (the collapse is peeled where the lhs is matched below) and treat
+        // the chain as the rank-2 matmul it now is.
+        bool peeledUnitBatch = false;
+        if (batched && !depthwise) {
+            if (auto expand = matmulResult.getDefiningOp<tensor::ExpandShapeOp>()) {
+                auto srcTy = dyn_cast<RankedTensorType>(expand.getSrcType());
+                if (srcTy && srcTy.getRank() == 2) {
+                    matmulResult = expand.getSrc();
+                    peeledUnitBatch = true;
+                }
+            }
+        }
         Operation *matmulDef = matmulResult.getDefiningOp();
-        if (batched ? !isa_and_nonnull<linalg::BatchMatmulOp>(matmulDef)
-                    : !isa_and_nonnull<linalg::MatmulOp>(matmulDef))
+        bool isExpectedMatmul =
+            batched ? (peeledUnitBatch ? isa_and_nonnull<linalg::MatmulOp>(matmulDef)
+                                       : isa_and_nonnull<linalg::BatchMatmulOp>(matmulDef))
+                    : isa_and_nonnull<linalg::MatmulOp>(matmulDef);
+        if (!isExpectedMatmul)
             return rewriter.notifyMatchFailure(op, "cast input is not an i32 matmul");
         auto matmulOutTy = dyn_cast<RankedTensorType>(matmulDef->getResult(0).getType());
         if (!matmulOutTy || !matmulOutTy.getElementType().isInteger(32))
@@ -461,15 +516,19 @@ class RaiseMatMulInteger : public OpRewritePattern<linalg::GenericOp> {
         // epilogue built over [M, colWidth] is shape-for-shape what was there.
         const bool shapeMatches =
             rankReduced ? (matmulOutTy.getShape()[0] == 1 && outType.getShape()[0] == colWidth)
-                        : (outType.getShape().drop_back() == matmulOutTy.getShape().drop_back() &&
-                           outType.getShape().back() == colWidth);
+            : peeledUnitBatch
+                ? (matmulOutTy.getRank() == 2 && outType.getShape()[0] == 1 &&
+                   outType.getShape()[1] == matmulOutTy.getShape()[0] &&
+                   outType.getShape()[2] == colWidth && matmulOutTy.getShape().back() == colWidth)
+                : (outType.getShape().drop_back() == matmulOutTy.getShape().drop_back() &&
+                   outType.getShape().back() == colWidth);
         if (!shapeMatches)
             return rewriter.notifyMatchFailure(op, "dequant shape is not the matmul branch");
 
         // ---- peel the zero-point-subtracted operands ----
         SmallVector<Value> matmulInputs = cast<linalg::LinalgOp>(matmulDef).getDpsInputs();
         Value weightOperand = matmulInputs[1];
-        if (batched && !depthwise) {
+        if (batched && !depthwise && !peeledUnitBatch) {
             // The weight is the same [K,N] constant for every batch, wrapped in the unit
             // batch the batch matmul's operand rank needs.
             weightOperand = peelUnitBatchExpand(weightOperand);
@@ -478,9 +537,19 @@ class RaiseMatMulInteger : public OpRewritePattern<linalg::GenericOp> {
         }
 
         Value A, aZpNarrow, aZp, W, wZpNarrow, wZpWide;
-        if (failed(matchZpSubtractedOperand(
-                matmulInputs[0], /*isUnsigned=*/true, A, aZpNarrow, aZp, false
-            )))
+        Value lhsOperand = matmulInputs[0];
+        if (peeledUnitBatch) {
+            // The rank-2 matmul's lhs is the unit-batch collapse of the [1,M,K]
+            // zp-subtracted activation; peel it to reach the pair the matcher reads.
+            if (auto collapse = lhsOperand.getDefiningOp<tensor::CollapseShapeOp>()) {
+                auto srcTy = dyn_cast<RankedTensorType>(collapse.getSrcType());
+                if (srcTy && srcTy.getRank() == 3 && srcTy.getShape()[0] == 1)
+                    lhsOperand = collapse.getSrc();
+            }
+        }
+        if (failed(
+                matchZpSubtractedOperand(lhsOperand, /*isUnsigned=*/true, A, aZpNarrow, aZp, false)
+            ))
             return rewriter.notifyMatchFailure(op, "lhs is not a zp-subtracted u8 activation");
         // ONNX lets B be int8 or uint8, and the front end widens it with the matching
         // extension, so which one it is is readable off the chain.
@@ -495,6 +564,8 @@ class RaiseMatMulInteger : public OpRewritePattern<linalg::GenericOp> {
                 wBareExtension = true;
                 wUnsigned = true;
             }
+            else if ((W = peelFoldedWideConstant(weightOperand, wUnsigned)))
+                wBareExtension = true;
             else if (failed(matchZpSubtractedOperand(
                          weightOperand, /*isUnsigned=*/false, W, wZpNarrow, wZpWide, true
                      ))) {
@@ -507,6 +578,8 @@ class RaiseMatMulInteger : public OpRewritePattern<linalg::GenericOp> {
                     );
             }
         }
+        else if ((W = peelFoldedWideConstant(weightOperand, wUnsigned)))
+            wBareExtension = true;
         else if (failed(matchZpSubtractedOperand(
                      weightOperand, /*isUnsigned=*/false, W, wZpNarrow, wZpWide, true
                  ))) {
@@ -609,7 +682,7 @@ class RaiseMatMulInteger : public OpRewritePattern<linalg::GenericOp> {
         Location loc = op.getLoc();
         MLIRContext *ctx = rewriter.getContext();
         auto bf16 = rewriter.getBF16Type();
-        int64_t M = matmulOutTy.getShape()[batched ? 1 : 0];
+        int64_t M = matmulOutTy.getShape()[(batched && !peeledUnitBatch) ? 1 : 0];
         // N is this branch's width, which is the whole matmul when it was not sliced.
         int64_t N = colWidth;
         // The depthwise GEMV keeps its per-channel batch: raw is [C, 1, 1].

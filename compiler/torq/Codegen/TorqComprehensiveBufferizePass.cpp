@@ -158,13 +158,19 @@ static IREEOneShotBufferizationOptions getBufferizationOptions() {
 
     // This type converter converts tensor types to memref types when no exact
     // memref type can be inferred from the context.
-    options.unknownTypeConverterFn = [](TensorType tensorType, Attribute memorySpace,
-                                        const BufferizationOptions &options) {
-        if (tensorType.hasStaticShape()) {
-            return bufferization::getMemRefTypeWithStaticIdentityLayout(tensorType, memorySpace);
+    options.unknownTypeConverterFn = [](bufferization::TensorLikeType tensorType,
+                                        Attribute memorySpace, const BufferizationOptions &options
+                                     ) -> bufferization::BufferLikeType {
+        auto tensorTy = cast<TensorType>(tensorType);
+        if (tensorTy.hasStaticShape()) {
+            return cast<bufferization::BufferLikeType>(
+                bufferization::getMemRefTypeWithStaticIdentityLayout(tensorTy, memorySpace)
+            );
         }
         // Default case: Fully dynamic layout map for best compatibility.
-        return bufferization::getMemRefTypeWithFullyDynamicLayout(tensorType, memorySpace);
+        return cast<bufferization::BufferLikeType>(
+            bufferization::getMemRefTypeWithFullyDynamicLayout(tensorTy, memorySpace)
+        );
     };
 
     // scf.for reduction accumulators may be yielded through a torq_hl.convert

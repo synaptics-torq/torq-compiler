@@ -14,9 +14,11 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "iree/async/frontier_tracker.h"
+#include "iree/async/semaphore.h"
+#include "iree/async/util/proactor_pool.h"
 #include "iree/base/internal/arena.h"
 #include "iree/base/internal/cpu.h"
-#include "iree/base/internal/event_pool.h"
 #include "iree/hal/drivers/local_task/task_semaphore.h"
 #include "torq_event.h"
 #include "iree/hal/local/executable_environment.h"
@@ -41,14 +43,21 @@ typedef struct iree_hal_torq_device_t {
   // buffers can contain inlined data uploads).
   iree_arena_block_pool_t large_block_pool;
 
-  // Shared pool of host events used by task semaphores for blocking waits.
-  iree_event_pool_t* event_pool;
+  // Proactor pool (single inline proactor) backing task semaphores; the pool
+  // must outlive all semaphores created from it.
+  iree_async_proactor_pool_t* proactor_pool;
+  iree_async_proactor_t* proactor;
+
+  // Topology info assigned by the device group (3.12). Standalone torq devices
+  // only ever see the trivial single-device topology.
+  iree_hal_device_topology_info_t topology_info;
 
   iree_host_size_t loader_count;
   iree_hal_executable_loader_t* loaders[];
 } iree_hal_torq_device_t;
 
 static const iree_hal_device_vtable_t iree_hal_torq_device_vtable;
+static void iree_hal_torq_device_clear_topology_info(iree_hal_torq_device_t* device);
 
 static iree_hal_torq_device_t* iree_hal_torq_device_cast(
     iree_hal_device_t* base_value) {
@@ -110,8 +119,14 @@ iree_status_t iree_hal_torq_device_create(
     iree_hal_allocator_retain(device_allocator);
     iree_arena_block_pool_initialize(params->arena_block_size, host_allocator,
                                      &device->large_block_pool);
-    status = iree_event_pool_allocate(/*available_capacity=*/32, host_allocator,
-                                      &device->event_pool);
+    status = iree_async_proactor_pool_create(
+        /*node_count=*/1, /*node_ids=*/NULL,
+        iree_async_proactor_pool_options_default(), host_allocator,
+        &device->proactor_pool);
+    if (iree_status_is_ok(status)) {
+      status = iree_async_proactor_pool_get(device->proactor_pool,
+                                            /*index=*/0, &device->proactor);
+    }
 
     if (iree_status_is_ok(status)) {
       device->loader_count = loader_count;
@@ -136,8 +151,6 @@ static void iree_hal_torq_device_destroy(iree_hal_device_t* base_device) {
   iree_allocator_t host_allocator = iree_hal_device_host_allocator(base_device);
   IREE_TRACE_ZONE_BEGIN(z0);
 
-  iree_event_pool_free(device->event_pool);
-
   for (iree_host_size_t i = 0; i < device->loader_count; ++i) {
     iree_hal_executable_loader_release(device->loaders[i]);
   }
@@ -146,6 +159,13 @@ static void iree_hal_torq_device_destroy(iree_hal_device_t* base_device) {
   iree_hal_channel_provider_release(device->channel_provider);
 
   iree_arena_block_pool_deinitialize(&device->large_block_pool);
+
+  // The pool owns the proactor and must be released only after every resource
+  // that could reference it (semaphores) is gone.
+  iree_hal_torq_device_clear_topology_info(device);
+  if (device->proactor_pool) {
+    iree_async_proactor_pool_release(device->proactor_pool);
+  }
 
   iree_allocator_free(host_allocator, device);
 
@@ -232,6 +252,50 @@ static iree_status_t iree_hal_torq_device_query_i64(
       (int)category.size, category.data, (int)key.size, key.data);
 }
 
+// 3.12: the HAL device group builder queries capabilities and assigns topology
+// for every device. Torq devices run standalone, so a zeroed capabilities
+// struct and a stored-but-unused topology are sufficient.
+static iree_status_t iree_hal_torq_device_query_capabilities(
+    iree_hal_device_t* base_device,
+    iree_hal_device_capabilities_t* out_capabilities) {
+  memset(out_capabilities, 0, sizeof(*out_capabilities));
+  return iree_ok_status();
+}
+
+static const iree_hal_device_topology_info_t* iree_hal_torq_device_topology_info(
+    iree_hal_device_t* base_device) {
+  iree_hal_torq_device_t* device = iree_hal_torq_device_cast(base_device);
+  return &device->topology_info;
+}
+
+static iree_status_t iree_hal_torq_device_refine_topology_edge(
+    iree_hal_device_t* src_device, iree_hal_device_t* dst_device,
+    iree_hal_topology_edge_t* edge) {
+  return iree_ok_status();
+}
+
+static void iree_hal_torq_device_clear_topology_info(iree_hal_torq_device_t* device) {
+  if (device->topology_info.frontier.tracker) {
+    iree_async_frontier_tracker_release(device->topology_info.frontier.tracker);
+  }
+  memset(&device->topology_info, 0, sizeof(device->topology_info));
+}
+
+static iree_status_t iree_hal_torq_device_assign_topology_info(
+    iree_hal_device_t* base_device,
+    const iree_hal_device_topology_info_t* topology_info) {
+  iree_hal_torq_device_t* device = iree_hal_torq_device_cast(base_device);
+  iree_hal_torq_device_clear_topology_info(device);
+  if (!topology_info) {
+    return iree_ok_status();
+  }
+  device->topology_info = *topology_info;
+  if (device->topology_info.frontier.tracker) {
+    iree_async_frontier_tracker_retain(device->topology_info.frontier.tracker);
+  }
+  return iree_ok_status();
+}
+
 static iree_status_t iree_hal_torq_device_create_channel(
     iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity,
     iree_hal_channel_params_t params, iree_hal_channel_t** out_channel) {
@@ -271,7 +335,7 @@ static iree_status_t iree_hal_torq_device_create_event(
 
 static iree_status_t iree_hal_torq_device_create_executable_cache(
     iree_hal_device_t* base_device, iree_string_view_t identifier,
-    iree_loop_t loop, iree_hal_executable_cache_t** out_executable_cache) {
+    iree_hal_executable_cache_t** out_executable_cache) {
   return iree_hal_torq_nop_executable_cache_create(base_device,
       identifier, iree_hal_device_host_allocator(base_device), out_executable_cache);
 }
@@ -296,7 +360,7 @@ static iree_status_t iree_hal_torq_device_create_semaphore(
     uint64_t initial_value, iree_hal_semaphore_flags_t flags,
     iree_hal_semaphore_t** out_semaphore) {
   iree_hal_torq_device_t* device = iree_hal_torq_device_cast(base_device);
-  return iree_hal_task_semaphore_create(device->event_pool, initial_value,
+  return iree_hal_task_semaphore_create(device->proactor, initial_value,
                                         device->host_allocator, out_semaphore);
 }
 
@@ -314,17 +378,17 @@ static iree_status_t iree_hal_torq_device_queue_alloca(
     iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity,
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
-    iree_hal_allocator_pool_t pool, iree_hal_buffer_params_t params,
+    iree_hal_pool_t* pool, iree_hal_buffer_params_t params,
     iree_device_size_t allocation_size, iree_hal_alloca_flags_t flags,
     iree_hal_buffer_t** IREE_RESTRICT out_buffer) {
   // TODO(benvanik): queue-ordered allocations.
   IREE_RETURN_IF_ERROR(iree_hal_semaphore_list_wait(wait_semaphore_list,
                                                     iree_infinite_timeout(),
-                                                  IREE_HAL_WAIT_FLAG_DEFAULT));
+                                                  IREE_ASYNC_WAIT_FLAG_NONE));
   IREE_RETURN_IF_ERROR(
       iree_hal_allocator_allocate_buffer(iree_hal_device_allocator(base_device),
                                          params, allocation_size, out_buffer));
-  IREE_RETURN_IF_ERROR(iree_hal_semaphore_list_signal(signal_semaphore_list));
+  IREE_RETURN_IF_ERROR(iree_hal_semaphore_list_signal(signal_semaphore_list, /*frontier=*/NULL));
   return iree_ok_status();
 }
 
@@ -348,7 +412,7 @@ static iree_status_t iree_hal_torq_device_queue_host_call(
   // Wait for all dependencies.
   IREE_RETURN_IF_ERROR(
       iree_hal_semaphore_list_wait(wait_semaphore_list, iree_infinite_timeout(),
-                                   IREE_HAL_WAIT_FLAG_DEFAULT));
+                                   IREE_ASYNC_WAIT_FLAG_NONE));
 
   // If non-blocking then immediately signal the dependencies instead of letting
   // the call do it. We don't expect this to allow more work to proceed in the
@@ -359,7 +423,7 @@ static iree_status_t iree_hal_torq_device_queue_host_call(
     // NOTE: the signals can fail in which case we never perform the call.
     // That's ok as failure to signal is considered a device-loss/death
     // situation as there's no telling what has gone wrong.
-    IREE_RETURN_IF_ERROR(iree_hal_semaphore_list_signal(signal_semaphore_list));
+    IREE_RETURN_IF_ERROR(iree_hal_semaphore_list_signal(signal_semaphore_list, /*frontier=*/NULL));
   }
 
   // Issue the call.
@@ -376,7 +440,7 @@ static iree_status_t iree_hal_torq_device_queue_host_call(
     return iree_ok_status();
   } else if (iree_status_is_ok(call_status)) {
     // Signal callback completed synchronously.
-    return iree_hal_semaphore_list_signal(signal_semaphore_list);
+    return iree_hal_semaphore_list_signal(signal_semaphore_list, /*frontier=*/NULL);
   } else {
     // If the call failed we need to fail all dependent semaphores to propagate
     // the error.
@@ -450,17 +514,14 @@ static iree_status_t iree_hal_torq_device_queue_read(
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
     iree_device_size_t length, iree_hal_read_flags_t flags) {
   // TODO: expose streaming chunk count/size options.
-  iree_status_t loop_status = iree_ok_status();
   iree_hal_file_transfer_options_t options = {
-      .loop = iree_loop_inline(&loop_status),
       .chunk_count = IREE_HAL_FILE_TRANSFER_CHUNK_COUNT_DEFAULT,
       .chunk_size = IREE_HAL_FILE_TRANSFER_CHUNK_SIZE_DEFAULT,
   };
-  IREE_RETURN_IF_ERROR(iree_hal_device_queue_read_streaming(
+  return iree_hal_device_queue_read_streaming(
       base_device, queue_affinity, wait_semaphore_list, signal_semaphore_list,
       source_file, source_offset, target_buffer, target_offset, length, flags,
-      options));
-  return loop_status;
+      options);
 }
 
 static iree_status_t iree_hal_torq_device_queue_write(
@@ -471,17 +532,14 @@ static iree_status_t iree_hal_torq_device_queue_write(
     iree_hal_file_t* target_file, uint64_t target_offset,
     iree_device_size_t length, iree_hal_write_flags_t flags) {
   // TODO: expose streaming chunk count/size options.
-  iree_status_t loop_status = iree_ok_status();
   iree_hal_file_transfer_options_t options = {
-      .loop = iree_loop_inline(&loop_status),
       .chunk_count = IREE_HAL_FILE_TRANSFER_CHUNK_COUNT_DEFAULT,
       .chunk_size = IREE_HAL_FILE_TRANSFER_CHUNK_SIZE_DEFAULT,
   };
-  IREE_RETURN_IF_ERROR(iree_hal_device_queue_write_streaming(
+  return iree_hal_device_queue_write_streaming(
       base_device, queue_affinity, wait_semaphore_list, signal_semaphore_list,
       source_buffer, source_offset, target_file, target_offset, length, flags,
-      options));
-  return loop_status;
+      options);
 }
 
 static iree_status_t iree_hal_torq_device_queue_execute(
@@ -505,7 +563,7 @@ static iree_status_t iree_hal_torq_device_queue_execute(
   IREE_HAL_TORQ_PROFILE_STAGE_IF_OK(
       profile_scope, status, IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_WAIT,
       iree_hal_semaphore_list_wait(wait_semaphore_list, iree_infinite_timeout(),
-                     IREE_HAL_WAIT_FLAG_DEFAULT));
+                     IREE_ASYNC_WAIT_FLAG_NONE));
 
   // Run all deferred command buffers - any we could have run inline we
   // already did during recording.
@@ -519,7 +577,7 @@ static iree_status_t iree_hal_torq_device_queue_execute(
   IREE_HAL_TORQ_PROFILE_STAGE_IF_OK(
       profile_scope, status,
       IREE_HAL_TORQ_PROFILE_EVENT_HAL_QUEUE_SIGNAL,
-      iree_hal_semaphore_list_signal(signal_semaphore_list));
+      iree_hal_semaphore_list_signal(signal_semaphore_list, /*frontier=*/NULL));
 
   iree_hal_torq_profile_scope_end(profile_scope);
   return status;
@@ -529,16 +587,6 @@ static iree_status_t iree_hal_torq_device_queue_flush(
     iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity) {
   // Currently unused; we flush as submissions are made.
   return iree_ok_status();
-}
-
-static iree_status_t iree_hal_torq_device_wait_semaphores(
-    iree_hal_device_t* base_device, iree_hal_wait_mode_t wait_mode,
-    const iree_hal_semaphore_list_t semaphore_list, iree_timeout_t timeout,
-    iree_hal_wait_flags_t flags) {
-  iree_hal_torq_device_t* device = iree_hal_torq_device_cast(base_device);
-  return iree_hal_task_semaphore_multi_wait(
-      wait_mode, semaphore_list, timeout, flags, device->event_pool,
-      &device->large_block_pool);
 }
 
 static iree_status_t iree_hal_torq_device_profiling_begin(
@@ -576,6 +624,10 @@ static const iree_hal_device_vtable_t iree_hal_torq_device_vtable = {
     .replace_channel_provider = iree_hal_torq_replace_channel_provider,
     .trim = iree_hal_torq_device_trim,
     .query_i64 = iree_hal_torq_device_query_i64,
+    .query_capabilities = iree_hal_torq_device_query_capabilities,
+    .topology_info = iree_hal_torq_device_topology_info,
+    .refine_topology_edge = iree_hal_torq_device_refine_topology_edge,
+    .assign_topology_info = iree_hal_torq_device_assign_topology_info,
     .create_channel = iree_hal_torq_device_create_channel,
     .create_command_buffer = iree_hal_torq_device_create_command_buffer,
     .create_event = iree_hal_torq_device_create_event,
@@ -595,7 +647,6 @@ static const iree_hal_device_vtable_t iree_hal_torq_device_vtable = {
     .queue_dispatch = iree_hal_device_queue_emulated_dispatch,
     .queue_execute = iree_hal_torq_device_queue_execute,
     .queue_flush = iree_hal_torq_device_queue_flush,
-    .wait_semaphores = iree_hal_torq_device_wait_semaphores,
     .profiling_begin = iree_hal_torq_device_profiling_begin,
     .profiling_flush = iree_hal_torq_device_profiling_flush,
     .profiling_end = iree_hal_torq_device_profiling_end,

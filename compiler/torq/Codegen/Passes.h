@@ -43,6 +43,10 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createValidToSamePadPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createCheckCssStackSizePass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createNarrowFloatSelectPass();
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createSwapSelectsToIfPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createCoalesceElementwiseChainsPass();
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createFuseTransposeIntoGroupPass();
 

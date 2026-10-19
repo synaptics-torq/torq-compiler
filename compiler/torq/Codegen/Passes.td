@@ -86,6 +86,32 @@ def CheckCssStackSize
   ];
 }
 
+def NarrowFloatSelect
+    : InterfacePass<"torq-narrow-float-select", "mlir::FunctionOpInterface"> {
+
+  let summary = "Narrow widened float selects (select(c, extf a, extf b) -> extf(select(c, a, b))) and fold exact float cast round trips (truncf(extf(x)) -> x).";
+
+  let constructor = "mlir::syna::torq::createNarrowFloatSelectPass()";
+
+  let dependentDialects = [
+    "mlir::arith::ArithDialect"
+  ];
+}
+
+def SwapSelectsToIf
+    : InterfacePass<"torq-swap-selects-to-if", "mlir::FunctionOpInterface"> {
+
+  let summary = "Lower the select-pair in-place swap motif (select(c,a,b)/select(c,b,a) feeding stores into the locations the operands were loaded from) into a conditional scf.if swap.";
+
+  let constructor = "mlir::syna::torq::createSwapSelectsToIfPass()";
+
+  let dependentDialects = [
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::scf::SCFDialect"
+  ];
+}
+
 def TORQLowerExecutableTarget
     :  Pass<"iree-torq-lower-executable-target-pass", "ModuleOp"> {
 

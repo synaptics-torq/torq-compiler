@@ -50,6 +50,7 @@ jobs:
     runs-on:
       - codebuild-${{ vars.CODEBUILD_PROJECT_CODEBASE }}-${{ github.run_id }}-${{ github.run_attempt }}
         image:custom-linux-${{ needs.docker_image_builder.outputs.image_name }}
+        instance-size:xlarge
 
     env:
       SCCACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}

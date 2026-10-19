@@ -10,7 +10,7 @@
 #include "driver/torq_driver.h"
 
 #include "iree/base/api.h"
-#include "iree/base/internal/flags.h"
+#include "iree/base/tooling/flags.h"
 #include "iree/hal/local/loaders/registration/init.h"
 #include "iree/hal/local/plugins/registration/init.h"
 #include "iree/hal/utils/caching_allocator.h"

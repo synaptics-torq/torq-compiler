@@ -30,7 +30,6 @@ set(torq_hdrs
     torq_event.h
     torq_allocator.h
     torq_profile_scope.h
-    torq_semaphore.h
     TorqExecutable.h
     TorqIO.h
     TorqDump.h
@@ -45,7 +44,6 @@ set(torq_srcs
     torq_driver.c
     torq_event.c
     torq_profile_scope.cc
-    torq_semaphore.c
     TorqExecutable.cc
     TorqIO.cc
     TorqDump.cc
@@ -55,9 +53,9 @@ set(torq_deps
     iree::base::internal
     iree::base::internal::arena
     iree::base::internal::cpu
-    iree::base::internal::event_pool
-    iree::base::internal::synchronization
     iree::base::internal::flatcc::parsing
+    iree::async
+    iree::async::util::proactor_pool
     iree::hal
     iree::hal::drivers::local_task::task_driver
     iree::hal::local
@@ -65,7 +63,7 @@ set(torq_deps
     iree::hal::utils::deferred_command_buffer
     iree::hal::utils::executable_header
     iree::hal::utils::file_transfer
-    iree::hal::utils::semaphore_base
+    iree::hal::utils::queue_emulation
     iree::tooling::numpy_io
     iree::io::stream
     schemas::torq_executable_def_c_fbs

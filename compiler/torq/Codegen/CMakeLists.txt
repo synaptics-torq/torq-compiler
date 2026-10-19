@@ -16,6 +16,8 @@ set(sources
     BufferizationUtils.cpp
     BufferizePeeledForallInPlacePass.cpp
     CheckCssStackSizePass.cpp
+    NarrowFloatSelectPass.cpp
+    SwapSelectsToIfPass.cpp
     CoalesceElementwiseChainsPass.cpp
     FuseTransposeIntoGroupPass.cpp
     CompileCpuProgramsPass.cpp
@@ -102,8 +104,8 @@ iree_cc_library(
     iree::compiler::Dialect::HAL::IR::HALDialect
     iree::compiler::Dialect::LinalgExt::IR
     iree::compiler::Dialect::LinalgExt::Transforms
+    iree::compiler::Dialect::Util::Transforms
     iree::compiler::Utils
-    IREELinalgTransformDialectPasses
     iree::compiler::plugins::target::LLVMCPU::LLVMIRPasses
     MLIRFuncDialect
     MLIRFunctionInterfaces

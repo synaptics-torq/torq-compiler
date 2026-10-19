@@ -6,6 +6,7 @@
 
 #include "PassesDetail.h"
 
+#include "iree/compiler/Codegen/Dialect/CPU/IR/IREECPUTypes.h"
 #include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
 #include "mlir/IR/Attributes.h"
@@ -82,7 +83,9 @@ static Operation *outlineCpuProgramIntoExecutable(
     // FIXME: we should probably run the configuration pipeline instead
     auto translationInfo = IREE::Codegen::TranslationInfoAttr::get(
         funcOp.getContext(),
-        mlir::iree_compiler::IREE::Codegen::DispatchLoweringPassPipeline::CPUDefault
+        IREE::CPU::PipelineAttr::get(funcOp.getContext(), IREE::CPU::LoweringPipeline::Default),
+        /*codegenSpec=*/{}, /*workgroupSize=*/{}, /*subgroupSize=*/{},
+        /*configuration=*/{}
     );
 
     succeeded(setTranslationInfo(funcOp, translationInfo));

@@ -125,7 +125,7 @@ template <typename T> Type getMLIRType(MLIRContext *context) {
 // Create a constant op from a std::vector
 template <typename T>
 Value createConst(const std::vector<T> &values, OpBuilder &builder, Location loc) {
-    DenseIntOrFPElementsAttr denseAttr;
+    DenseTypedElementsAttr denseAttr;
     if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double> ||
                   std::is_same_v<T, llvm::APFloat>) {
         auto type = RankedTensorType::get(
@@ -140,8 +140,8 @@ Value createConst(const std::vector<T> &values, OpBuilder &builder, Location loc
     return arith::ConstantOp::create(builder, loc, denseAttr);
 }
 
-// Create a constant op from a DenseIntOrFPElementsAttr
-inline Value createConst(DenseIntOrFPElementsAttr denseAttr, OpBuilder &builder, Location loc) {
+// Create a constant op from a DenseTypedElementsAttr
+inline Value createConst(DenseTypedElementsAttr denseAttr, OpBuilder &builder, Location loc) {
     if (!denseAttr) {
         return {};
     }
@@ -347,8 +347,8 @@ inline std::vector<int64_t> attrValuesAsVec(DenseIntElementsAttr denseElementAtt
     return rangeValues(denseElementAttr.getValues<int64_t>());
 }
 
-// Returns the DenseIntOrFPElementsAttr from a arith::ConstantOp Value
-DenseIntOrFPElementsAttr returnDenseElementAttr(Value constV);
+// Returns the DenseTypedElementsAttr from a arith::ConstantOp Value
+DenseTypedElementsAttr returnDenseElementAttr(Value constV);
 
 // Returns the Attribute from a arith::ConstantOp Value. In cases of scalar constant this will be
 // useful

@@ -29,6 +29,7 @@
 #include "iree/compiler/Dialect/Encoding/IR/EncodingTypes.h"
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
+#include "iree/compiler/Dialect/Util/Transforms/Passes.h"
 
 #include "compiler/plugins/target/LLVMCPU/LLVMIRPasses.h"
 #include "compiler/plugins/target/LLVMCPU/LLVMTargetOptions.h"
@@ -356,10 +357,9 @@ static void addCssLoweringPasses(OpPassManager &pipeline) {
 
     modulePassManager.addPass(createLowerExecutableUsingTransformDialectPass());
 
-    // Decompose tensor.concat to insert_slice form first, then tie the
-    // resulting tensor chain to the dispatch output buffer.
+    // Decompose tensor.concat to insert_slice form first.
+    // (ConvertToDestinationPassingStylePass was deleted upstream, #23783.)
     modulePassManager.addNestedPass<func::FuncOp>(createDecomposeTensorConcatPass());
-    modulePassManager.addNestedPass<func::FuncOp>(createConvertToDestinationPassingStylePass());
 
     FunctionLikeNest(modulePassManager).addPass(createLLVMCPULowerExecutableTargetPass);
 
@@ -371,8 +371,29 @@ static void addCssLoweringPasses(OpPassManager &pipeline) {
         // Linalg -> SCF
         .addPass(createMemrefCopyToLinalgPass)
         .addPass(createConvertLinalgToLoopsPass)
+        // The LinalgExt sort sweep is select-based since 3.12; turn the
+        // in-place swap motif back into a conditional swap so soft-float CSS
+        // targets don't pay a duplicated compare libcall per sweep step.
+        .addPass(createSwapSelectsToIfPass)
         .addPass(createConvertBf16ArithToF32Pass)
-        .addPass(createConvertBf16ToUInt16BuffersPass)
+        // 3.12's replacement for the removed ConvertBf16ToUInt16Buffers pass.
+        // Without it bf16 buffers stay bf16 and every access widens to f32,
+        // costing ~2.5x executed instructions on soft-float CSS sims. fp8
+        // types go through natively, as in the upstream LLVMCPU pipeline.
+        .addPass([]() {
+            ConvertUnsupportedFloatToIntBuffersPassOptions options;
+            options.includeBf16 = true;
+            options.includeF8E5M2 = false;
+            options.includeF8E4M3FN = false;
+            options.includeF8E5M2FNUZ = false;
+            options.includeF8E4M3FNUZ = false;
+            options.includeF8E8M0FNU = false;
+            return createConvertUnsupportedFloatToIntBuffersPass(options);
+        })
+        // Undo the f32 widening of selects left behind by the bf16 arith
+        // conversion (e.g. the select-based LinalgExt sort sweep); the
+        // canonicalizer then folds the truncf(extf) store paths away.
+        .addPass(createNarrowFloatSelectPass)
         .addPass(createCanonicalizerPass)
         .addPass(createCSEPass);
 
@@ -411,6 +432,11 @@ static void addCssLoweringPasses(OpPassManager &pipeline) {
         .addPass(createEmulateNarrowTypePass)
         .addPass(createCanonicalizerPass)
         .addPass(createCSEPass);
+
+    // 3.12's stream analysis attaches util.assume.int (e.g. udiv) to dispatch
+    // operands and they survive interface materialization; ConvertToLLVM marks
+    // the util dialect illegal. Drop the hints first, as LLVMCPU does.
+    modulePassManager.addPass(IREE::Util::createDropCompilerHintsPass());
 
     modulePassManager.addPass(iree_compiler::createConvertToLLVMPass(true));
     modulePassManager.addPass(createReconcileUnrealizedCastsPass());
@@ -480,13 +506,12 @@ static void addHostLoweringPasses(OpPassManager &pipeline) {
         modulePassManager.addNestedPass<func::FuncOp>(createCSEPass());
 
         // the configuration half torq skips today: strategy + lowering configs
-        buildLLVMCPUCodegenConfigurationPassPipeline(pipeline);
+        buildLLVMCPUCodegenConfigurationPassPipeline(modulePassManager, CPUCodegenOptions{});
 
-        pipeline.nest<ModuleOp>().addNestedPass<func::FuncOp>(
-            std::make_unique<ZeroDistributionTilesPass>()
+        modulePassManager.addNestedPass<func::FuncOp>(std::make_unique<ZeroDistributionTilesPass>()
         );
 
-        buildLLVMCPUCodegenPassPipeline(pipeline, false);
+        buildLLVMCPUCodegenPassPipeline(modulePassManager, LLVMCPUPipelineOptions{});
 
         return;
     }
@@ -507,7 +532,7 @@ static void addHostLoweringPasses(OpPassManager &pipeline) {
     // iree_linalg_ext.map_scatter which is rejected outside workgroups).
     modulePassManager.addNestedPass<func::FuncOp>(createConvertTensorPadToLinalgPass());
 
-    buildLLVMCPUCodegenPassPipeline(pipeline, false);
+    buildLLVMCPUCodegenPassPipeline(modulePassManager, LLVMCPUPipelineOptions{});
 }
 
 FailureOr<std::string> CompileCpuProgramsPass::compile(
@@ -531,6 +556,18 @@ FailureOr<std::string> CompileCpuProgramsPass::compile(
     }
 
     /* 2. Translate the llvm_ir dialect to an actual LLVM IR object */
+
+    // iree_codegen.dispatch_config ops are lowering metadata: 3.12 keeps them
+    // legal in ConvertToLLVM, but the MLIR->LLVM translation has no interface
+    // for them, so drop any that survived to this point.
+    SmallVector<Operation *> configOps;
+    variantOp.getInnerModule().walk([&](Operation *op) {
+        if (op->getName().getStringRef() == "iree_codegen.dispatch_config")
+            configOps.push_back(op);
+    });
+    for (Operation *op : configOps) {
+        op->erase();
+    }
 
     llvm::LLVMContext context;
 
@@ -636,12 +673,15 @@ LogicalResult CompileCpuProgramsPass::compileAndLink(IREE::HAL::ExecutableVarian
                 oldTarget.getBackend(), oldTarget.getFormat(), b.getDictionaryAttr(configItems)
             ));
 
-            // the CPUDefault pinned by OutlineCpuPrograms would make strategy
+            // the default CPU pipeline pinned by OutlineCpuPrograms would make strategy
             // selection skip the function
             variantOp.getInnerModule().walk([](func::FuncOp funcOp) {
                 auto info = getTranslationInfo(funcOp);
-                if (info && info.getDispatchLoweringPassPipeline() ==
-                                IREE::Codegen::DispatchLoweringPassPipeline::CPUDefault) {
+                auto pipelineAttr =
+                    info ? dyn_cast_if_present<IREE::CPU::PipelineAttr>(info.getPassPipeline())
+                         : nullptr;
+                if (pipelineAttr &&
+                    pipelineAttr.getValue() == IREE::CPU::LoweringPipeline::Default) {
                     eraseTranslationInfo(funcOp);
                 }
             });

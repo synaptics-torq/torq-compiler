@@ -6,7 +6,7 @@
 
 #include "TorqEventLog.h"
 
-#include "iree/base/internal/flags.h"
+#include "iree/base/tooling/flags.h"
 
 #include <algorithm>
 #include <fstream>

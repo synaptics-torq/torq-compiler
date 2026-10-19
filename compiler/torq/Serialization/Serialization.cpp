@@ -100,8 +100,7 @@ class Serializer {
     LogicalResult serializeFunction(mlir::FunctionOpInterface funcOp);
 
   private:
-    LogicalResult
-    addSegment(uint32_t xramAddress, mlir::DenseIntOrFPElementsAttr data, bool isCode);
+    LogicalResult addSegment(uint32_t xramAddress, mlir::DenseTypedElementsAttr data, bool isCode);
 
     LogicalResult addUninitializedSegment(uint32_t xramAddress, int size);
 
@@ -143,7 +142,7 @@ class Serializer {
 
     template <typename T>
     LogicalResult createISegment(
-        DenseIntOrFPElementsAttr &data, iree_compiler::FlatbufferBuilder &builder,
+        DenseTypedElementsAttr &data, iree_compiler::FlatbufferBuilder &builder,
         flatbuffers_uint8_vec_ref_t &dataRef, int32_t xramAddress
     ) {
 
@@ -158,7 +157,7 @@ class Serializer {
     }
 
     LogicalResult createPackedSubByteIntegerSegment(
-        DenseIntOrFPElementsAttr &data, iree_compiler::FlatbufferBuilder &builder,
+        DenseTypedElementsAttr &data, iree_compiler::FlatbufferBuilder &builder,
         flatbuffers_uint8_vec_ref_t &dataRef, int32_t xramAddress
     ) {
         auto numElements = data.getNumElements();
@@ -208,7 +207,7 @@ class Serializer {
 
     template <typename T>
     LogicalResult createFSegment(
-        DenseIntOrFPElementsAttr &data, iree_compiler::FlatbufferBuilder &builder,
+        DenseTypedElementsAttr &data, iree_compiler::FlatbufferBuilder &builder,
         flatbuffers_uint8_vec_ref_t &dataRef, int32_t xramAddress
     ) {
         int dtypeSize = sizeof(T);
@@ -287,7 +286,7 @@ LogicalResult Serializer::processGlobalOp(memref::GlobalOp &globalOp) {
             return globalOp.emitError("Global is initialized but has no initial value");
         }
 
-        return addSegment(xramAddress, cast<DenseIntOrFPElementsAttr>(*maybeData), false);
+        return addSegment(xramAddress, cast<DenseTypedElementsAttr>(*maybeData), false);
     }
 }
 
@@ -304,7 +303,7 @@ LogicalResult Serializer::serializeInvocation(torq_hl::CreateInvocationOp &creat
 }
 
 LogicalResult
-Serializer::addSegment(uint32_t xramAddress, mlir::DenseIntOrFPElementsAttr data, bool isCode) {
+Serializer::addSegment(uint32_t xramAddress, mlir::DenseTypedElementsAttr data, bool isCode) {
 
     if (data.isSplat()) {
 
@@ -454,7 +453,7 @@ LogicalResult Serializer::serializeProgramCode(torq_hl::ProgramCodeOp programCod
 
     auto text = executableBinaryOp.getData();
 
-    auto textAttr = dyn_cast<DenseIntOrFPElementsAttr>(text);
+    auto textAttr = dyn_cast<DenseTypedElementsAttr>(text);
     if (!textAttr) {
         return programCodeOp.emitError() << "CSS text is not a DenseElementsAttr";
     }
@@ -788,9 +787,9 @@ Serializer::serializeHostCode(mlir::FunctionOpInterface funcOp) {
     if (!data) {
         return hostCodeExecutableBinaryOp.emitError("Missing data in host_code binary");
     }
-    auto denseAttr = dyn_cast<DenseIntOrFPElementsAttr>(data);
+    auto denseAttr = dyn_cast<DenseTypedElementsAttr>(data);
     if (!denseAttr) {
-        return hostCodeExecutableBinaryOp.emitError("Expected DenseIntOrFPElementsAttr for data");
+        return hostCodeExecutableBinaryOp.emitError("Expected DenseTypedElementsAttr for data");
     }
     auto rawData = denseAttr.getRawData();
 

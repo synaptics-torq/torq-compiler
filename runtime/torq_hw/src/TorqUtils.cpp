@@ -6,7 +6,7 @@
 
 #include "TorqUtils.h"
 
-#include "iree/base/internal/flags.h"
+#include "iree/base/tooling/flags.h"
 
 #include <torq_nss_regs_struct.h>
 

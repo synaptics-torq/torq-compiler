@@ -26,8 +26,9 @@
 // embedding table is used instead.
 
 #include "iree/base/api.h"
-#include "iree/base/internal/flags.h"
+#include "iree/base/tooling/flags.h"
 #include "iree/hal/api.h"
+#include "iree/hal/replay/recorder.h"
 #include "iree/modules/hal/module.h"
 #include "iree/tooling/context_util.h"
 #include "iree/vm/api.h"
@@ -816,23 +817,31 @@ int main(int argc, char** argv) {
   iree_vm_context_t* head_context = NULL;
   iree_hal_device_t* head_device = NULL;
   iree_hal_allocator_t* head_device_allocator = NULL;
+  // IREE 3.12 returns the created devices in a list; the device pointers are
+  // borrowed from the lists, which are freed at cleanup.
+  iree_hal_device_list_t* device_list = NULL;
+  iree_hal_device_list_t* head_device_list = NULL;
+  iree_hal_replay_recorder_t* replay_recorder = NULL;
   if (iree_status_is_ok(status)) {
     if (two_context) {
       status = iree_tooling_create_context_from_flags(
           instance, 1, &body_module, iree_string_view_empty(), host_allocator,
-          &context, &device, &device_allocator);
+          &context, &device_list, &device_allocator, &replay_recorder);
       if (iree_status_is_ok(status)) {
         status = iree_tooling_create_context_from_flags(
             instance, 1, &head_module, iree_string_view_empty(), host_allocator,
-            &head_context, &head_device, &head_device_allocator);
+            &head_context, &head_device_list, &head_device_allocator,
+            &replay_recorder);
       }
     } else {
       status = iree_tooling_create_context_from_flags(
           instance, module_list.count, module_list.values,
-          iree_string_view_empty(), host_allocator, &context, &device,
-          &device_allocator);
+          iree_string_view_empty(), host_allocator, &context, &device_list,
+          &device_allocator, &replay_recorder);
     }
   }
+  if (device_list) device = iree_hal_device_list_at(device_list, 0);
+  if (head_device_list) head_device = iree_hal_device_list_at(head_device_list, 0);
   iree_tooling_module_list_reset(&module_list);
 
   // Embedding source: token_embeddings.npy preferred, legacy weight fallback.
@@ -1234,10 +1243,11 @@ int main(int argc, char** argv) {
   if (g_has_embeddings) npy_unmap(&g_embeddings);
   if (g_has_lut) npy_unmap(&g_lut);
   if (head_device_allocator) iree_hal_allocator_release(head_device_allocator);
-  if (head_device) iree_hal_device_release(head_device);
+  if (head_device_list) iree_hal_device_list_free(head_device_list);
   if (head_context) iree_vm_context_release(head_context);
   iree_hal_allocator_release(device_allocator);
-  iree_hal_device_release(device);
+  iree_hal_device_list_free(device_list);
+  if (replay_recorder) iree_hal_replay_recorder_release(replay_recorder);
   iree_vm_context_release(context);
   iree_vm_instance_release(instance);
 
