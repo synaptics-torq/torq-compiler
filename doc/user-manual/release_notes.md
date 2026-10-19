@@ -1,20 +1,44 @@
 # Release Notes
 
-## Version 2.3.0
+## Version 2.3.0 (2026-10-19)
 
 ### Torq changes since v2.2.1
 
+v2.3.0 is the first release to support SR200, the new Synaptics MCU SoC with a Torq NPU. Improvements across the
+compiler bring much better performance and support for more models: Qwen2.5 and Qwen3, EmbeddingGemma-2, and YOLO26,
+which now runs with slicing.
+
 #### Highlights
-- MobileNet-family models are much faster thanks to improvements in tiling, slicing and memory allocation. MobileNetV2 is twice as fast on SL2619 (SL2610 family), and the other CNN models, including the YOLOv8 and YOLO26 families, are 10% to 40% faster depending on the model.
-- LLMs and transformers run faster and use less memory thanks to smarter lowering of mixed-quant matmuls, tiling improvements and XRAM memory optimizations. int4-quantized Gemma3 now runs at up to 17 tokens/s on SL2610 with the new stream-schedule prefetch (`--torq-prefetch-algorithm=stream-schedule`, see below).
-- Opt-in stream-schedule prefetch (`--torq-prefetch-algorithm=stream-schedule`) reschedules the whole NSS stream over both slices, the DMA engine and LRAM: Gemma3 37% and Qwen2.5 45% to 51% faster. The default stays `auto` (constant-load prefetch).
-- New global LRAM allocator that plans LRAM for the whole dispatch, with up to 256 re-plans so larger models such as Quantized EmbeddingGemma-2 compile.
-- TFLite `FULLY_CONNECTED` runs on the FC kernel: 33% to 90% faster.
-- Graph edits previously done by torq-tools are now done by the compiler: transposes that only move size-1 dims become reshapes, unrolled concats collapse into slices, and scalar bf16 matmuls become elementwise multiplies.
-- ONNX GRU, including reverse and bidirectional, lowered through torch-mlir.
-- New `torq-lab debug` command to debug compile errors.
-- New SR200 target (`--torq-hw=SR200`): the TorqV2 NPU with one slice, 256 KB of LRAM and a CSS core with floating point and vector instructions. SR200 is an MCU; its operations that fall back to the host are compiled for its Arm Cortex-M85 with Helium (MVE) and FPU support.
-- int8 add is bit-exact with TFLite, and int16 requantization is fixed.
+
+Models run faster thanks to improvements in tiling, slicing and memory allocation.
+
+| Model | Measured on | Compared with v2.2.1 |
+|---|---|---|
+| MobileNetV2 | SL2610 simulator | 2.6x as fast |
+| YOLOv8, YOLO26 and YOLO pose | SL2610 simulator | 10% to 23% faster |
+| ResNet18, MNASNet, SqueezeNet and ShuffleNet | SL2610 simulator | 17% to 29% faster |
+| int4/int8 Gemma3, with the stream-schedule prefetch | SL2610 simulator | About 18 tokens/s, up from 12 |
+| TFLite int8 `FULLY_CONNECTED` layers, now on the FC kernel | SL2610 simulator | 32% to 67% faster |
+
+New supported models, with great performance compared with CPU inference:
+
+| Model | Measured on | Performance | Availability |
+|---|---|---|---|
+| Google EmbeddingGemma-2: text, vision and audio encoders, in int4, int8 and bf16 | SL2619 board | 3.6x to 15x faster than ONNX Runtime on the board's two Arm Cortex-A55 cores (int4: 5.9x to 10.8x), with 1.2x to 2.9x less memory and outputs that match the CPU (cosine similarity 0.9996 or higher) | The compiled models and the demo will come in a later update |
+| Qwen2.5-0.5B-Instruct, INT4 GPTQ weights | SL2610 board | 11.3 tokens/s | Export with `torq-export-model qwen` (torq-tools); chat demo in torq-examples |
+| Qwen3-0.6B, INT4 GPTQ weights | SL2610 board | 6.0 to 6.4 tokens/s | Export with `torq-export-model qwen` (torq-tools); chat demo in torq-examples |
+
+New features:
+
+| Feature | Description |
+|---|---|
+| Stream-schedule prefetch (opt-in) | `--torq-prefetch-algorithm=stream-schedule` reschedules the whole NSS stream over both slices, the DMA engine and LRAM. Compared with the default prefetch on the SL2610 simulator, Gemma3 is 37% faster and Qwen2.5 45% to 51% faster. The default stays `auto` (constant-load prefetch). |
+| Global LRAM allocator | Plans LRAM for the whole dispatch. |
+| Graph edits in the compiler | Graph edits previously done by torq-tools are now done by the compiler: transposes that only move size-1 dims become reshapes, unrolled concats collapse into slices, and scalar bf16 matmuls become elementwise multiplies. |
+| ONNX GRU | Including reverse and bidirectional, lowered through torch-mlir. |
+| `torq-lab debug` | New command to debug compile errors. |
+| SR200 target | `--torq-hw=SR200`: the TorqV2 NPU with one slice, 256 KB of LRAM and a CSS core with floating point and vector instructions. SR200 is an MCU; its operations that fall back to the host are compiled for its Arm Cortex-M85 with Helium (MVE) and FPU support. |
+| Numerical accuracy | int8 add is bit-exact with TFLite, and int16 requantization is fixed. |
 
 #### Added
 - GPTQ weights and the ragged LM head of Gemma 3 270M.
@@ -22,40 +46,62 @@
 - Scalar quantized mul and batched `MatMulInteger`.
 - `Resize` upscaling by any integer scale.
 - Reductions over several dimensions on the NSS.
+- int8 TFLite `MEAN` over height and width and `AVERAGE_POOL_2D` run on the avg-pool kernel (not yet the squeeze-excite
+  `MEAN`s of MobileNetV3); the classifier head after global pooling runs on the FC kernel.
 - New compiler flags:
-  - `--torq-eliminate-transpose-mode`, `--torq-collapse-unrolled-concat-mode`, `--torq-fold-scalar-matmul-mode` (all default `enable`).
+  - `--torq-eliminate-transpose-mode`, `--torq-collapse-unrolled-concat-mode`, `--torq-fold-scalar-matmul-mode` (all
+    default `enable`).
   - `--torq-constant-prefetch` (default on).
-  - `--torq-prefetch-algorithm` (`auto`, `none`, `constant-loads`, `stream-schedule`) with `--torq-prefetch-tile-budget-percent`, `--torq-prefetch-matmul-tile-budget-percent`, `--torq-list-cap-percent`, `--torq-list-prefetch-percent` and `--torq-list-urgent-starts`.
+  - `--torq-prefetch-algorithm` (`auto`, `none`, `constant-loads`, `stream-schedule`) with
+    `--torq-prefetch-tile-budget-percent`, `--torq-prefetch-matmul-tile-budget-percent`, `--torq-list-cap-percent`,
+    `--torq-list-prefetch-percent` and `--torq-list-urgent-starts`.
   - `--torq-probe-avoid-relocation`, `--torq-probe-relocation-min-bytes`, `--torq-probe-relocation-max-tile-growth`.
   - `--torq-disable-mixed-quant-raise`, `--torq-disable-tnf-avoid-producer-recompute`.
 
 #### Changed
-- Reciprocal is sliced and computed in 3 ops (3 ms down to 1 ms); table lookups are fused with the rescale before them; softmax no longer needs bitwise or.
-- Uneven dual slicing (YOLO pose heads 1.2x faster).
+- The bf16 reciprocal is one table lookup and two adds, sliced across both slices; table lookups are fused with the
+  rescale before them; softmax no longer needs bitwise or.
+- Uneven dual slicing of weight-heavy convolutions.
 - Reduction tiling moved to a dedicated pass; fuse groups reworked.
 - `--torq-disable-async-slice-wait1` merged into `--torq-disable-async-slice-wait`.
 
 #### Removed
-- About 5,000 lines of dead code, with the flags that selected it. Remove these from your scripts (all prefixed with `--torq-`): `act-based-add`, `act-based-sub`, `conv1d-truncate-for-reduce`, `convert-conv1d-to-conv2d`, `convert-conv1d-to-generic`, `convert-conv1d-to-matmul`, `convert-mul-i32-to-i16`, `convert-table-to-gather`, `css-host`, `disable-eliminate-redundant-lram-loads`, `disable-fit-shrink-reorder`, `dump-descriptors-dir`, `dw-ndl`, `enable-deqw-verify`, `ews-relax-input-stride-check`, `failure-driven-recovery`, `tile-and-fuse-distance-limit`, `vm-annotate-virtual-buffer-ids`.
+- About 5,000 lines of dead code, with the flags that selected it. Remove these from your scripts (all prefixed with
+  `--torq-`): `act-based-add`, `act-based-sub`, `conv1d-truncate-for-reduce`, `convert-conv1d-to-conv2d`,
+  `convert-conv1d-to-generic`, `convert-conv1d-to-matmul`, `convert-mul-i32-to-i16`, `convert-table-to-gather`,
+  `css-host`, `disable-eliminate-redundant-lram-loads`, `disable-fit-shrink-reorder`, `dump-descriptors-dir`, `dw-ndl`,
+  `enable-deqw-verify`, `ews-relax-input-stride-check`, `failure-driven-recovery`, `tile-and-fuse-distance-limit`,
+  `vm-annotate-virtual-buffer-ids`.
 
 #### Fixed
-- Wrong results: WRAM loads covering two rows, stacked view offsets, unsigned max/min, NSS reduces with a non-identity init, stride-2 segmented convolution output, fused clamp of a convolution without bias, fast FC bias, and FC per-tensor requantization.
-- Compiler crash on transposes of rank below 3; `FoldDuplicateConversion` firing where it should not; a leaked temporary host library.
+- Wrong results: WRAM loads covering two rows, unsigned max/min, stride-2 segmented convolution output, depth-to-space
+  folding of strided convolutions, fused clamp of a convolution without bias and fast FC bias.
+- Compile failure on pure-NSS targets when a strided convolution's output is transposed and then concatenated (Moonshine
+  streaming encoder).
+- Compiler crash on transposes of rank below 3; `FoldDuplicateConversion` firing where it should not; a leaked temporary
+  host library.
 - Runtime: the hardware is quiesced before the network domain is detached.
 
 #### Known issues
-- Some cases are slower: Gemma3 hybrid models on SL2610 (8.6% to 15%), batched matmul with broadcast and reduction tiling (about 12%), qdq mul with a broadcast scale passed as a function input, and int8 to int16 matmul on FPGA (5%).
-- MobileNetV3 squeeze-excite `MEAN`s do not use the avg-pool kernel yet.
+- int4/int8 Gemma3 with the default prefetch is 8% slower than in v2.2.1 (decoder block 15%). Use
+  `--torq-prefetch-algorithm=stream-schedule`, which makes it 33% faster than v2.2.1.
+- Some ops and layers are slower than in v2.2.1 on the SL2610 simulator, although the full models measured in CI
+  (MobileNetV2, YOLO, Gemma3, Moonshine) are as fast or faster: bf16 GELU, sin and cos, reciprocal and division, SiLU,
+  softmax, tanh, exp and sigmoid; some convolutions, such as InceptionV3 layers and small int8 and int16 convolutions;
+  qdq mul with a broadcast scale passed as a function input; and batched matmul with broadcast and reduction tiling.
 - Integer reductions over more than 32,768 elements give wrong results on the simulator.
 
 #### Testing, CI and tooling
-- Hugging Face transformers models added to the test suite; xfails cleaned up; tests use full-range inputs; tests check that pattern rewrites fire.
+- Hugging Face transformers models added to the test suite; xfails cleaned up; tests use full-range inputs; tests check
+  that pattern rewrites fire.
 - torq-tools and torq-examples are submodules; dashboard and profiling improvements.
 - `torq.utils` packaged in the wheel.
 
 #### Documentation
 - Architecture decision records.
-- The hardware configuration page describes SR200 and the full `--torq-hw` custom format, including the hardware ID field that the earlier examples were missing.
+- The Torq Runtime guide has a new C/C++ API section.
+- The hardware configuration page describes SR200 and the full `--torq-hw` custom format, including the hardware ID
+  field that the earlier examples were missing.
 - The debug tips document all the new flags.
 
 **Full Changelog**: https://github.com/synaptics-torq/torq-compiler/compare/v2.2.1...v2.3.0
@@ -66,14 +112,16 @@
 ### Torq changes since v2.2.0
 
 #### Highlights
-- `torq-compiler` and `torq-runtime` wheels are now published to PyPI: `pip install torq-compiler` / `pip install torq-runtime`.
+- `torq-compiler` and `torq-runtime` wheels are now published to PyPI: `pip install torq-compiler` / `pip install
+  torq-runtime`.
 
 #### Fixed
 - Simulator XRAM footprint now includes attached bindings. Fixes writes landing past the end of XRAM.
 - `torq-compiler[onnx]` dependency versions updated to be compatible with torq-tools.
 
 #### Testing, CI and tooling
-- Pinned `ubuntu-latest` image tags, upgraded GitHub actions, removed the unused workflows, and unified the PyPI publishing jobs.
+- Pinned `ubuntu-latest` image tags, upgraded GitHub actions, removed the unused workflows, and unified the PyPI
+  publishing jobs.
 
 **Full Changelog**: https://github.com/synaptics-torq/torq-compiler/compare/v2.2.0...v2.2.1
 
@@ -86,9 +134,11 @@
 - New `torq-lab` / `torq lab` unified model workflow CLI, shipped as a wheel with a pytest adapter and CI coverage.
 - New `torq-decode-llm` runtime driver: model-agnostic autoregressive decode for LLMs.
 - `torq-gen-config` is now a standalone CLI shipped in the compiler wheel, plus a new `torq-mlir-query` tool.
-- Broader ONNX quantized coverage: `DynamicQuantizeLinear` (per-tensor, dynamic, uint8) and integer MatMul via `MatMulInteger` + dequantization.
+- Broader ONNX quantized coverage: `DynamicQuantizeLinear` (per-tensor, dynamic, uint8) and integer MatMul via
+  `MatMulInteger` + dequantization.
 - LayerNorm now runs on the NSS through bf16 stash retargeting.
-- Large-input tiling, size-aware matmul tiling, program deduplication and NSS program packing in XRAM reduce memory pressure and code size.
+- Large-input tiling, size-aware matmul tiling, program deduplication and NSS program packing in XRAM reduce memory
+  pressure and code size.
 - QEMU simulation replaced by MPACT; kernel-module dependencies upgraded to Astra 2.5.
 - NPU devfreq is boosted during active jobs on SL2610.
 
@@ -105,7 +155,8 @@
 - Slice count exposed as a slicing option.
 - Print support from CSS.
 - IREE Turbine model-zoo tests and a `util.global` lowering pass.
-- `AsyncAccessOpInterface` with DMA optimizations, `ConditionallySpeculatable` on TorqHL, and `MemoryEffectsOpInterface` on TorqHL load/store/copy.
+- `AsyncAccessOpInterface` with DMA optimizations, `ConditionallySpeculatable` on TorqHL, and `MemoryEffectsOpInterface`
+  on TorqHL load/store/copy.
 - Type and address annotation in the Perfetto profiling trace.
 - Auto mode for `FLAG_torq_device_allocator`.
 - EK utilities: `bitCast()`, `WRam::transpose()`, `createSliceTaskOp()`, `maxDivisor()`.
@@ -116,25 +167,32 @@
 - i8 table precalculation applied to any i8 elementwise region, including SiLU folded into its sigmoid table.
 - Parallel dimensions are tiled when reductions cannot fit LRAM; reduction tiling is skipped where it cannot help.
 - Matmul tiling uses a reduction-aware shrink order with k-tiling; fast-matmul optimized for int16 and supports M < 4.
-- Strided LRAM ends of `memref.copy` are staged through a dense buffer; `SwapExtractAndConvert` re-enabled behind an LRAM residency guard.
+- Strided LRAM ends of `memref.copy` are staged through a dense buffer; `SwapExtractAndConvert` re-enabled behind an
+  LRAM residency guard.
 - Tile-and-fuse gains a max-producers fallback, an executor boundary check, and a widened fit-shrink reorder gate.
 - XRAM pre-read skipped for write-only host arguments; host program fallback overhead reduced.
 - `+sve` dropped from the default host CPU features; FMA ops unfused only on soft-float CSS targets.
-- Diagnostics: tile-fit probe failures deferred to the real pipeline, each probe sees only its own diagnostics, failure-driven recovery no longer runs inside the probe, and LRAM allocation failures are classified as OOM vs fragmentation.
+- Diagnostics: tile-fit probe failures deferred to the real pipeline, each probe sees only its own diagnostics,
+  failure-driven recovery no longer runs inside the probe, and LRAM allocation failures are classified as OOM vs
+  fragmentation.
 - `gen_config` keeps the console concise and routes full diagnostics to a log file.
 - Symbol lookups cached during address resolution; DMA/slice cycle annotation split into a dedicated pass.
 - Kernel-module dependencies built from the internal Gerrit tree.
 
 #### Fixed
-- Depthwise conv: H=1 bias broadcast in NHWC→NCHW, stride-2 with KH=1, asymmetric-pad Conv1D, and large-kernel Conv1D on the NSS path.
+- Depthwise conv: H=1 bias broadcast in NHWC→NCHW, stride-2 with KH=1, asymmetric-pad Conv1D, and large-kernel Conv1D on
+  the NSS path.
 - NSS quantized Conv1D lowering, and conv-family NCHW kernels now require dense H-W planes.
 - Silent maxpool corruption from mixed H/W pad phase and from an unscaled stride-1 kernel-x stride.
 - Negative rescale shift overflowing the ACT `act_rsh`.
-- Transposed matmul RHS crash, unsupported float matmuls gated in the Conv1D FC pattern, and zero-bias FC channel dim declared consistently with its buffer.
+- Transposed matmul RHS crash, unsupported float matmuls gated in the Conv1D FC pattern, and zero-bias FC channel dim
+  declared consistently with its buffer.
 - Rank-0/scalar tensor handling, sub-byte tile offsets, and the unit-extent reshape wrapper around bf16 depthwise conv.
 - Infinite loop when lowering oversized strided host copies.
-- Elementwise operand realignment after folding rank-changing reshapes, full NHWC→NCHW loop-dim permutation for broadcast indexing maps, and permute+broadcast copy generics lowered via transpose+broadcast.
-- `keepdims` reductions in pattern fuse groups, im2col tiling, and dropped-level const chains rebuilt at their retained shell level.
+- Elementwise operand realignment after folding rank-changing reshapes, full NHWC→NCHW loop-dim permutation for
+  broadcast indexing maps, and permute+broadcast copy generics lowered via transpose+broadcast.
+- `keepdims` reductions in pattern fuse groups, im2col tiling, and dropped-level const chains rebuilt at their retained
+  shell level.
 - Two-axis ConvTranspose kept off the interleave path; conv kernel axes capped separately on the EK path.
 - Frees ordered before allocations in the LRAM peak sweep; Codegen dialect loaded before creating `TranslationInfoAttr`.
 - NDL consistency check; `add` scale_bias width checked instead of asserted.
@@ -142,20 +200,26 @@
 - llvm-project updated with a TOSA Shape operation fix.
 
 #### Testing, CI and tooling
-- torch/TOSA op tests split into NSS-only and host_css folders; CSS `program_code` sharing test repaired; xfails updated.
-- YOLO26 nano and small covered in the OD model tests (yolo26n temporarily disabled, then re-enabled with model checks keyed on the case name).
+- torch/TOSA op tests split into NSS-only and host_css folders; CSS `program_code` sharing test repaired; xfails
+  updated.
+- YOLO26 nano and small covered in the OD model tests (yolo26n temporarily disabled, then re-enabled with model checks
+  keyed on the case name).
 - Keras conv2d/depthwise/transpose test model scripts parametrized.
 - Builtin TFLite kernels used for asymmetric-rhs BatchMatMul.
-- `torq gen-config` ONNX conversion extended with schema-aware int64→int32 support, clamping INT64_MIN/MAX sentinels instead of failing, and LayerNormalization `stash_type` retargeted to bf16.
+- `torq gen-config` ONNX conversion extended with schema-aware int64→int32 support, clamping INT64_MIN/MAX sentinels
+  instead of failing, and LayerNormalization `stash_type` retargeted to bf16.
 - `torq_compiled_model_dir` cache keying fixed; tool invocation timeouts now kill the whole process group.
-- CI: GitHub runners on test bench machines, prebuilt MPACT download, Astra build file with ko/lib release, ko dependencies upgraded to Astra 2.5, FPGA runner upgrade, build-ko-dependencies cache miss fixed, artifact download command updated, ssh params passed in `check_board_liveness`, GitHub CLI added as a required dependency.
+- CI: GitHub runners on test bench machines, prebuilt MPACT download, Astra build file with ko/lib release, ko
+  dependencies upgraded to Astra 2.5, FPGA runner upgrade, build-ko-dependencies cache miss fixed, artifact download
+  command updated, ssh params passed in `check_board_liveness`, GitHub CLI added as a required dependency.
 
 #### Documentation
 - Torq setup steps for macOS users.
 - User manual corrections.
 
 #### Internal cleanup
-- Refactors of virtual memory conversion, constant tracing, quantized patterns and `setDerivedMemrefAddress`; removal of unused TosaToTorqHL patterns and the `PromoteScalarsTo1D` pattern.
+- Refactors of virtual memory conversion, constant tracing, quantized patterns and `setDerivedMemrefAddress`; removal of
+  unused TosaToTorqHL patterns and the `PromoteScalarsTo1D` pattern.
 
 **Full Changelog**: https://github.com/synaptics-torq/torq-compiler/compare/v2.1.0...v2.2.0
 
@@ -164,17 +228,22 @@
 
 ### General Notes
 
-This release is heavily focused on robustness and production readiness, with dense compiler and CI improvements in addition to feature work.
+This release is heavily focused on robustness and production readiness, with dense compiler and CI improvements in
+addition to feature work.
 
 #### Link with Astra-SDK build system
 
-Astra-SDK for Synaptics SL2610 SoC family is automatically retrieving the source code from this [github repo](https://github.com/synaptics-torq/torq-compiler/).
+Astra-SDK for Synaptics SL2610 SoC family is automatically retrieving the source code from this [github
+repo](https://github.com/synaptics-torq/torq-compiler/).
 
-In the same way that Torq framework v2.0.x was released to support [Astra-SDK v2.4.0](https://github.com/synaptics-astra/sdk/releases/tag/scarthgap_6.12_v2.4.0), v2.1.x is supporting [Astra-SDK v2.5.0](https://github.com/synaptics-astra/sdk/releases/tag/scarthgap_6.12_v2.5.0).
+In the same way that Torq framework v2.0.x was released to support [Astra-SDK
+v2.4.0](https://github.com/synaptics-astra/sdk/releases/tag/scarthgap_6.12_v2.4.0), v2.1.x is supporting [Astra-SDK
+v2.5.0](https://github.com/synaptics-astra/sdk/releases/tag/scarthgap_6.12_v2.5.0).
 
 #### release packages and new pip wheels
 
-We don't produce nor use the release tarball anymore (release.tar.gz); this tarball contained the binary elements of the release compiled for Ubuntu-24.04. Instead we recommended to use the various PIP wheel packages:
+We don't produce nor use the release tarball anymore (release.tar.gz); this tarball contained the binary elements of the
+release compiled for Ubuntu-24.04. Instead we recommended to use the various PIP wheel packages:
 
 - astra-sl-release: contains the binary runtime for the SL2610 board:
    - lib/syna_npu.ko: precompiled Linux kernel module for Torq NPU
@@ -186,9 +255,16 @@ We don't produce nor use the release tarball anymore (release.tar.gz); this tarb
 
 #### About performance of compiled models
 
-In terms of performance v2.1.0 may not as good as v2.0.0 for some models. While this is one of the major focus of this release the reason for this potential regression is the switch to generic linalg-slicing pass instead of homemade torq_hl-slicing (slicing is process of parallelisation between 2 slices - aka MAC engines - available in SL2610 SoCs). This new slicing pass is going to offer a nice boost in performance on the SL2610 AstrMachina or Google-Coral board but if you see any performance issue or regression this can be mitigated by disabling slicing using the compiler option **--torq-disable-slicing**.
+In terms of performance v2.1.0 may not as good as v2.0.0 for some models. While this is one of the major focus of this
+release the reason for this potential regression is the switch to generic linalg-slicing pass instead of homemade
+torq_hl-slicing (slicing is process of parallelisation between 2 slices - aka MAC engines - available in SL2610 SoCs).
+This new slicing pass is going to offer a nice boost in performance on the SL2610 AstrMachina or Google-Coral board but
+if you see any performance issue or regression this can be mitigated by disabling slicing using the compiler option
+**--torq-disable-slicing**.
 
-Moreover, if you are using an official Astra image v2.5.x you will see a nice boost of performance thanks to the increased default frequency of the Torq NPU from 800MHz to 1GHz by default (this is governed by the newly introduced devfreq support).
+Moreover, if you are using an official Astra image v2.5.x you will see a nice boost of performance thanks to the
+increased default frequency of the Torq NPU from 800MHz to 1GHz by default (this is governed by the newly introduced
+devfreq support).
 
 
 ### Torq Compiler v2.1 changes since vs v2.0.0:
@@ -215,7 +291,8 @@ Moreover, if you are using an official Astra image v2.5.x you will see a nice bo
 - QConv2D behavior to defer constant resolution to JIT in relevant flows.
 - EK-related behavior in HDIM and append/modulo paths.
 - Runtime Python behavior with x86 CModel inference enablement and improved version checks.
-- CI/release architecture toward cache/artifact-driven workflows, split Astra build jobs, and more wheel-based test execution.
+- CI/release architecture toward cache/artifact-driven workflows, split Astra build jobs, and more wheel-based test
+  execution.
 
 #### Fixed
 - Grouped 1x1 conv miscompile via matmul-as-conv.
@@ -242,38 +319,51 @@ This is the second major release of the Torq Framework.
 
 ### Important note about v1.5.x runtime compatibility
 
-While we are confident that v2.0.0 compiler is way more capable and efficient than previous release, we understand that switching to a new major version may have unforeseen effect.
-To help with the transition we made sure that the v2.0.0 kernel driver can support both v1.5 and v2.0 runtime and compiled models.
+While we are confident that v2.0.0 compiler is way more capable and efficient than previous release, we understand that
+switching to a new major version may have unforeseen effect.
+To help with the transition we made sure that the v2.0.0 kernel driver can support both v1.5 and v2.0 runtime and
+compiled models.
 
 ### Link with Astra-SDK build system
 
-Astra-SDK for Synaptics SL2610 SoC family is automatically retrieving the source code from this [github repo](https://github.com/synaptics-torq/torq-compiler/).
+Astra-SDK for Synaptics SL2610 SoC family is automatically retrieving the source code from this [github
+repo](https://github.com/synaptics-torq/torq-compiler/).
 
-In the same way that Torq framework v1.5.x was released to support [Astra-SDK v2.3.0](https://github.com/synaptics-astra/sdk/releases/tag/scarthgap_6.12_v2.3.0), v2.0.x is
+In the same way that Torq framework v1.5.x was released to support [Astra-SDK
+v2.3.0](https://github.com/synaptics-astra/sdk/releases/tag/scarthgap_6.12_v2.3.0), v2.0.x is
 supporting [Astra-SDK v2.4.0](https://github.com/synaptics-astra/sdk/releases/tag/scarthgap_6.12_v2.4.0)
 
 ### About performance
 
-In terms of performance **v2.0.0** is much better than **v1.5.1** for most models, most notably YOLOv8 TFLite models are twice as fast. The performance gap is even bigger for LLMs and Transformers in general. As was demonstrated during the GoogleIO event Moonshine speech2text and Google-Gemma3 LLM are now fully accelerated on the NPU and deliver impressive performance
-on the SL2610 board. See our [ready to use torq examples for those models](https://github.com/synaptics-torq/torq-examples) and [Google's Coral board example page](https://developers.google.com/coral/products/SL2610-demos-examples)
+In terms of performance **v2.0.0** is much better than **v1.5.1** for most models, most notably YOLOv8 TFLite models are
+twice as fast. The performance gap is even bigger for LLMs and Transformers in general. As was demonstrated during the
+GoogleIO event Moonshine speech2text and Google-Gemma3 LLM are now fully accelerated on the NPU and deliver impressive
+performance
+on the SL2610 board. See our [ready to use torq examples for those
+models](https://github.com/synaptics-torq/torq-examples) and [Google's Coral board example
+page](https://developers.google.com/coral/products/SL2610-demos-examples)
 
 ### Main changes in this release
 
-The changes from v1.5.1 release are too numerous to list here, we will prepare extended release note as part of v2.0.0 but here are the main changes:
+The changes from v1.5.1 release are too numerous to list here, we will prepare extended release note as part of v2.0.0
+but here are the main changes:
 * Updated to use [IREE v3.10](https://github.com/iree-org/iree/releases/tag/v3.10.0)
   - Next version will upgrade to latest IREE
 * Vastly improved robustness, performance and model coverage
   - v2.0.0 has close to 6000 passing test cases (up from 1425 in v1.5.1).
 * [torq-gen-config](torq-gen-config.md)
-  - This is new tool for the generation of working configurations for the compilation of ONNX models using heterogenous inference.
-  - Working generated config are maintained in new git: [torq-model-configs](https://github.com/synaptics-torq/torq-model-configs) 
+  - This is new tool for the generation of working configurations for the compilation of ONNX models using heterogenous
+    inference.
+  - Working generated config are maintained in new git:
+    [torq-model-configs](https://github.com/synaptics-torq/torq-model-configs)
 * Support for [TOSA 1.0.1](https://www.mlplatform.org/tosa/tosa_spec_1_0_1.html)
 * Switch to use [tosa-converter-for-tflite](https://gitlab.arm.com/tosa/tosa-converter-for-tflite) from ARM
   - Warning: Don't use older method iree-import-tflite as this will produce uncompilable TOSA files.
 * Support for StableHLO input
 * LLM support: Google Gemma3 is our flagship model
 * Much improved Tile&Fuse and removed old torq-hl-tiling algorithm for tiling
-  - As a consequence you cannot change the memory available for tiling using [the --torq-hw option](custom_hw.md), this is now done automatically depending on the LRAM size.
+  - As a consequence you cannot change the memory available for tiling using [the --torq-hw option](custom_hw.md), this
+    is now done automatically depending on the LRAM size.
 * Better Transformer model support
 * New or improved accelerated bf16 operations (sin, cos, sqrt, etc)
 * New generic linalg-slicing
@@ -294,8 +384,12 @@ The changes from v1.5.1 release are too numerous to list here, we will prepare e
 
 This is the second public release of the Torq Compiler.
 
-v1.5.0 is using an old version of IREE from [july 4th, 2024]( https://github.com/synaptics-torq/iree/tree/torq-20240704.944).
-We branched out from main in order to move forward with the upgrade of IREE which will take some time to stabilize. In the mean time branch v1.5 will be maintained with bug fixes and maybe some small features for at least a couple of month in order to support the usage of [ASTRA SDK 2.3](https://github.com/synaptics-astra/sdk/releases/tag/scarthgap_6.12_v2.3.0).
+v1.5.0 is using an old version of IREE from [july 4th, 2024](
+https://github.com/synaptics-torq/iree/tree/torq-20240704.944).
+We branched out from main in order to move forward with the upgrade of IREE which will take some time to stabilize. In
+the mean time branch v1.5 will be maintained with bug fixes and maybe some small features for at least a couple of month
+in order to support the usage of [ASTRA SDK
+2.3](https://github.com/synaptics-astra/sdk/releases/tag/scarthgap_6.12_v2.3.0).
 
 v1.5.0 offers stable and good performances on a number of models including:
 * MobilenetV2: int8 and bf16
@@ -307,7 +401,8 @@ v1.5.0 offers stable and good performances on a number of models including:
 
 > **NOTE (historical)**
 > v1.5.0 switched to the new generic algorithm for tiling that was formerly named as
-> [Super-Tiling](https://synaptics-torq.github.io/torq-compiler/v/latest/dev-manual/super_tiling.html) and is now named Tile&Fuse or in short T&F.
+> [Super-Tiling](https://synaptics-torq.github.io/torq-compiler/v/latest/dev-manual/super_tiling.html) and is now named
+> Tile&Fuse or in short T&F.
 > In v1.5.0 the deprecated torq-hl-tiling algorithm could still be selected with the
 > `--torq-enable-torq-hl-tiling` option. That option (and the old tiling algorithm)
 > has since been removed; Tile&Fuse is the only tiling path in current releases.
@@ -340,6 +435,7 @@ https://github.com/synaptics-torq/torq-compiler/releases/tag/initial
 - Compile-time profiling for approximate clock-cycle estimates; runtime profiling for measured execution.
 - End-to-end validated on MobileNetV2.
 - Automatic CSS fallback for unsupported operators.
-- Supertiling (experimental): groups adjacent tiles into larger macro-tiles to improve locality and reduce launch/DMA overhead.
+- Supertiling (experimental): groups adjacent tiles into larger macro-tiles to improve locality and reduce launch/DMA
+  overhead.
 - Support for compiling the model on custom Synaptics SoC hardware configurations.
 

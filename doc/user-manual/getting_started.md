@@ -63,7 +63,7 @@ With the virtual environment active, continue with the [Python Wheel (pip)](#pyt
 
 ### Python Wheel (pip)
 
-`torq-compiler` and `torq-runtime` are published on [PyPI](https://pypi.org) (release 2.2.1 and above). They are distributed as separate wheels; install both when compiling and running models on the host:
+`torq-compiler` and `torq-runtime` are published on PyPI ([torq-compiler](https://pypi.org/project/torq-compiler/), [torq-runtime](https://pypi.org/project/torq-runtime/)) from release 2.2.1 onward. They are distributed as separate wheels; install both when compiling and running models on the host:
 
 ```bash
 $ pip install torq-compiler
@@ -72,7 +72,7 @@ $ pip install torq-runtime
 
 `pip` selects the wheel for your platform: the `torq-runtime` wheel is published for both x86-64 (host simulator) and aarch64 (board) Linux, while the `torq-compiler` wheel is currently published for x86-64 hosts only.
 
-To install a specific release version, download the matching wheels from the [GitHub Releases](https://github.com/synaptics-torq/torq-compiler/releases) page instead. For example, replace `<version>` with the release version and run:
+To install a specific release from 2.2.1 onward, pin the version, for example `pip install torq-compiler==2.3.0 torq-runtime==2.3.0`. Releases older than 2.2.1 are not on PyPI; download their wheels from the [GitHub Releases](https://github.com/synaptics-torq/torq-compiler/releases) page instead. For example, replace `<version>` with the release version and run:
 
 ```bash
 $ curl -LO https://github.com/synaptics-torq/torq-compiler/releases/download/<version>/torq_compiler-<version>-cp312-cp312-manylinux_2_28_x86_64.whl
