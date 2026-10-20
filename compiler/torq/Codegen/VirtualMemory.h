@@ -28,6 +28,10 @@ using SwapSchedule = llvm::DenseMap<int, llvm::SmallVector<Swap>>;
 // in get their planned address. Precondition: `schedule` was planned for this IR, so every
 // swap applies to a resident, unpinned buffer and every op's operands and results fit in
 // `capacityBytes` next to what is resident.
+// This has no failure path and always returns success. lramAllocationSucceeds and
+// lramSwapBytes (AssignAddressesPass.cpp) treat a successful plan as a successful
+// allocation, so if a failure path is added here, update them or the trials will
+// disagree with the real allocation.
 LogicalResult convertVirtualToPhysicalMemRefs(
     FunctionOpInterface funcOp, int capacityBytes, torq_hl::MemorySpace memorySpace,
     const SwapSchedule &schedule, int64_t addressBase

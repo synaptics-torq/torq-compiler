@@ -860,6 +860,9 @@ static LogicalResult allocateLramAddresses(
         }
     }
 
+    // has no failure path today; lramAllocationSucceeds and lramSwapBytes treat a
+    // successful plan as a successful allocation and rely on that (see
+    // convertVirtualToPhysicalMemRefs)
     if (failed(convertVirtualToPhysicalMemRefs(
             funcOp, usable, torq_hl::MemorySpace::Lram, placement->schedule, reservedBase
         ))) {
@@ -1445,6 +1448,8 @@ static void revertSharedReadOnlyReuses(FunctionOpInterface funcOp) {
 // single-dispatch functions for a bit the plan already computes.
 static bool lramAllocationSucceeds(FunctionOpInterface funcOp) {
     const int64_t usable = TorqHw::get().getLramSize() - HwInfo::nss_max_program_size * 2;
+    // without re-planning, so recovery applies whenever the plain plan fails and
+    // re-planning handles what the recovered IR still cannot place
     std::optional<Placement> placement = planPlacement(
         collectLramBuffers(funcOp), usable, /*replan=*/false, &funcOp.getFunctionBody().front()
     );
@@ -1453,6 +1458,8 @@ static bool lramAllocationSucceeds(FunctionOpInterface funcOp) {
 
 std::optional<int64_t> lramSwapBytes(FunctionOpInterface funcOp) {
     const int64_t usable = TorqHw::get().getLramSize() - HwInfo::nss_max_program_size * 2;
+    // plain (replan=false) plan, as in lramAllocationSucceeds: the estimate stands
+    // in for what the real pass will do, so it must use the same plan mode
     std::optional<Placement> placement = planPlacement(
         collectLramBuffers(funcOp), usable, /*replan=*/false, &funcOp.getFunctionBody().front()
     );
