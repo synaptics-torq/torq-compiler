@@ -34,6 +34,7 @@
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Tensor/Transforms/Transforms.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
@@ -214,6 +215,10 @@ void EliminateEmptyTensorsPass::runOnOperation() {
     {
         RewritePatternSet patterns(context);
         linalg::populateConvertToDestinationStylePatterns(patterns);
+        // A reshape of a tensor.empty hides the empty tensor from eliminateEmptyTensors, which
+        // only follows ops that keep the type. The result then lands in a temporary buffer that
+        // is copied to the binding afterwards.
+        tensor::populateFoldTensorEmptyPatterns(patterns);
         if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
             funcOp->emitOpError("Failed in conversion to destination style patterns");
             return signalPassFailure();
@@ -334,6 +339,10 @@ void addTorqComprehensiveBufferizePasses(
     std::optional<BufferizationOptions::MemCpyFn> memCpyFn,
     std::optional<BufferizationOptions::DefaultMemorySpaceFn> memSpaceFn
 ) {
+    // A reshape between the result and dispatch.tensor.store makes the result bufferize into a
+    // temporary buffer that is then copied to the binding in full. Fold it into the binding type,
+    // as the other IREE backends do, so the result is written in place.
+    funcPassManager.addPass(createFoldReshapeIntoInterfaceTensorPass());
     funcPassManager.addPass(createEliminateEmptyTensorsPass());
     // EliminateEmptyTensors points a peeled slice head's insert at the output but
     // leaves the head forall init on the orphaned tensor.empty, forcing a temp +
