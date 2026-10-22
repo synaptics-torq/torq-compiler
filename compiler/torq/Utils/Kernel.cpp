@@ -3384,7 +3384,7 @@ WData WRam::transpose(const LData &data, DType dstType) {
         // It means that in some cases we are forced to read more data to be able to transpose them
         dataAdjusted.getShape()[data.shape().size() - rank - extraDims].count = transposeHeight();
     }
-    else if ((shape[0].count == 2 || shape[0].count == 3) && shape[1].count == 1 &&
+    else if (shape[0].count > 1 && shape[0].count < transposeHeight() && shape[1].count == 1 &&
              denseElementCount(shape) < 0) {
         // No transpose needed, but CEWW:S cannot place 2 or 3 non-dense rows next to each
         // other. S=3 is not supported. S=2 writes the 2nd cycle at byte 18 of the WRAM word,
@@ -3392,7 +3392,7 @@ WData WRam::transpose(const LData &data, DType dstType) {
         // transposes, which for one column writes the rows next to each other. As in the
         // transpose case above, the rows past shape[0].count are read but never used, because
         // wdata keeps shape[0].count rows.
-        dataAdjusted.getShape()[data.shape().size() - rank - extraDims].count = 4;
+        dataAdjusted.getShape()[data.shape().size() - rank - extraDims].count = transposeHeight();
     }
 
     WData wdata = load(dataAdjusted, dstType, transpose);
