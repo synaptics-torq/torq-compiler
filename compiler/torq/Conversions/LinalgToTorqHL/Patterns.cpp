@@ -1366,6 +1366,102 @@ static FailureOr<Value> emitReduceWithInit(
     return mergeReductionPartial(srcOp, mergeWith, result, opName, rewriter);
 }
 
+/// Rewrites a single-input `linalg.generic` with two or more reduction loops
+/// (e.g. ONNX ReduceSum over several axes) into a multi-dimension
+/// `linalg.reduce`, which ReduceOpConversion lowers. The input map must be a
+/// permutation. The output either drops the reduced input dims or keeps them as
+/// size-1 dims (keepdims); the latter goes through collapse_shape / expand_shape.
+/// A generic with one reduction loop is lowered directly by
+/// GenericReductionConversion, which also handles a combined min+max.
+struct MultiReductionGenericToReduce : public OpRewritePattern<linalg::GenericOp> {
+
+    MultiReductionGenericToReduce(MLIRContext *context) : OpRewritePattern(context) {}
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+        if (srcOp.getNumReductionLoops() < 2 || srcOp.getNumDpsInputs() != 1 ||
+            srcOp.getNumDpsInits() != 1 || !srcOp.hasPureTensorSemantics()) {
+            return rewriter.notifyMatchFailure(srcOp, "not a single-input multi-reduction");
+        }
+        AffineMap inMap = srcOp.getMatchingIndexingMap(srcOp.getDpsInputOperand(0));
+        if (!inMap.isPermutation()) {
+            return rewriter.notifyMatchFailure(srcOp, "input map is not a permutation");
+        }
+
+        Value init = srcOp.getDpsInits()[0];
+        auto initType = cast<RankedTensorType>(init.getType());
+        unsigned rank = inMap.getNumResults();
+        SmallVector<utils::IteratorType> iterators = srcOp.getIteratorTypesArray();
+        AffineMap outMap = srcOp.getMatchingIndexingMap(srcOp.getDpsInitOperand(0));
+        bool keepDims = outMap.getNumResults() == rank;
+
+        // Work in input dims: input dim i is loop inMap.getDimPosition(i). The
+        // output must list the kept input dims in input order (or keep the
+        // reduced ones as size-1 dims at their input position). With keepdims,
+        // each reduced dim of the init is attached to the nearest kept dim
+        // before it (or the first kept dim when leading) to collapse it away.
+        SmallVector<int64_t> reducedDims;
+        SmallVector<AffineExpr> expectedOut;
+        SmallVector<ReassociationIndices> reassoc;
+        ReassociationIndices leading;
+        for (unsigned i = 0; i < rank; ++i) {
+            unsigned loop = inMap.getDimPosition(i);
+            if (iterators[loop] == utils::IteratorType::reduction) {
+                reducedDims.push_back(i);
+                if (keepDims) {
+                    if (initType.getDimSize(i) != 1) {
+                        return rewriter.notifyMatchFailure(srcOp, "unsupported output map");
+                    }
+                    expectedOut.push_back(rewriter.getAffineConstantExpr(0));
+                    if (reassoc.empty()) {
+                        leading.push_back(i);
+                    }
+                    else {
+                        reassoc.back().push_back(i);
+                    }
+                }
+                continue;
+            }
+            expectedOut.push_back(rewriter.getAffineDimExpr(loop));
+            if (keepDims) {
+                reassoc.push_back(leading);
+                reassoc.back().push_back(i);
+                leading.clear();
+            }
+        }
+        if (outMap.getResults() != ArrayRef(expectedOut)) {
+            return rewriter.notifyMatchFailure(srcOp, "unsupported output map");
+        }
+
+        Value reduceInit = init;
+        if (keepDims) {
+            reduceInit = tensor::CollapseShapeOp::create(rewriter, srcOp.getLoc(), init, reassoc);
+        }
+
+        Block *body = srcOp.getBody();
+        auto reduceOp = linalg::ReduceOp::create(
+            rewriter, srcOp.getLoc(), ValueRange{srcOp.getDpsInputs()[0]}, ValueRange{reduceInit},
+            reducedDims,
+            [&](OpBuilder &b, Location, ValueRange args) {
+                IRMapping mapping;
+                mapping.map(body->getArguments(), args);
+                for (Operation &op : *body) {
+                    b.clone(op, mapping);
+                }
+            }
+        );
+        reduceOp->setDiscardableAttrs(srcOp->getDiscardableAttrDictionary());
+
+        Value result = reduceOp.getResult(0);
+        if (keepDims) {
+            result =
+                tensor::ExpandShapeOp::create(rewriter, srcOp.getLoc(), initType, result, reassoc);
+        }
+        rewriter.replaceOp(srcOp, result);
+        return success();
+    }
+};
+
 /// Lowers a single-reduction-loop `linalg.generic` to `torq_hl::ReduceOp`
 struct GenericReductionConversion : public OpRewritePattern<linalg::GenericOp> {
 
@@ -3470,6 +3566,7 @@ void populateLinalgToTorqHLPatterns(
     patterns.insert<TensorPadOpConversion>(context);
 
     patterns.insert<GenericReductionConversion>(context);
+    patterns.insert<MultiReductionGenericToReduce>(context);
     patterns.insert<ReduceOpConversion>(context);
     patterns.insert<CastOpPattern>(context);
     patterns.insert<BroadcastOpConversion>(context);
