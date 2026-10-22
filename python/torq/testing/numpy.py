@@ -23,6 +23,8 @@ from torq.lab.verification.reference import (  # noqa: F401
     parse_instance_norm_params,
     numpy_instance_norm,
     numpy_reduce_mean,
+    _parse_conv_params,
+    _numpy_conv,
 )
 
 
@@ -88,6 +90,25 @@ def numpy_matmul_const_weight_reference_results(input_data, mlir_io_spec, mlir_m
     value, shape = _parse_uniform_bf16_constant(mlir_model_file)
     weight = np.full(shape, value, dtype=np.float32)
     result = np.matmul(data[0].astype(np.float32, copy=False), weight)
+    return [result.astype(output_dtype)]
+
+
+@versioned_unhashable_object_fixture
+def numpy_conv_reference_results(input_data, mlir_io_spec, mlir_model_file):
+    """Reference for linalg.conv_1d/conv_2d computed in numpy with fp32 accumulation.
+
+    Bypasses the llvm-cpu reference, which accumulates the bf16 conv in bf16
+    (order-dependent, and catastrophically wrong when the taps partially cancel),
+    while the NSS conv kernels accumulate in fp32 and round to the output dtype once.
+    """
+    from .iree import get_dtype
+
+    data = input_data.data if hasattr(input_data, "data") else input_data
+    assert len(data) == 2
+    assert len(mlir_io_spec.outputs) == 1
+    output_dtype = get_dtype(mlir_io_spec.outputs[0].fmt)
+    strides, dilations = _parse_conv_params(mlir_model_file)
+    result = _numpy_conv(data[0], data[1], strides, dilations)
     return [result.astype(output_dtype)]
 
 

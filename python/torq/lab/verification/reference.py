@@ -454,3 +454,70 @@ def llvmcpu_reference_outputs(
     tools.run_tool(run_cmd, timeout=timeout, cwd=work_dir)
 
     return io.load_outputs(spec.outputs, output_paths)
+def _parse_conv_params(mlir_model_file):
+    """Extract (strides, dilations) from a single conv op in an MLIR file.
+
+    Supports linalg.conv_2d_nchw_fchw and linalg.conv_1d_ncw_fcw. Returns
+    (strides, dilations) as tuples of ints (H,W) for 2-D and (W,) for 1-D.
+    """
+    text = Path(str(mlir_model_file)).read_text()
+    m2 = re.search(
+        r"linalg\.conv_2d_nchw_fchw \{dilations = dense<\[(\d+), ?(\d+)\]>.*?"
+        r"strides = dense<\[(\d+), ?(\d+)\]>",
+        text,
+        re.S,
+    )
+    if m2:
+        dh, dw, sh, sw = (int(v) for v in m2.groups())
+        return (sh, sw), (dh, dw)
+    m1 = re.search(
+        r"linalg\.conv_1d_ncw_fcw \{dilations = dense<\[(\d+)\]>.*?"
+        r"strides = dense<\[(\d+)\]>",
+        text,
+        re.S,
+    )
+    if m1:
+        dw, sw = (int(v) for v in m1.groups())
+        return (sw,), (dw,)
+    raise ValueError(f"no linalg.conv_1d/conv_2d found in {mlir_model_file}")
+
+
+def _numpy_conv(x, w, strides, dilations):
+    """Valid (unpadded) conv1d/conv2d with fp32 accumulation (matches the TORQ NPU).
+
+    IREE's llvm-cpu reference accumulates the bf16 conv in bf16, which is
+    order-dependent and loses catastrophic precision when the taps partially cancel
+    (e.g. a result near zero built from large +/- terms). The NSS conv kernels
+    accumulate in fp32 and round to the output dtype once, so this is the valid
+    golden for the sweepconv decomposition cases.
+    """
+    x32 = x.astype(np.float32)
+    w32 = w.astype(np.float32)
+    if x32.ndim == 3:  # conv1d: x (N,C,W), w (F,C,K)
+        sw, = strides
+        dw, = dilations
+        K = w32.shape[2]
+        W = x32.shape[2]
+        O = (W - dw * (K - 1) - 1) // sw + 1
+        out = np.zeros((x32.shape[0], w32.shape[0], O), dtype=np.float32)
+        for o in range(O):
+            win = x32[:, :, o * sw : o * sw + dw * (K - 1) + 1 : dw]
+            out[:, :, o] = np.einsum("ncj,fcj->nf", win, w32)
+    else:  # conv2d: x (N,C,H,W), w (F,C,KH,KW)
+        sh, sw = strides
+        dh, dw = dilations
+        KH, KW = w32.shape[2], w32.shape[3]
+        H, W = x32.shape[2], x32.shape[3]
+        OH = (H - dh * (KH - 1) - 1) // sh + 1
+        OW = (W - dw * (KW - 1) - 1) // sw + 1
+        out = np.zeros((x32.shape[0], w32.shape[0], OH, OW), dtype=np.float32)
+        for i in range(OH):
+            for j in range(OW):
+                win = x32[
+                    :,
+                    :,
+                    i * sh : i * sh + dh * (KH - 1) + 1 : dh,
+                    j * sw : j * sw + dw * (KW - 1) + 1 : dw,
+                ]
+                out[:, :, i, j] = np.einsum("nchw,fchw->nf", win, w32)
+    return out

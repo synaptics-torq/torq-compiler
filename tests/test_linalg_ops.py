@@ -77,10 +77,21 @@ def _is_bf16_matmul_case(case_config):
     return mlir_file is not None and "matmul" in mlir_file.name.lower() and "bf16" in mlir_file.name.lower()
 
 
+def _is_sweepconv_bf16_case(case_config):
+    # Decomposed convs that output bf16: the NPU accumulates the conv
+    # in fp32 while the llvm-cpu reference accumulates in bf16
+    # (order-dependent, and wrong for cancelling taps), so compare
+    # against a fp32-accumulating numpy reference instead.
+    mlir_file = case_config.get("static_mlir_model_file")
+    return mlir_file is not None and "sweepconv-bf16" in mlir_file.name.lower()
+
+
 @pytest.fixture
 def reference_results(request, case_config):
     if _is_bf16_matmul_case(case_config):
         return request.getfixturevalue("numpy_matmul_reference_results")
+    if _is_sweepconv_bf16_case(case_config):
+        return request.getfixturevalue("numpy_conv_reference_results")
     return request.getfixturevalue("llvmcpu_reference_results")
 
 @pytest.mark.ci
