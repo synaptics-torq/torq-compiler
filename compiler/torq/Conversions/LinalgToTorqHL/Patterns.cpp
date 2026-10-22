@@ -2460,18 +2460,34 @@ class SegmentationTransposeOpConversion : public OpRewritePattern<tensor::Collap
 //     linalg.yield %63 : i32
 //   } -> tensor<1x21x1024xi32>
 
-// A per-channel rescale carries its multiplier as a channel-indexed operand, so the number of
-// distinct scale values is that operand's element count. A per-tensor rescale folds a scalar
-// multiplier into the generic body, leaving the count at 1.
+// A per-channel rescale carries its multiplier and/or shift as channel-indexed operands, so the
+// number of distinct scale values is the element count of those operands (either one may be a
+// scalar constant folded into the generic body). A per-tensor rescale has no such operand,
+// leaving the count at 1.
 static int getRescaleScaleCount(linalg::GenericOp genericOp, tosa::ApplyScaleOp applyScaleOp) {
-    if (auto multArg = dyn_cast<BlockArgument>(applyScaleOp.getMultiplier())) {
-        if (auto operand = genericOp.getMatchingOpOperand(multArg)) {
-            if (auto multType = dyn_cast<RankedTensorType>(operand->get().getType())) {
-                return multType.getNumElements();
+    int64_t count = 1;
+    for (Value table : {applyScaleOp.getMultiplier(), applyScaleOp.getShift()}) {
+        if (auto arg = dyn_cast<BlockArgument>(table)) {
+            if (auto operand = genericOp.getMatchingOpOperand(arg)) {
+                if (auto type = dyn_cast<RankedTensorType>(operand->get().getType()))
+                    count = std::max(count, type.getNumElements());
             }
         }
     }
-    return 1;
+    return static_cast<int>(count);
+}
+
+// Two extract_slice offsets select the same window iff they are the same SSA value or equal
+// constants; anything else (e.g. %iv vs %iv + c) would pair one table's window with the
+// other's, silently.
+static bool sameSliceOffset(OpFoldResult a, OpFoldResult b) {
+    if (Value av = dyn_cast<Value>(a))
+        if (Value bv = dyn_cast<Value>(b))
+            return av == bv;
+    if (Attribute aa = dyn_cast<Attribute>(a))
+        if (Attribute ba = dyn_cast<Attribute>(b))
+            return aa == ba;
+    return false;
 }
 
 static SmallVector<int64_t> invertPermutation(llvm::ArrayRef<int64_t> perm) {
@@ -2558,26 +2574,60 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
             llvm::ArrayRef<int32_t>(bias), llvm::ArrayRef<int32_t>(scale), scaleBias.begin()
         );
 
-        // Per-channel scale_bias is a [channels, 2] table and needs the channel on the innermost
-        // dimension; per-tensor is the single 1-D [2] pair broadcast to every element.
-        // If the channel dimension is not already innermost, transpose input/output so the FMA
-        // sees a channel-innermost layout and transpose the result back.
+        // Per-channel scale_bias is a [channels, 2] table; per-tensor is the single 1-D [2] pair
+        // broadcast to every element.
+        Value scaleBiasConst;
+        if (scaleValuesCount > 1) {
+            scaleBiasConst = createI32Const(
+                rewriter, srcOp, scaleBias, llvm::ArrayRef<int64_t>{scaleValuesCount, 2}
+            );
+        }
+        else {
+            scaleBiasConst = createI32Const(rewriter, srcOp, scaleBias);
+        }
+
+        return emitRescaleFma(
+            srcOp, rewriter, input, outputType, scaleBiasConst, scaleValuesCount, outputZp,
+            outputMin, outputMax, shiftFactor, weightData, inputUnsigned, applyScaleOp
+        );
+    }
+
+    // Shared FMA emission for the folded (emitRescale) and sliced (emitSlicedPerChannelRescale)
+    // rescale paths: place the channel dimension — the one that indexes `scaleBias` — innermost,
+    // transposing the data to and from it when it is not, and build the torq_hl.fma with the
+    // given weight and shift. tableSize is the number of channels the table indexes (1 for a
+    // per-tensor rescale, where the [2] pair broadcasts to every element and no channel detection
+    // happens). The table is already in channel order (the output's channel-dim order), so only
+    // the data is transposed.
+    LogicalResult emitRescaleFma(
+        linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input,
+        RankedTensorType outputType, Value scaleBias, int64_t tableSize, int32_t outputZp,
+        int32_t outputMin, int32_t outputMax, int32_t shiftFactor, int8_t weightData,
+        bool inputUnsigned, tosa::ApplyScaleOp applyScaleOp
+    ) const {
         int64_t channelDim = outputType.getRank() - 1;
         bool needsTranspose = false;
         SmallVector<int64_t> perm;
-        if (scaleValuesCount > 1) {
-            if (auto multArg = dyn_cast<BlockArgument>(applyScaleOp.getMultiplier())) {
+        if (tableSize > 1) {
+            // The per-channel table is indexed by the channel dimension (innermost unless its
+            // indexing map says otherwise); prefer the multiplier's map, then the shift's (the
+            // multiplier may be a scalar constant in the body).
+            for (Value table : {applyScaleOp.getMultiplier(), applyScaleOp.getShift()}) {
+                auto arg = dyn_cast<BlockArgument>(table);
+                if (!arg)
+                    continue;
                 auto indexingMaps = srcOp.getIndexingMapsArray();
-                if (multArg.getArgNumber() < static_cast<int>(indexingMaps.size())) {
-                    auto multMap = indexingMaps[multArg.getArgNumber()];
-                    if (multMap.getNumResults() == 1) {
-                        if (auto dimExpr = dyn_cast<AffineDimExpr>(multMap.getResult(0))) {
-                            channelDim = dimExpr.getPosition();
-                        }
+                if (arg.getArgNumber() >= static_cast<int>(indexingMaps.size()))
+                    continue;
+                auto map = indexingMaps[arg.getArgNumber()];
+                if (map.getNumResults() == 1) {
+                    if (auto dimExpr = dyn_cast<AffineDimExpr>(map.getResult(0))) {
+                        channelDim = dimExpr.getPosition();
+                        break;
                     }
                 }
             }
-            if (outputType.getDimSize(channelDim) != scaleValuesCount) {
+            if (outputType.getDimSize(channelDim) != tableSize) {
                 return rewriter.notifyMatchFailure(
                     srcOp, "per-channel rescale scale count does not match any dimension"
                 );
@@ -2592,42 +2642,226 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
             }
         }
 
-        Value scaleBiasConst;
-        if (scaleValuesCount > 1) {
-            scaleBiasConst = createI32Const(
-                rewriter, srcOp, scaleBias, llvm::ArrayRef<int64_t>{scaleValuesCount, 2}
-            );
-        }
-        else {
-            scaleBiasConst = createI32Const(rewriter, srcOp, scaleBias);
-        }
+        Value weightConst =
+            createI8Const(
+                rewriter, srcOp, llvm::ArrayRef<int8_t>{weightData}, llvm::ArrayRef<int64_t>{1}
+            )
+                .getResult();
 
-        Value weightConst = createI8Const(
-            rewriter, srcOp, llvm::ArrayRef<int8_t>{weightData}, llvm::ArrayRef<int64_t>{1}
-        );
+        auto emitFma = [&](Value fmaInput, RankedTensorType fmaType) {
+            return torq_hl::FMAOp::create(
+                rewriter, srcOp.getLoc(), fmaType, createInitTensor(srcOp, rewriter, fmaType),
+                outputZp, outputMin, outputMax, shiftFactor, weightConst, scaleBias, fmaInput,
+                inputUnsigned
+            );
+        };
 
         if (needsTranspose) {
             Value transposedInput = transposeValue(input, perm, srcOp.getLoc(), rewriter);
             RankedTensorType transposedOutputType = transposeType(outputType, perm);
-            Value transposedInit = createInitTensor(srcOp, rewriter, transposedOutputType);
-            auto fmaOp = torq_hl::FMAOp::create(
-                rewriter, srcOp.getLoc(), transposedOutputType, transposedInit, outputZp, outputMin,
-                outputMax, shiftFactor, weightConst, scaleBiasConst, transposedInput, inputUnsigned
+            auto fmaOp = emitFma(transposedInput, transposedOutputType);
+            rewriter.replaceOp(
+                srcOp,
+                transposeValue(fmaOp.getOutput(), invertPermutation(perm), srcOp.getLoc(), rewriter)
             );
-            Value output = transposeValue(
-                fmaOp.getOutput(), invertPermutation(perm), srcOp.getLoc(), rewriter
-            );
-            rewriter.replaceOp(srcOp, output);
             return success();
         }
 
-        auto fmaOp = torq_hl::FMAOp::create(
-            rewriter, srcOp.getLoc(), outputType, createInitTensor(srcOp, rewriter, outputType),
-            outputZp, outputMin, outputMax, shiftFactor, weightConst, scaleBiasConst, input,
-            inputUnsigned
-        );
+        auto fmaOp = emitFma(input, outputType);
         rewriter.replaceOp(srcOp, fmaOp.getOutput());
         return success();
+    }
+
+    // A per-channel table sliced by an enclosing loop (LinalgSlicing) is not constant-foldable
+    // as a slice, but its source — the unsliced table — is a compile-time constant. Resolve the
+    // source, normalize it whole (common shift = the source's minimum shift, scales rescaled to
+    // it: the same math as emitRescale, which is exact for any sub-window), build one [C, 2]
+    // {bias, scale} constant, and emit the shared FMA (emitRescaleFma) over the extract_slice of
+    // the normalized table that mirrors the data slice (same offsets, sizes [C_slice, 2]). From
+    // then on the slice is an ordinary operand value — the lowering no longer depends on the
+    // sliced table being constant-foldable (the old hard "multiplier must be a constant" error).
+    //
+    // Handled form: each per-channel multiplier/shift is a rank-1 tensor (or rank-2 [N, 1])
+    // generic operand taken through a tensor.extract_slice that slices dim 0 only, with unit
+    // strides and a static slice size, whose source is a compile-time constant; a multiplier or
+    // shift that is a scalar constant in the generic body is broadcast to the other table's
+    // window. The two tables' dim-0 slice offsets must be the same value (or equal constants),
+    // and the source's minimum shift must be non-negative (a per-channel scale-up cannot be
+    // folded into the FMA's int8 weight). Anything else bails with the reason printed under
+    // --debug, and the rescale falls back to the CSS host as before.
+    LogicalResult emitSlicedPerChannelRescale(
+        linalg::GenericOp srcOp, PatternRewriter &rewriter, Value input,
+        RankedTensorType outputType, int32_t inputZp, int32_t outputZp, int32_t outputMin,
+        int32_t outputMax, bool inputUnsigned, tosa::ApplyScaleOp applyScaleOp
+    ) const {
+        auto fail = [&](Twine reason) -> LogicalResult {
+            LLVM_DEBUG({ llvm::dbgs() << "sliced per-channel rescale: " << reason << "\n"; });
+            return rewriter.notifyMatchFailure(srcOp, reason);
+        };
+
+        struct SlicedTable {
+            std::optional<int64_t> scalar; // a constant in the generic body (not an operand)
+            Value full;                    // the full source table
+            OpFoldResult offset;           // the dim-0 slice offset (an IV or a constant)
+            int64_t sliceSize = -1;
+            int64_t fullSize = -1;
+        };
+
+        auto resolveTable = [&](Value tableOrScalar) -> FailureOr<SlicedTable> {
+            SlicedTable t;
+            if (auto arg = dyn_cast<BlockArgument>(tableOrScalar)) {
+                Value operand = srcOp.getMatchingOpOperand(arg)->get();
+                auto slice = dyn_cast<tensor::ExtractSliceOp>(operand.getDefiningOp());
+                if (!slice) {
+                    // An unsliced table that is still not foldable (e.g. a runtime value):
+                    // the same hard limitation as before; fullSize is filled from the fold
+                    // attempt below.
+                    t.full = operand;
+                    return t;
+                }
+                auto srcType = cast<RankedTensorType>(slice.getSourceType());
+                if (srcType.getRank() != 1 &&
+                    !(srcType.getRank() == 2 && srcType.getDimSize(1) == 1))
+                    return failure();
+                auto mixedSizes = slice.getMixedSizes();
+                auto mixedStrides = slice.getMixedStrides();
+                auto toInt = [&](OpFoldResult fr) -> std::optional<int64_t> {
+                    if (auto attr = dyn_cast<Attribute>(fr)) {
+                        if (auto intAttr = dyn_cast<IntegerAttr>(attr))
+                            return intAttr.getInt();
+                        return std::nullopt;
+                    }
+                    IntegerAttr intAttr;
+                    if (matchPattern(cast<Value>(fr), m_Constant(&intAttr)))
+                        return intAttr.getInt();
+                    return std::nullopt;
+                };
+                for (int64_t i = 0; i < srcType.getRank(); ++i) {
+                    std::optional<int64_t> stride = toInt(mixedStrides[i]);
+                    std::optional<int64_t> size = toInt(mixedSizes[i]);
+                    if (!stride || !size)
+                        return failure();
+                    if (*stride != 1)
+                        return failure();
+                    if (i > 0 && *size != srcType.getDimSize(i))
+                        return failure(); // only the channel (dim 0) may be partially sliced
+                }
+                t.full = slice.getSource();
+                t.fullSize = srcType.getNumElements();
+                t.offset = slice.getMixedOffsets()[0];
+                std::optional<int64_t> sliceSize = toInt(mixedSizes[0]);
+                if (!sliceSize)
+                    return failure();
+                t.sliceSize = *sliceSize;
+                return t;
+            }
+            auto scalar = getConstIntValue(tableOrScalar);
+            if (!scalar)
+                return failure();
+            t.scalar = *scalar;
+            return t;
+        };
+
+        FailureOr<SlicedTable> multT = resolveTable(applyScaleOp.getMultiplier());
+        FailureOr<SlicedTable> shiftT = resolveTable(applyScaleOp.getShift());
+        if (failed(multT) || failed(shiftT)) {
+            return fail("sliced per-channel rescale table has an unsupported form");
+        }
+
+        int64_t fullSize = -1, sliceSize = -1;
+        OpFoldResult offset;
+        SlicedTable *tables[2] = {&(*multT), &(*shiftT)};
+        for (SlicedTable *tp : tables) {
+            if (!tp->offset)
+                continue;
+            if (fullSize < 0) {
+                fullSize = tp->fullSize;
+                sliceSize = tp->sliceSize;
+                offset = tp->offset;
+            }
+            else if (tp->fullSize != fullSize || tp->sliceSize != sliceSize ||
+                     !sameSliceOffset(tp->offset, offset)) {
+                return fail("sliced per-channel rescale tables disagree");
+            }
+        }
+        if (fullSize < 0) {
+            return fail("sliced per-channel rescale has no constant source table");
+        }
+
+        auto fullValues = [&](const SlicedTable &t) -> FailureOr<SmallVector<APInt>> {
+            if (t.scalar) {
+                return SmallVector<APInt>(fullSize, APInt(32, *t.scalar, /*isSigned=*/true));
+            }
+            auto constV = computeArithConst(t.full, true, {});
+            if (failed(constV))
+                return failure();
+            auto attr = dyn_cast_or_null<DenseElementsAttr>(
+                cast<arith::ConstantOp>(constV->getDefiningOp()).getValue()
+            );
+            if (!attr || attr.getNumElements() != fullSize)
+                return failure();
+            auto values = attr.getValues<APInt>();
+            return SmallVector<APInt>(values.begin(), values.end());
+        };
+
+        FailureOr<SmallVector<APInt>> multFull = fullValues(*multT);
+        FailureOr<SmallVector<APInt>> shiftFull = fullValues(*shiftT);
+        if (failed(multFull) || failed(shiftFull)) {
+            return fail("sliced per-channel rescale table source is not a constant");
+        }
+
+        SmallVector<int32_t> multFullV(fullSize);
+        SmallVector<int8_t> shiftFullV(fullSize);
+        for (int64_t i = 0; i < fullSize; ++i) {
+            multFullV[i] = static_cast<int32_t>((*multFull)[i].getSExtValue());
+            shiftFullV[i] = static_cast<int8_t>((*shiftFull)[i].getSExtValue());
+        }
+
+        int32_t globalShift = *std::min_element(shiftFullV.begin(), shiftFullV.end());
+        if (globalShift < 0) {
+            return fail("negative per-channel rescale shift cannot fold into int8 weight");
+        }
+
+        auto scaleFull = compute_scale(multFullV, shiftFullV, globalShift);
+        SmallVector<int32_t> biasFull(fullSize, -inputZp);
+        SmallVector<int32_t> table(2 * fullSize);
+        interleave_into(
+            llvm::ArrayRef<int32_t>(biasFull), llvm::ArrayRef<int32_t>(scaleFull), table.begin()
+        );
+
+        // The normalized table is loop-invariant: create it next to the (unsliced) source
+        // constant it is derived from, not at the rescale inside the enclosing slicing loop.
+        // That keeps it out of the loop body (no per-body clone can duplicate the full table)
+        // and alongside the other dispatch constants for CSE. (The window extract_slice below
+        // depends on the loop's IV and must stay at the rescale's position.)
+        SlicedTable *slicedT = (*multT).offset ? &(*multT) : &(*shiftT);
+        Value fullTableConst;
+        {
+            OpBuilder::InsertionGuard tableInsertGuard(rewriter);
+            if (Operation *sourceDef = slicedT->full.getDefiningOp()) {
+                rewriter.setInsertionPoint(sourceDef);
+            }
+            fullTableConst =
+                createI32Const(rewriter, srcOp, table, llvm::ArrayRef<int64_t>{fullSize, 2})
+                    .getResult();
+        }
+
+        // The FMA reads the same dim-0 window of the normalized table that the rescale reads of
+        // the raw tables.
+        auto sliceType = RankedTensorType::get({sliceSize, 2}, rewriter.getI32Type());
+        Value scaleBias =
+            tensor::ExtractSliceOp::create(
+                rewriter, srcOp.getLoc(), sliceType, fullTableConst,
+                ArrayRef<OpFoldResult>{offset, rewriter.getIndexAttr(0)},
+                ArrayRef<OpFoldResult>{rewriter.getIndexAttr(sliceSize), rewriter.getIndexAttr(2)},
+                ArrayRef<OpFoldResult>{rewriter.getIndexAttr(1), rewriter.getIndexAttr(1)}
+            )
+                .getResult();
+
+        return emitRescaleFma(
+            srcOp, rewriter, input, outputType, scaleBias, sliceSize, outputZp, outputMin,
+            outputMax, globalShift, /*weightData=*/1, inputUnsigned, applyScaleOp
+        );
     }
 
     LogicalResult
@@ -2774,13 +3008,6 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
 
         int scaleValuesCount = getRescaleScaleCount(srcOp, applyScaleOp);
 
-        auto ms = getMultiplierAndShift(srcOp, applyScaleOp, scaleValuesCount);
-        if (!ms) {
-            return rewriter.notifyMatchFailure(
-                srcOp, "Failed to get multiplier and shift from apply_scale operation"
-            );
-        }
-
         // try to extract input_zp
         auto subOp = dyn_cast_or_null<arith::SubIOp>(applyScaleOp.getValue().getDefiningOp());
         if (subOp) {
@@ -2794,6 +3021,28 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
         // or values with the top bit set are taken as negative.
         Value extendedInput = subOp ? subOp.getLhs() : applyScaleOp.getValue();
         const bool inputUnsigned = extendedInput.getDefiningOp<arith::ExtUIOp>() != nullptr;
+
+        // A per-channel table is normally folded from its (constant) source. The attempt is
+        // quiet for the per-channel case: a table sliced by an enclosing loop (LinalgSlicing)
+        // is an IV-dependent extract_slice the fold cannot see through, and
+        // emitSlicedPerChannelRescale below normalizes the slice's (constant) source instead —
+        // the quiet attempt keeps that expected fallback free of the fold's error diagnostics
+        // (the failure reason is still printed under --debug). Per-tensor rescales have no
+        // fallback and keep the original errors.
+        auto ms = getMultiplierAndShift(
+            srcOp, applyScaleOp, scaleValuesCount, /*quiet=*/scaleValuesCount > 1
+        );
+        if (!ms) {
+            if (scaleValuesCount > 1) {
+                return emitSlicedPerChannelRescale(
+                    srcOp, rewriter, input, outputType, input_zp, outputZp, outputMin, outputMax,
+                    inputUnsigned, applyScaleOp
+                );
+            }
+            return rewriter.notifyMatchFailure(
+                srcOp, "Failed to get multiplier and shift from apply_scale operation"
+            );
+        }
 
         LLVM_DEBUG({
             llvm::dbgs() << "rescale params : input_zp: " << input_zp << ", outputZp: " << outputZp

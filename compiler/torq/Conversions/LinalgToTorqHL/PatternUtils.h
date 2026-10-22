@@ -381,9 +381,12 @@ struct MultiplierShiftInfo {
     operator bool() const { return !multiplier.empty(); }
 };
 
-// Get the multiplier and shift values from tosa apply_scale op
+// Get the multiplier and shift values from tosa apply_scale op. quiet suppresses the
+// match-error diagnostics (for callers with a fallback path, e.g. RescaleOpConversion's
+// sliced-table form); the failure reason is still printed under --debug.
 MultiplierShiftInfo getMultiplierAndShift(
-    linalg::GenericOp genericOp, tosa::ApplyScaleOp applyScaleOp, int scaleValuesCount
+    linalg::GenericOp genericOp, tosa::ApplyScaleOp applyScaleOp, int scaleValuesCount,
+    bool quiet = false
 );
 
 ScaleClampInfo getDefaultScaleClampInfo(Type outElemType, Operation *srcOp);

@@ -40,7 +40,10 @@ def case_config(request, runtime_hw_type, chip_config):
     # Tests that mix linalg and tosa dialects (e.g. tosa.apply_scale inside a
     # linalg.generic) need an explicit input type; auto-detection rejects the
     # mixture.
-    need_input_type_tc = ["conv1d-matmul-fc-i8-bias-requant.mlir", "fc-i8-no-rowblock.mlir"]
+    need_input_type_tc = ["conv1d-matmul-fc-i8-bias-requant.mlir", "fc-i8-no-rowblock.mlir",
+                          "rescale-per-channel-sliced-i32-i8.mlir",
+                          "rescale-per-channel-sliced-transpose-i32-i8.mlir",
+                          "rescale-per-channel-sliced-shift-only-i32-i8.mlir"]
     # Prevent torq-run-module timing out on aws_fpga with specific testcases
     if aws_fpga:
         need_input_type_tc += ["reshape-collapse-expand.mlir"]

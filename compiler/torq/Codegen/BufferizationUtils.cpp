@@ -311,10 +311,12 @@ LogicalResult createTorqCopy(OpBuilder &builder, Location loc, Value from, Value
     }
     else {
         // memref.copy lowers to a cDMA transfer that cannot express strided
-        // accesses: a non-dense LRAM end must be staged through a dense LRAM
-        // buffer, with the strided leg handled by the NSS convert (same trick
-        // createLoadOp uses for a non-dense destination).
-        if (fromLram && !isDenseInMemory(fromType)) {
+        // accesses: a non-contiguous LRAM end must be staged through a dense
+        // LRAM buffer, with the strided leg handled by the NSS convert (same
+        // trick createLoadOp uses for a non-dense destination). A contiguous
+        // LRAM end (e.g. a subview with a nonzero offset) needs no staging: the
+        // offset only shifts the transfer's start address.
+        if (fromLram && !isContiguousInMemory(fromType)) {
             auto denseType = MemRefType::get(
                 fromType.getShape(), fromType.getElementType(), nullptr,
                 createDenseEncoding(fromType, torq_hl::MemorySpace::Lram)
@@ -325,7 +327,7 @@ LogicalResult createTorqCopy(OpBuilder &builder, Location loc, Value from, Value
             }
             return createTorqCopy(builder, loc, denseFrom, to);
         }
-        if (toLram && !isDenseInMemory(toType)) {
+        if (toLram && !isContiguousInMemory(toType)) {
             auto denseType = MemRefType::get(
                 toType.getShape(), toType.getElementType(), nullptr,
                 createDenseEncoding(toType, torq_hl::MemorySpace::Lram)

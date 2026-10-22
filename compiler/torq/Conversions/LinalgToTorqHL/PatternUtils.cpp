@@ -974,8 +974,20 @@ Operation *getFuseGroupOutputOp(Operation *op, IntegerAttr fuseGroupAttr) {
 
 // Extract and return the tosa multiplier and shift values from a tosa::ApplyScaleOp
 MultiplierShiftInfo getMultiplierAndShift(
-    linalg::GenericOp genericOp, tosa::ApplyScaleOp applyScaleOp, int scaleValuesCount
+    linalg::GenericOp genericOp, tosa::ApplyScaleOp applyScaleOp, int scaleValuesCount, bool quiet
 ) {
+    // Report a match failure: emit an error, or (quiet) just note it under --debug for a caller
+    // that has a fallback path.
+    auto report = [&](Twine msg) -> MultiplierShiftInfo {
+        if (quiet) {
+            LLVM_DEBUG({ llvm::dbgs() << "getMultiplierAndShift: " << msg << "\n"; });
+        }
+        else {
+            genericOp.emitError() << msg;
+        }
+        return {};
+    };
+
     auto tosaMultiplier = applyScaleOp.getMultiplier();
     auto tosaShift = applyScaleOp.getShift();
 
@@ -994,30 +1006,28 @@ MultiplierShiftInfo getMultiplierAndShift(
 
     if (tosaMultiplierType && tosaShiftType &&
         tosaMultiplierType.getShape() != tosaShiftType.getShape()) {
-        genericOp.emitError() << "matching error multiplier and shift have different shapes!\n";
-        return {};
+        return report("matching error multiplier and shift have different shapes!\n");
     }
 
     std::vector<int32_t> multiplier;
     if (tosaMultiplierValue) {
         auto mulConstV = computeArithConst(tosaMultiplierValue, true, {});
         if (failed(mulConstV)) {
-            genericOp.emitError() << "multiplier must be a constant";
-            return {};
+            return report("multiplier must be a constant");
         }
 
         multiplier = attrValuesAsVec<int32_t>(*mulConstV);
         if (multiplier.size() != scaleValuesCount) {
-            genericOp.emitError() << "multiplier unexpected size:" << multiplier.size()
-                                  << " expected:" << scaleValuesCount << "\n";
-            return {};
+            return report(
+                "multiplier unexpected size:" + std::to_string(multiplier.size()) +
+                " expected:" + std::to_string(scaleValuesCount) + "\n"
+            );
         }
     }
     else {
         std::optional<int64_t> scalarMultiplier = getConstIntValue(tosaMultiplier);
         if (!scalarMultiplier.has_value()) {
-            genericOp.emitError() << "matching error multiplier must be a scalar constant!\n";
-            return {};
+            return report("matching error multiplier must be a scalar constant!\n");
         }
         multiplier = std::vector<int32_t>(scaleValuesCount, scalarMultiplier.value());
     }
@@ -1026,21 +1036,18 @@ MultiplierShiftInfo getMultiplierAndShift(
     if (tosaShiftValue) {
         auto shiftConstV = computeArithConst(tosaShiftValue, true, {});
         if (failed(shiftConstV)) {
-            genericOp.emitError() << "shift must be a constant";
-            return {};
+            return report("shift must be a constant");
         }
 
         shift = attrValuesAsVec<int8_t>(*shiftConstV);
         if (shift.size() != scaleValuesCount) {
-            genericOp.emitError() << "shift vect has unexpected size: " << shift.size() << "\n";
-            return {};
+            return report("shift vect has unexpected size: " + std::to_string(shift.size()));
         }
     }
     else {
         std::optional<int64_t> scalarShift = getConstIntValue(tosaShift);
         if (!scalarShift.has_value()) {
-            genericOp.emitError() << "matching error shift must be a scalar constant!\n";
-            return {};
+            return report("matching error shift must be a scalar constant!\n");
         }
         shift = std::vector<int8_t>(scaleValuesCount, scalarShift.value());
     }
@@ -1212,7 +1219,9 @@ bool foldBackwardRescale(Value &value, ScaleInfo &scaleInfo) {
         }
     }
 
-    auto ms = getMultiplierAndShift(rescaleOp, applyScaleOp, 1);
+    // Optional fold: stay quiet on failure (a non-constant table is a normal
+    // miss here, and an emitted error would fail the enclosing fit probe).
+    auto ms = getMultiplierAndShift(rescaleOp, applyScaleOp, 1, /*quiet=*/true);
     if (!ms) {
         LLVM_DEBUG({ llvm::dbgs() << "applyScaleOp multiplier and shift not found\n"; });
         return {};
@@ -1962,12 +1971,17 @@ ScaleClampInfo foldForwardScaleClamp(
         return {};
     }
 
-    auto multiplier = applyScaleOp.getMultiplier();
+    // The per-channel count is that of whichever table (multiplier or shift) is an operand; a
+    // scalar constant in the body broadcasts. (Counting only the multiplier would let a
+    // scalar-multiplier / per-channel-shift rescale through a per-tensor caller, whose
+    // getMultiplierAndShift fold then materializes a new constant on every attempt and the
+    // greedy driver never converges.)
     int actualScaleCount = 1;
-    if (auto multArg = dyn_cast<BlockArgument>(multiplier)) {
-        if (auto operand = genericOp.getMatchingOpOperand(multArg)) {
-            if (auto multTy = dyn_cast<RankedTensorType>(operand->get().getType())) {
-                actualScaleCount = multTy.getNumElements();
+    for (Value table : {applyScaleOp.getMultiplier(), applyScaleOp.getShift()}) {
+        if (auto arg = dyn_cast<BlockArgument>(table)) {
+            if (auto operand = genericOp.getMatchingOpOperand(arg)) {
+                if (auto type = dyn_cast<RankedTensorType>(operand->get().getType()))
+                    actualScaleCount = std::max<int64_t>(actualScaleCount, type.getNumElements());
             }
         }
     }
@@ -2000,8 +2014,11 @@ ScaleClampInfo foldForwardScaleClamp(
         return {};
     }
 
-    // Extract TOSA multiplier and shift values (these are used in scale computation)
-    auto ms = getMultiplierAndShift(genericOp, applyScaleOp, scaleValuesCount);
+    // Extract TOSA multiplier and shift values (these are used in scale computation).
+    // Optional fold: stay quiet on failure (a per-channel shift with a scalar multiplier,
+    // or an IV-sliced table, is a normal miss here, and an emitted error would fail the
+    // enclosing fit probe).
+    auto ms = getMultiplierAndShift(genericOp, applyScaleOp, scaleValuesCount, /*quiet=*/true);
     if (!ms) {
         LLVM_DEBUG({
             llvm::dbgs() << "matching error applyScaleOp multiplier and shift not found!\n";
