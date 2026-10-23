@@ -16,7 +16,6 @@ set(sources
     ConvertPattern.cpp
     DWPattern.cpp
     FCPattern.cpp
-    FCToHw.cpp
     FillPattern.cpp
     FMAPattern.cpp
     GatherPattern.cpp

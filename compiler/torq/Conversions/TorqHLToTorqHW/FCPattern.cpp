@@ -4,280 +4,291 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+// FCPattern.cpp - lower torq_hl FullyConnected to torq_hw::SliceTaskOp
 #include "Patterns.h"
+
+#include "torq/Utils/ConversionUtils.h"
+#include "torq/Utils/Kernel.h"
 #include "torq/Utils/TorqUtils.h"
-
 #include "llvm/Support/Debug.h"
-
-#define DEBUG_TYPE "torq-lower-torqhl"
 
 using namespace mlir::syna::torq_hw;
 
+#define DEBUG_TYPE "torq-lower-torqhl"
+
 namespace mlir::syna::torq {
 
-// To program the hardware for FC we need to generate the following descriptors:
-// ref, dedr, dewr, debr, deqw, cedw, cedr, ceww, cewr, cepr, acpr, acbw, acbr
-// For fully connected the ALU will be working on MUL and ACC(add) operations.
-// The ALU will be working on 1 group of 64 pixels each.
-// The data and weight will be read in blocks of iram_width pixels and max_mode_pixels weights.
-// In the case of FC the data and weights are interchanged compared to conv2d.
-// The data is fed through the dewr route and the weights are fed through the dedr route.
-// The flow of data is as follows:
-// max_mode_pixels : 64
-// ALU info 64x1: V(64)U(u)V(v/64)
-// 1. Read the input data in blocks of wram_width pixels.
-// 2. Read the weights in blocks of max_mode_pixels weights.
-// 3. Feed the data and weights to the ALU.
-// 4. To complete the FC accumulation the full input channels has to be processed.
-//    The weights and data are changed to cycle through to complete 64 output channel worth of data
-//    and weights.
-// 5. The ALU will output 64 channels outputs.
-// 7. Read the bias & scale in blocks of output_channels.
-// 8. The output is rescaled to int8 in blocks of 16 pixels
-// 9. The output is written back to LRAM
-// 10. Take the next block of 64 output weights and repeat the process.
-//
-//
+// Layout of the in/out/weight tensors for processing
+struct In : Vectorized {
+    enum { N, IC };
+};
 
-LogicalResult convertToHw(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter);
+struct Out {
+    enum { N, OC };
+};
+
+struct Weight {
+    enum { IC, OCVect, OCElement };
+};
+
+struct BiasScale {
+    enum { OCVect, ActVect, ActItems, Items };
+};
+
+// Per-output-channel bias/scale kernel.
+//
+// Expected tensor layouts:
+//   input    : [N, IC]
+//   weight   : [IC, OCVect, OCElement]   where OCElement = alu.iWidth(wType, inType)
+//   biasScale: [OCVect, ceil(OCElement/actVectSize), actVectSize, biasScaleWidth(inType)]
+//   output   : [N, OC]
+//
+// Each output-channel vector (OCVect) has its own bias/scale entry, applied after
+// the IC reduction.
+//
+// `rowOffset` / `rowCount` select a range of input rows (N). They are the whole tensor
+// unless the fast kernel below peeled a tail of rows off for this kernel to pick up.
+static torq_hw::SliceTaskOp lowerToHwPerChannel(
+    torq_hl::FullyConnectedOp op, PatternRewriter &rewriter, int rowOffset, int rowCount
+) {
+
+    LData input(op.getInput());
+    LData output(op.getInit());
+    LData weight(op.getWeights());
+    Slice slice("fc");
+    weight.forceReshapeDim(1, {-1, slice.alu.iWidth(weight.elementType(), input.elementType())});
+    LData biasScale(op.getScaleBias());
+
+    const auto inType = input.elementType();
+    const auto wType = weight.elementType();
+    const int weightVectSize = weight.dim(Weight::OCElement);
+    const int actVectSize = std::min(weightVectSize, slice.act.width(wType, inType, true));
+    biasScale.forceReshapeDim(
+        0, {-1, (int)div_ceil(weightVectSize, actVectSize), actVectSize, biasScaleWidth(inType)}
+    );
+
+    input.subviewDim(In::N, rowOffset, rowCount);
+    output.subviewDim(Out::N, rowOffset, rowCount);
+
+    For(auto batch = slice.iterate(input.dim(In::N))) {
+        For(auto ocv = slice.iterate(weight.dim(Weight::OCVect))) {
+            PData pdata;
+            For(auto icv = slice.iterate(input.dim(In::IC))) {
+                IData fcWeights = slice.iram.load(weight[icv][ocv]);
+                WData fcInput = slice.wram.load(input[batch][icv]);
+                pdata = slice.alu.scalarProductAccumulate(fcWeights, fcInput);
+            }
+            For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
+                BData bdata = slice.bram.load(biasScale[ocv][av]);
+                QData res = slice.act.rescaleClamp(
+                    pdata[av], bdata, op.getShiftFactor(), op.getOutputZp(), op.getOutputMin(),
+                    op.getOutputMax()
+                );
+                slice.append(output[batch], res);
+            }
+        }
+    }
+
+    return slice.createSliceTaskOp(rewriter, op.getLoc());
+}
+
+// Batch-scaled bias/scale kernel.
+//
+// Expected tensor layouts:
+//   input    : [N, IC]
+//   weight   : [IC, OCVect, OCElement]   where OCElement = alu.iWidth(wType, inType)
+//   biasScale: [N, biasScaleWidth(inType)]  (one entry per batch element, shared across
+//              all output channels). When isSingleBias is true, biasScale has shape
+//              [1, biasScaleWidth(inType)] and is broadcast to match N.
+//   output   : [N, OC]
+//
+// Used when op.getIsBatchScaled() is set, or when a single bias (biasScale.dim(0)==1)
+// is broadcast over the whole batch.
+static torq_hw::SliceTaskOp
+lowerToHwBatchScaled(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter, bool isSingleBias) {
+
+    LData input(op.getInput());
+    LData output(op.getInit());
+    LData weight(op.getWeights());
+    Slice slice("fc");
+    weight.forceReshapeDim(1, {-1, slice.alu.iWidth(weight.elementType(), input.elementType())});
+    LData biasScale(op.getScaleBias());
+
+    biasScale.forceReshapeDim(0, {-1, biasScaleWidth(input.elementType())});
+    if (isSingleBias)
+        biasScale.broadcastAs(output, 1);
+
+    For(auto batch = slice.iterate(input.dim(In::N))) {
+        For(auto ocv = slice.iterate(weight.dim(Weight::OCVect))) {
+            PData pdata;
+            For(auto icv = slice.iterate(input.dim(In::IC))) {
+                IData fcWeights = slice.iram.load(weight[icv][ocv]);
+                WData fcInput = slice.wram.load(input[batch][icv]);
+                pdata = slice.alu.scalarProductAccumulate(fcWeights, fcInput);
+            }
+            BData bdata = slice.bram.load(biasScale[batch]);
+            For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
+                QData res = slice.act.rescaleClamp(
+                    pdata[av], bdata, op.getShiftFactor(), op.getOutputZp(), op.getOutputMin(),
+                    op.getOutputMax()
+                );
+                slice.append(output[batch], res);
+            }
+        }
+    }
+
+    // Pass weights first (IData) and input second (WData) so the runtime maps them
+    // to the expected memories for FC lowering.
+    return torq_hw::SliceTaskOp::create(
+        rewriter, op.getLoc(), slice.name(), op.getWeights(), op.getInput(), op.getScaleBias(),
+        op.getInit(), slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
+    );
+}
+
+// Row-blocked variant of the kernel above: groups up to wram.transposeHeight() input rows
+// into one WRAM transpose block and accumulates an outer product, like lowerToFastMatmul()
+// but with WRAM holding the input rows. bias/scale is indexed by output channel only, so a
+// group shares one BREG. A rowCount below the transpose height runs in one pass with a
+// shorter block, the same way lowerToFastMatmul() handles M < 4.
+static torq_hw::SliceTaskOp lowerToHwPerChannelFast(
+    torq_hl::FullyConnectedOp op, PatternRewriter &rewriter, int rowOffset, int rowCount
+) {
+
+    LData input(op.getInput());
+    LData output(op.getInit());
+    LData weight(op.getWeights());
+    Slice slice("fc-fast");
+    const int rowVectSize = std::min(slice.wram.transposeHeight(), rowCount);
+    const int aluWidth = slice.alu.iWidth(weight.elementType(), input.elementType(), rowVectSize);
+    weight.vectorize(aluWidth);
+    LData biasScale(op.getScaleBias());
+
+    const auto inType = input.elementType();
+    const auto wType = weight.elementType();
+    const int weightVectSize = weight.dim(Weight::OCElement);
+    const int actWidth = slice.act.width(wType, inType, true);
+    const int actVectSize = std::min(weightVectSize, actWidth);
+    // The ACT-group count follows the PRAM shape, not the bias tensor: outerProductAccumulate
+    // densifies the ACT-vector dim to a full aluWidth worth of vectors whenever more than one
+    // drain beat is needed, and the drain below indexes DEBR with that dim. Deriving the count
+    // from weightVectSize instead would come up short for an OC vector narrower than aluWidth
+    // (bf16 OC=16 gives 2 groups against 4 PRAM vectors) and DEBR would index past the record
+    // block. This matches div_ceil(weightVectSize, actVectSize) whenever the OC vector is full;
+    // below that it over-reads the bias tensor, but the extra records only feed padding lanes
+    // whose results are never written back, the same way an OC remainder vector already works.
+    biasScale.forceReshapeDim(
+        0, {-1, (int)div_ceil(aluWidth, actWidth), actVectSize, biasScaleWidth(inType)}
+    );
+
+    input.subviewDim(In::N, rowOffset, rowCount);
+    output.subviewDim(Out::N, rowOffset, rowCount);
+
+    const int rowChunks = maxDivisor(input.dim(In::IC), slice.wram.transposeWidth());
+
+    // input : [N, IC]      -> [NGroups, rowVectSize, ICGroups, rowChunks]
+    // weight: [IC, ...]    -> [ICGroups, rowChunks, OCVect, OCElement]
+    // output: [N, OC]      -> [NGroups, rowVectSize, OC]
+    input.reshapeDim(In::IC, {-1, rowChunks});
+    input.reshapeDim(In::N, {-1, rowVectSize});
+    weight.reshapeDim(Weight::IC, {-1, rowChunks});
+    output.reshapeDim(Out::N, {-1, rowVectSize});
+
+    enum { NGroups, NRows, ICGroups, ICChunk }; // input dims after the reshapes
+    enum { WICGroups, WICChunk, WOCVect };      // weight dims after the reshape
+
+    For(auto nog = slice.iterate(input.dim(NGroups))) {
+        For(auto ocv = slice.iterate(weight.dim(WOCVect))) {
+            PData pdata;
+            For(auto ico = slice.iterate(weight.dim(WICGroups))) {
+                // One transpose block of rowVectSize input rows x rowChunks reduction steps.
+                WData fcInput = slice.wram.transpose(input[nog][":"][ico]);
+                For(auto ici = slice.iterate(fcInput.dim(0))) {
+                    IData fcWeights = slice.iram.load(weight[ico][ici][ocv]);
+                    pdata = slice.alu.outerProductAccumulate(fcWeights, fcInput[ici]);
+                }
+            }
+            For(auto o = slice.iterate(pdata.dim(PData::Outer))) {
+                For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
+                    BData bdata = slice.bram.load(biasScale[ocv][av]);
+                    QData res = slice.act.rescaleClamp(
+                        pdata[o][av], bdata, op.getShiftFactor(), op.getOutputZp(),
+                        op.getOutputMin(), op.getOutputMax()
+                    );
+                    slice.append(output[nog][o], res);
+                }
+            }
+        }
+    }
+
+    LLVM_DEBUG(llvm::dbgs() << "Lowered to fast fully_connected kernel\n");
+    return slice.createSliceTaskOp(rewriter, op.getLoc());
+}
+
+// Rows per WRAM transpose block: a fixed HW property, but only reachable through a
+// Slice, hence the throwaway one.
+static int fastPathRowBlock() { return Slice().wram.transposeHeight(); }
+
+// Needs a float datapath and a rank-2 input/output, which the row and reduction splits above
+// assume.
+//
+// int8 is out, and what stops it is the drain rather than the outer product. A per-item
+// bias/scale caps the ACT width (SlicePrivate::actWidth): the cap is 4 for int8 and 8 for
+// bf16. One pass then has to drain iWidth/actWidth vectors, which is 32/8 = 4 for bf16 but
+// 64/4 = 16 for int8. A block of R rows multiplies that count, and _reg_ndl_desc_gen()
+// asserts dims.sn <= 16, so int8 passes the limit at R = 2 already. A narrower int8 pass
+// would fit, but an iWidth of 16 instead of 64 needs four times as many passes over the
+// output channels, which undoes the four rows the block gives.
+static bool canUseFastPerChannel(torq_hl::FullyConnectedOp op) {
+    LData input(op.getInput());
+    LData output(op.getInit());
+
+    return isFloat(input.elementType()) && input.dims().size() == 2 && output.dims().size() == 2;
+}
+
+static torq_hw::SliceTaskOp lowerToHw(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter) {
+    LData biasScale(op.getScaleBias());
+    bool isSingleBias =
+        (biasScale.shape().size() == 1 || biasScale.shape().size() == 2) && biasScale.dim(0) == 1;
+    bool isBatchScaled = op.getIsBatchScaled() || isSingleBias;
+
+    if (isBatchScaled)
+        return lowerToHwBatchScaled(op, rewriter, isSingleBias);
+
+    const int rowCount = LData(op.getInput()).dim(In::N);
+    const int rowVectSize = fastPathRowBlock();
+    if (canUseFastPerChannel(op)) {
+        if (int peeledRows = rowCount % rowVectSize) {
+            // A single row has nothing to block, so it goes to the scalar kernel the way
+            // lowerToMatmul() picks up a single-row fast-matmul remainder. Two or three rows
+            // still run in one pass, with a block that short.
+            auto peeled =
+                peeledRows == 1
+                    ? lowerToHwPerChannel(op, rewriter, rowCount - peeledRows, peeledRows)
+                    : lowerToHwPerChannelFast(op, rewriter, rowCount - peeledRows, peeledRows);
+            if (!peeled)
+                return nullptr;
+            if (rowCount < rowVectSize)
+                return peeled;
+        }
+        return lowerToHwPerChannelFast(op, rewriter, 0, rowCount - rowCount % rowVectSize);
+    }
+    return lowerToHwPerChannel(op, rewriter, 0, rowCount);
+}
 
 template <>
 LogicalResult FCPattern::transform(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter) const {
+    // The legacy NDL fully_connected body is gone: a 2026-10 corpus audit (all
+    // .mlir test corpora, 771 models) found 0 legacy / 221 EK fully_connected
+    // instances — the EK dispatcher (batch-scaled, per-channel, fast row-block
+    // kernels with their peels) covers everything the test set lowers. A shape
+    // the EK path cannot take now fails loudly as an unconverted op instead of
+    // falling back.
+    torq_hw::SliceTaskOp hwOp;
 
-    if (convertToHw(op, rewriter).succeeded()) {
-        return success();
+    if (!(hwOp = lowerToHw(op, rewriter))) {
+        return failure();
     }
-
-    // input
-    auto input_type = llvm::cast<MemRefType>(op.getInput().getType());
-    auto input_shape = input_type.getShape();
-
-    // output
-    auto output_type = llvm::dyn_cast<MemRefType>(op.getInit().getType());
-    auto output_shape = output_type.getShape();
-
-    uint32_t input_channel = input_shape[1];
-
-    // FullyConnected inputs are often 2D: [N, IC], but when fused from Conv2D,
-    // the input can still be 4D: [N, H, W, IC], where H=W=1
-    // Example: [1, 1, 1, 1280] is a common degenerate Conv2D input
-    if (input_shape.size() == 4) {
-        // Assert that dims 0, 1, 2 are 1: [N=1, H=1, W=1, IC]
-        assert(input_shape[0] == 1 && "FC input dim[0] (batch) must be 1");
-        assert(input_shape[1] == 1 && "FC input dim[1] (height) must be 1");
-        assert(input_shape[2] == 1 && "FC input dim[2] (width) must be 1");
-        input_channel = input_shape[3];
-    }
-    assert(input_channel > 0 && "input channel must be greater than 0");
-
-    const uint32_t output_channel = output_shape[1];
-    const uint32_t max_out_channels = std::min<uint32_t>(output_channel, HwInfo::max_input);
-    assert(max_out_channels > 0 && "max output channel must be greater than 0");
-
-    const uint32_t out_ch_split = div_ceil(output_channel, max_out_channels);
-    assert(out_ch_split > 0 && "output channel split must be greater than 0");
-
-    std::vector<uint32_t> weight_shape{input_channel};
-    std::vector<uint32_t> weight_dims = prepareWeightDims(weight_shape, input_channel, alu_groups);
-    assert(!weight_dims.empty());
-
-    auto ctx = rewriter.getContext();
-
-    auto slice_cfg_attr = torq_hw::SliceCFGAttr::get(
-        ctx, {ALUOp0Mode::MUL, ALUOp0Mode::MUL, ALUOp0Mode::MUL, ALUOp0Mode::MUL},
-        {ALUOp1Mode::ACC, ALUOp1Mode::ACC, ALUOp1Mode::ACC, ALUOp1Mode::ACC},
-        0,                   // alu_d_unsigned
-        0,                   // alu_w_unsigned
-        ACTMode::ACT,        // act_mode
-        {0, 0, 0, 0},        // act left shift
-        op.getShiftFactor(), // shift_factor
-        op.getOutputMin(),   // output_min
-        op.getOutputMax(),   // output_max
-        op.getOutputZp(),    // output_zp
-        false,               // no_p_clear
-        false,               // no_p_output
-        0, 0, 0, 0,          // kernel lrtb
-        0, 0, 0, 0,          // pad lrtb
-        op.getInputZp(),     // pad_value
-        1                    // stride
-    );
-
-    Ndls ndls;
-
-    // Ref tag has only U and V dimensions
-    // This is enough to represent the FC input which is of shape [batch, input_channel] and weights
-    // [output_channel, input_channels] The output is of shape [batch, output_channel] The U
-    // dimension is the input_channel and V dimension is the output_channel
-    ndls.add(
-        NdlType::REF, {{DimType::H, MemDimTag::U, input_channel, 0},
-                       {DimType::H, MemDimTag::V, output_channel, 0}}
-    );
-
-    // In FC the dedr agent takes the weight data in blocks of 64 output channel worth
-    MemNdlDimsData dedr = {
-        {DimType::L, MemDimTag::V, alu_group_width, 1},
-        {DimType::H, MemDimTag::U, input_channel, max_out_channels}
-    };
-    if (out_ch_split > 1) {
-        dedr.push_back({DimType::H, MemDimTag::V, out_ch_split, max_out_channels * input_channel});
-    }
-    ndls.add(NdlType::DEDR, dedr);
-
-    // In FC the dewr agent takes the input data in blocks of wram_width pixels
-    MemNdlDimsData dewr = {{DimType::L, MemDimTag::U, weight_dims[0], 1}};
-    uint32_t weight_idx = weight_dims[0];
-    for (size_t i = 1; i < weight_dims.size(); ++i) {
-        if (weight_dims[i] == 1) {
-            continue;
-        }
-        dewr.push_back({DimType::H, MemDimTag::U, weight_dims[i], weight_idx});
-        weight_idx *= weight_dims[i];
-    }
-    if (out_ch_split > 1) {
-        dewr.push_back({DimType::H, MemDimTag::V, out_ch_split, 0});
-    }
-    ndls.add(NdlType::DEWR, dewr);
-
-    // In FC the debr agent reads the bias and scale in blocks of 16
-    MemNdlDimsData debr = {
-        {DimType::L, MemDimTag::O, HwInfo::breg_width, 1},
-        {DimType::L, MemDimTag::V, HwInfo::act_limit, HwInfo::breg_width},
-        {DimType::H, MemDimTag::V, max_out_channels / HwInfo::act_limit,
-         HwInfo::act_limit * HwInfo::breg_width}
-    };
-    if (out_ch_split > 1) {
-        debr.push_back(
-            {DimType::H, MemDimTag::V, out_ch_split, max_out_channels * HwInfo::breg_width}
-        );
-    }
-    ndls.add(NdlType::DEBR, debr);
-
-    // In FC the deqw agent writes the output data in blocks of 16
-    MemNdlDimsData deqw = {
-        {DimType::L, MemDimTag::V, HwInfo::act_limit, 1},
-        {DimType::H, MemDimTag::V, max_out_channels / HwInfo::act_limit, HwInfo::act_limit}
-    };
-    if (out_ch_split > 1) {
-        deqw.push_back({DimType::H, MemDimTag::V, out_ch_split, max_out_channels});
-    }
-    ndls.add(NdlType::DEQW, deqw);
-
-    // In FC CEDW is taking the weights and writing to the IRAM
-    ndls.add(
-        NdlType::CEDW, {{DimType::L, RegDimTag::B},
-                        {DimType::L, RegDimTag::D, HwInfo::iram_seg_width, 1},
-                        {DimType::L, RegDimTag::G},
-                        {DimType::H, RegDimTag::S, div_ceil(max_out_channels, alu_group_width),
-                         HwInfo::iram_seg_width},
-                        {DimType::H, RegDimTag::M},
-                        {DimType::H, RegDimTag::W},
-                        {DimType::H, RegDimTag::N},
-                        {DimType::H, RegDimTag::T, out_ch_split, HwInfo::iram_width}}
-    );
-
-    // In FC the CEDR takes the weights from IRAM and load it to ALU
-    ndls.add(
-        NdlType::CEDR,
-        {{DimType::L, RegDimTag::B},
-         {DimType::L, RegDimTag::D, HwInfo::max_input, 1},
-         {DimType::L, RegDimTag::G, div_ceil(max_out_channels, alu_group_width), alu_group_width},
-         {DimType::H, RegDimTag::S},
-         {DimType::H, RegDimTag::M},
-         {DimType::H, RegDimTag::W},
-         {DimType::H, RegDimTag::N},
-         {DimType::H, RegDimTag::T, input_channel * out_ch_split, HwInfo::iram_width}}
-    );
-
-    const auto repeats = out_ch_split;
-    const auto ce_repeats = weight_dims.size() < 3 ? repeats : weight_dims[2] * repeats;
-    ndls.add(
-        NdlType::CEWW,
-        {{DimType::L, RegDimTag::B},
-         {DimType::L, RegDimTag::D, HwInfo::wram_seg_width, 1},
-         {DimType::L, RegDimTag::G},
-         {DimType::H, RegDimTag::S},
-         {DimType::H, RegDimTag::M},
-         {DimType::H, RegDimTag::W},
-         {DimType::H, RegDimTag::N},
-         {DimType::H, RegDimTag::T, ce_repeats * weight_dims[1], HwInfo::wram_seg_width}}
-    );
-
-    ndls.add(
-        NdlType::CEWR,
-        {{DimType::L, RegDimTag::B},
-         {DimType::L, RegDimTag::D},
-         {DimType::L, RegDimTag::G},
-         {DimType::H, RegDimTag::S, weight_dims[0], 1},
-         {DimType::H, RegDimTag::M, HwInfo::pram_depth, 0},
-         {DimType::H, RegDimTag::W},
-         {DimType::H, RegDimTag::N},
-         {DimType::H, RegDimTag::T, ce_repeats * weight_dims[1], HwInfo::wram_seg_width}}
-    );
-
-    ndls.add(
-        NdlType::CEPR,
-        {{DimType::L, RegDimTag::B, HwInfo::pram_dsize, 1},
-         {DimType::L, RegDimTag::D, max_out_channels, HwInfo::pram_dsize},
-         {DimType::L, RegDimTag::G},
-         {DimType::H, RegDimTag::S},
-         {DimType::H, RegDimTag::M},
-         {DimType::H, RegDimTag::W, HwInfo::pram_depth, max_out_channels * HwInfo::pram_dsize},
-         {DimType::H, RegDimTag::N, input_channel, 0},
-         {DimType::H, RegDimTag::T, out_ch_split,
-          HwInfo::pram_depth * max_out_channels * HwInfo::pram_dsize}}
-    );
-
-    ndls.add(
-        NdlType::ACBW,
-        {{DimType::L, RegDimTag::B, HwInfo::breg_width, 1},
-         {DimType::L, RegDimTag::D, HwInfo::act_limit, HwInfo::breg_width},
-         {DimType::L, RegDimTag::G},
-         {DimType::H, RegDimTag::S},
-         {DimType::H, RegDimTag::M},
-         {DimType::H, RegDimTag::W},
-         {DimType::H, RegDimTag::N},
-         {DimType::H, RegDimTag::T, out_ch_split * max_out_channels / HwInfo::act_limit,
-          HwInfo::act_limit * HwInfo::breg_width}}
-    );
-
-    ndls.add(
-        NdlType::ACBR,
-        {{DimType::L, RegDimTag::B, HwInfo::breg_width, 1},
-         {DimType::L, RegDimTag::D, HwInfo::act_limit, HwInfo::breg_width},
-         {DimType::L, RegDimTag::G},
-         {DimType::H, RegDimTag::S},
-         {DimType::H, RegDimTag::M},
-         {DimType::H, RegDimTag::W},
-         {DimType::H, RegDimTag::N},
-         {DimType::H, RegDimTag::T, max_out_channels / HwInfo::act_limit * out_ch_split,
-          HwInfo::act_limit * HwInfo::breg_width}}
-    );
-
-    ndls.add(
-        NdlType::ACPR,
-        {{DimType::L, RegDimTag::B, HwInfo::pram_dsize, 1},
-         {DimType::L, RegDimTag::D, HwInfo::act_limit, HwInfo::pram_dsize},
-         {DimType::L, RegDimTag::G},
-         {DimType::H, RegDimTag::S, max_out_channels / HwInfo::act_limit,
-          HwInfo::pram_dsize * HwInfo::act_limit},
-         {DimType::H, RegDimTag::M},
-         {DimType::H, RegDimTag::W},
-         {DimType::H, RegDimTag::N},
-         {DimType::H, RegDimTag::T, out_ch_split, max_out_channels * HwInfo::pram_dsize}}
-    );
-
-    // NOTE: data and weight memory are exchanged
-    rewriter.replaceOpWithNewOp<torq_hw::SliceTaskOp>(
-        op,                // Operation to replace
-        "fully_connected", // Task name
-        op.getWeights(),   // Input tensor
-        op.getInput(),     // Weights
-        op.getScaleBias(), // BiasScale tensor,
-        op.getInit(),      // Output tensor initializer
-        slice_cfg_attr,    // Slice configuration
-        ndls               // NDLs
-    );
-
+    rewriter.replaceOp(op, hwOp.getOperation()->getResults());
     return success();
 }
 

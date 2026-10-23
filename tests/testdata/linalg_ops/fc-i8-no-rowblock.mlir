@@ -1,7 +1,7 @@
 // Gate check: an int8 fully_connected must NOT take the row-blocked (fc-fast) kernel.
 // Same IR shape as conv1d-matmul-fc-i8-bias-requant.mlir but with N=16 rows, K=64 and
 // F=64, which is the size range where the fast kernel would be picked if the isFloat()
-// gate in FCToHw.cpp were dropped. For int8 a per-item bias/scale narrows the ACT width
+// gate in FCPattern.cpp were dropped. For int8 a per-item bias/scale narrows the ACT width
 // from 16 to 4, and draining four rows of that overflows the S field of the reg-NDL
 // descriptor (torq_api.c asserts dims.sn <= 16), so lifting the gate aborts the compile.
 //
