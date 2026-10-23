@@ -141,7 +141,8 @@ static Value emitQuantizeChain(
         torq_hl::MulOp::create(
             rewriter, loc, bf16Type, mulInit, rewriter.getI32IntegerAttr(0),
             rewriter.getI32IntegerAttr(0xff800000), rewriter.getI32IntegerAttr(0x7f800000), zpBias,
-            rewriter.getI8IntegerAttr(0), scaledInput, recipScale
+            rewriter.getI8IntegerAttr(0), scaledInput, recipScale,
+            /*input1_offset=*/Value()
         )
             .getOutput();
 
@@ -290,7 +291,8 @@ struct DequantizeOpConversion : public OpRewritePattern<linalg::GenericOp> {
             torq_hl::MulOp::create(
                 rewriter, loc, bf16Type, mulInit, rewriter.getI32IntegerAttr(0),
                 rewriter.getI32IntegerAttr(0xff800000), rewriter.getI32IntegerAttr(0x7f800000),
-                zpBias, rewriter.getI8IntegerAttr(0), bf16Input, scaleConst
+                zpBias, rewriter.getI8IntegerAttr(0), bf16Input, scaleConst,
+                /*input1_offset=*/Value()
             )
                 .getOutput();
 

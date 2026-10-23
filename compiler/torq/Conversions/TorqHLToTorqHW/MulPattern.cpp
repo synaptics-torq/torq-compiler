@@ -135,6 +135,72 @@ static LogicalResult lowerElementwiseMul(
     return success();
 }
 
+// A view of the input1 offset vector with the dims of the vectorized input1. Each vector reads the
+// first elements of the offset and all outer dims have stride 0, so the offset does not stop the
+// fusion of the input1 dims.
+static LData offsetViewLike(LData offset, const LData &input1) {
+    offset.subviewDim(0, 0, input1.dim(-1));
+    for (int i = input1.shape().size() - 2; i >= 0; --i)
+        offset.insertDim(0, ShapeItem(input1.dim(i), Stride(int64_t{0})));
+    return offset;
+}
+
+// (input1 + offset) * input2 is input1 * input2 + offset * input2: input1 and the offset vector are
+// stacked in IRAM and both products accumulate on one WRAM vector of input2. This takes two ALU
+// steps per vector, so the vectors use the ALU width and the ACT processes each product in several
+// steps: the ALU steps then run in parallel with the ACT steps and the offset costs no time.
+// The offset comes from a per-tensor zero point, so the scale_bias is a single record.
+static LogicalResult lowerElementwiseMulWithInput1Offset(
+    torq_hl::MulOp op, PatternRewriter &rewriter, LData input1, LData input2, LData input1Offset,
+    LData biasScale, LData output, int shift, int outZp, int outMin, int outMax
+) {
+    if (elementCount(biasScale.shape()) != biasScaleWidth(biasScale.elementType()))
+        return rewriter.notifyMatchFailure(op, "input1 offset needs a single bias/scale record");
+
+    Slice slice("mul");
+
+    struct In : Vectorized {
+        enum {
+            InputTensors, // Selects between input1 and the offset
+            NonDenseDims,
+        };
+    };
+
+    input1.broadcastAs(output);
+    input2.broadcastAs(output);
+    int denseDims = std::min({input1.denseDims(), input2.denseDims(), output.denseDims()});
+
+    // elementwiseProductAccumulate takes at most wWidth items
+    int vectorSize = std::min(
+        slice.alu.iWidth(input1.elementType(), input2.elementType()),
+        slice.alu.wWidth(input2.elementType())
+    );
+    input1.fuse(denseDims).vectorize(vectorSize);
+    input2.fuse(denseDims).vectorize(vectorSize);
+    output.fuse(denseDims);
+    LData offset = offsetViewLike(input1Offset, input1);
+    GLData input = stack(rewriter, input1, offset);
+
+    BData bdata = slice.bram.load(biasScale);
+    For(auto ndd = slice.iterate(input.dims(In::NonDenseDims, In::Vectors))) {
+        For(auto iv = slice.iterate(input.dim(In::Vectors))) {
+            WData wdata = slice.wram.load(input2[ndd][iv]);
+            PData pdata;
+            For(auto it = slice.iterate(input.dim(In::InputTensors))) {
+                IData idata = slice.iram.load(input[it][ndd][iv]);
+                pdata = slice.alu.elementwiseProductAccumulate(idata, wdata);
+            }
+            For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
+                QData res = slice.act.rescaleClamp(pdata[av], bdata, shift, outZp, outMin, outMax);
+                slice.append(output[ndd], res);
+            }
+        }
+    }
+
+    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
+    return success();
+}
+
 template <>
 LogicalResult MulPattern::transform(torq_hl::MulOp op, PatternRewriter &rewriter) const {
     LData input1(op.getInput1());
@@ -146,6 +212,12 @@ LogicalResult MulPattern::transform(torq_hl::MulOp op, PatternRewriter &rewriter
     const int outMin = op.getOutputMin();
     const int outMax = op.getOutputMax();
     const int outZp = op.getOutputZp();
+
+    if (op.getInput1Offset())
+        return lowerElementwiseMulWithInput1Offset(
+            op, rewriter, input1, input2, LData(op.getInput1Offset()), biasScale, output, shift,
+            outZp, outMin, outMax
+        );
 
     // A single-element operand is a scalar multiplier, which the ALU applies to a whole
     // input vector natively.

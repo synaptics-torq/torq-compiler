@@ -261,7 +261,8 @@ struct QMulDivConvert : public OpRewritePattern<linalg::GenericOp> {
         Value mulResult =
             torq_hl::MulOp::create(
                 rewriter, loc, outTy, createInitTensor(chain.quantOp, rewriter, outTy), outputZp,
-                outputMin, outputMax, scaleBias, static_cast<int8_t>(shift), lhs, rhs
+                outputMin, outputMax, scaleBias, static_cast<int8_t>(shift), lhs, rhs,
+                /*input1_offset=*/Value()
             )
                 .getResult(0);
 

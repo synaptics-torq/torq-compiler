@@ -7,6 +7,7 @@
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
+#include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Utils/ComputeConstants.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -23,6 +24,44 @@
 #define DEBUG_TYPE "linalg-torq-mul-pattern"
 
 namespace mlir::syna::torq {
+
+// Matches the integer mul whose input1 zero point foldMulInputZeroPoints
+// (CastI32MulPattern.cpp) moved into the body:
+//   ^bb0(%in0: i8, %in1: iN, %out: i32):
+//     %0 = arith.extsi %in0 : i8 to i32
+//     %1 = arith.subi %0, %c_zp : i32
+//     %2 = arith.extsi %in1 : iN to i32
+//     %3 = arith.muli %1, %2 : i32
+//     linalg.yield %3 : i32
+// Returns the muli and sets `zp`, or returns null.
+static Operation *matchMulWithInput1Zp(linalg::GenericOp op, int32_t &zp) {
+    if (op.getNumDpsInputs() != 2 || op.getNumDpsInits() != 1 ||
+        op.getNumParallelLoops() != op.getNumLoops())
+        return nullptr;
+
+    auto yieldOp = cast<linalg::YieldOp>(op.getBody()->getTerminator());
+    if (yieldOp.getNumOperands() != 1)
+        return nullptr;
+    auto muliOp = yieldOp.getOperand(0).getDefiningOp<arith::MulIOp>();
+    if (!muliOp)
+        return nullptr;
+
+    auto subiOp = muliOp.getLhs().getDefiningOp<arith::SubIOp>();
+    auto rhsExt = muliOp.getRhs().getDefiningOp<arith::ExtSIOp>();
+    if (!subiOp || !rhsExt)
+        return nullptr;
+    auto lhsExt = subiOp.getLhs().getDefiningOp<arith::ExtSIOp>();
+    auto maybeZp = getConstIntValue(subiOp.getRhs());
+    if (!lhsExt || !maybeZp)
+        return nullptr;
+
+    Block *body = op.getBody();
+    if (lhsExt.getIn() != body->getArgument(0) || rhsExt.getIn() != body->getArgument(1))
+        return nullptr;
+
+    zp = static_cast<int32_t>(*maybeZp);
+    return muliOp;
+}
 
 class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
   private:
@@ -62,7 +101,10 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(srcOp, "mul with i32 inputs is not supported");
         }
 
+        int32_t input1Zp = 0;
         Operation *mulOp = getElementwiseBinaryOp(srcOp, /*allow constants*/ true);
+        if (!mulOp)
+            mulOp = matchMulWithInput1Zp(srcOp, input1Zp);
         if (!mulOp) {
             return rewriter.notifyMatchFailure(srcOp, "Not an elementwise binary op");
         }
@@ -143,7 +185,7 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
                                     rewriter, srcOp.getLoc(), tailOutType,
                                     createInitTensor(srcOp, rewriter, tailOutType),
                                     /*output_zp=*/0, scInfo.min, scInfo.max, biasCst, /*shift=*/0,
-                                    input1, input2
+                                    input1, input2, /*input1_offset=*/Value()
                 )
                                     .getResult(0);
                 rewriter.replaceOp(output.getDefiningOp(), torqOut);
@@ -183,13 +225,26 @@ class MulOpPattern : public OpRewritePattern<linalg::GenericOp> {
                          << " outMax: " << outMax << " outZp: " << outZp << "\n"
         );
 
+        // The kernel adds -input1Zp to each input1 vector from one constant vector. An elementwise
+        // product takes at most wram_seg_width items, so this size fits any vector.
+        Value input1Offset;
+        if (input1Zp != 0) {
+            auto offsetType = RankedTensorType::get({HwInfo::wram_seg_width}, input1ElementType);
+            input1Offset = arith::ConstantOp::create(
+                rewriter, srcOp.getLoc(), offsetType,
+                DenseElementsAttr::get(
+                    offsetType, rewriter.getIntegerAttr(input1ElementType, -input1Zp)
+                )
+            );
+        }
+
         std::vector<int32_t> a{bias};
         std::vector<int32_t> b{scale};
         Value torqOut =
             torq_hl::MulOp::create(
                 rewriter, srcOp.getLoc(), outType, createInitTensor(srcOp, rewriter, outType),
                 outZp, outMin, outMax, createI32Const(rewriter, srcOp, interleave(a, b)),
-                shiftFactor, input1, input2
+                shiftFactor, input1, input2, input1Offset
             )
                 .getResult(0);
 
@@ -345,7 +400,8 @@ class MulPerChannelBiasPattern : public OpRewritePattern<linalg::GenericOp> {
         Value torqOut = torq_hl::MulOp::create(
                             rewriter, loc, outType, createInitTensor(srcOp, rewriter, outType),
                             /*output_zp=*/0, outMin, outMax, bias, /*shift=*/0,
-                            srcOp.getInputs().front(), srcOp.getInputs().back()
+                            srcOp.getInputs().front(), srcOp.getInputs().back(),
+                            /*input1_offset=*/Value()
         )
                             .getResult(0);
         Operation *outputOp = output.getDefiningOp();
@@ -518,7 +574,7 @@ class MulRescaleOpPattern : public OpRewritePattern<linalg::GenericOp> {
             torq_hl::MulOp::create(
                 rewriter, srcOp.getLoc(), outType, createInitTensor(srcOp, rewriter, outType),
                 outZp, outMin, outMax, createI32Const(rewriter, srcOp, interleave(a, b)),
-                shiftFactor, input1, input2
+                shiftFactor, input1, input2, /*input1_offset=*/Value()
             )
                 .getResult(0);
 

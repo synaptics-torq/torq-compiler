@@ -603,8 +603,161 @@ void convertRescaleI32ToI16ForMul(FunctionOpInterface funcOp, IRRewriter &rewrit
     }
 }
 
+static llvm::cl::opt<bool> clFoldMulInputZp(
+    "torq-fold-mul-input-zp",
+    llvm::cl::desc("Fold the zero-point subtraction of a mul input into the mul"),
+    llvm::cl::init(true)
+);
+
+static bool hasIdentityMaps(linalg::GenericOp op) {
+    return llvm::all_of(op.getIndexingMapsArray(), [](AffineMap map) { return map.isIdentity(); });
+}
+
+// The i8 input and the zero point of a rescale that convertRescaleI32ToI16ForMul made and that
+// only subtracts the zero point:
+//   ^bb0(%in: i8, %out: i16):
+//     %0 = arith.extsi %in : i8 to i32
+//     %1 = arith.subi %0, %c_zp : i32    (no subi for zero point 0)
+//     %2 = tosa.apply_scale %1, %c_2^s, %c_s : (i32, i32, i8) -> i32
+//     %3 = arith.trunci %2 : i32 to i16
+//     linalg.yield %3 : i16
+struct ZeroPointRescale {
+    Value input;
+    int32_t zp;
+};
+
+static std::optional<ZeroPointRescale> matchZeroPointRescale(Value value) {
+    auto op = value.getDefiningOp<linalg::GenericOp>();
+    if (!op || op.getNumDpsInputs() != 1 || op.getNumDpsInits() != 1 || !hasIdentityMaps(op) ||
+        !getElementTypeOrSelf(op.getInputs()[0].getType()).isInteger(8) ||
+        !getElementTypeOrSelf(value.getType()).isInteger(16))
+        return std::nullopt;
+
+    auto yieldOp = cast<linalg::YieldOp>(op.getBody()->getTerminator());
+    auto truncOp = yieldOp.getOperand(0).getDefiningOp<arith::TruncIOp>();
+    if (!truncOp)
+        return std::nullopt;
+    auto applyScaleOp = truncOp.getIn().getDefiningOp<tosa::ApplyScaleOp>();
+    if (!applyScaleOp)
+        return std::nullopt;
+    auto multiplier = getConstIntValue(applyScaleOp.getMultiplier());
+    auto shift = getConstIntValue(applyScaleOp.getShift());
+    if (!multiplier || !shift || *shift < 0 || *shift > 30 || *multiplier != (1LL << *shift))
+        return std::nullopt;
+
+    Value scaled = applyScaleOp.getValue();
+    int32_t zp = 0;
+    if (auto subiOp = scaled.getDefiningOp<arith::SubIOp>()) {
+        auto maybeZp = getConstIntValue(subiOp.getRhs());
+        if (!maybeZp)
+            return std::nullopt;
+        zp = static_cast<int32_t>(*maybeZp);
+        scaled = subiOp.getLhs();
+    }
+    auto extOp = scaled.getDefiningOp<arith::ExtSIOp>();
+    if (!extOp || extOp.getIn() != op.getBody()->getArgument(0))
+        return std::nullopt;
+    return ZeroPointRescale{op.getInputs()[0], zp};
+}
+
+// A two-input i16 mul with identity maps and a ranked i32 result, as
+// convertRescaleI32ToI16ForMul leaves it. The input1 offset is a vector along the last output
+// dimension, so a rank-0 mul does not fold.
+static bool isFoldableMul(linalg::GenericOp op) {
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+    return isMulOp(op) && op.getNumDpsInputs() == 2 && hasIdentityMaps(op) &&
+           op.getInputs()[0] != op.getInputs()[1] && resultType && resultType.getRank() > 0 &&
+           resultType.getElementType().isInteger(32);
+}
+
+// The offset -zp is stored as i8, so the zero point of an input1 with an offset must be in
+// [-127, 127]
+static bool fitsI8Offset(int32_t zp) { return zp >= -127 && zp <= 127; }
+
+// The new inputs of a mul after the fold, and the zero point that stays on input1
+struct MulZeroPointFold {
+    Value input1;
+    Value input2;
+    int32_t zp;
+};
+
+// Choose which mul inputs to fold. The kernel can add an offset only to input1, and only one
+// that fits in i8, so:
+// - an input with a zero point in [-127, 127] becomes input1; a non-zero zero point is
+//   preferred, so that the other input can still fold if its zero point is 0;
+// - the other input is folded too when its zero point is 0 (a plain sign extension), else it
+//   stays the i16 rescale.
+static std::optional<MulZeroPointFold> chooseMulZeroPointFold(linalg::GenericOp mulOp) {
+    std::optional<ZeroPointRescale> rescales[2] = {
+        matchZeroPointRescale(mulOp.getInputs()[0]), matchZeroPointRescale(mulOp.getInputs()[1])
+    };
+    int first = -1;
+    for (int i : {0, 1}) {
+        if (rescales[i] && fitsI8Offset(rescales[i]->zp) && (first < 0 || rescales[first]->zp == 0))
+            first = i;
+    }
+    if (first < 0)
+        return std::nullopt;
+
+    int second = 1 - first;
+    Value input2 = rescales[second] && rescales[second]->zp == 0 ? rescales[second]->input
+                                                                 : mulOp.getInputs()[second];
+    return MulZeroPointFold{rescales[first]->input, input2, rescales[first]->zp};
+}
+
+// Body of the folded mul: (extsi(input1) - zp) * extsi(input2) in i32, with no subi for zp 0
+static void buildMulWithInput1ZpBody(OpBuilder &b, Location loc, ValueRange args, int32_t zp) {
+    Type i32 = b.getI32Type();
+    Value lhs = arith::ExtSIOp::create(b, loc, i32, args[0]);
+    if (zp != 0) {
+        Value zpValue = arith::ConstantOp::create(b, loc, b.getI32IntegerAttr(zp));
+        lhs = arith::SubIOp::create(b, loc, lhs, zpValue);
+    }
+    Value rhs = arith::ExtSIOp::create(b, loc, i32, args[1]);
+    linalg::YieldOp::create(b, loc, ValueRange{arith::MulIOp::create(b, loc, lhs, rhs)});
+}
+
+// Replace the mul with one that reads the folded inputs
+static void
+rebuildMulWithFold(linalg::GenericOp mulOp, const MulZeroPointFold &fold, IRRewriter &rewriter) {
+    LLVM_DEBUG(
+        llvm::dbgs() << "Folding mul input zero point " << fold.zp << " into " << mulOp << "\n"
+    );
+    rewriter.setInsertionPoint(mulOp);
+    auto newMulOp = linalg::GenericOp::create(
+        rewriter, mulOp.getLoc(), mulOp.getResultTypes(), ValueRange{fold.input1, fold.input2},
+        mulOp.getOutputs(), mulOp.getIndexingMapsArray(), mulOp.getIteratorTypesArray(),
+        [&](OpBuilder &b, Location loc, ValueRange args) {
+            buildMulWithInput1ZpBody(b, loc, args, fold.zp);
+        }
+    );
+    rewriter.replaceOp(mulOp, newMulOp.getResults());
+}
+
+// Move the zero-point rescales of an i16 mul (from convertRescaleI32ToI16ForMul) into the mul,
+// so they need no slice task of their own:
+//   %a16 = rescale(%a8, zp_a)  %b16 = rescale(%b8, zp_b)  %m = muli(%a16, %b16)
+//               |
+//               v
+//   ^bb0(%a: i8, %b: i8 or i16, %out: i32):
+//     %m = arith.muli (arith.subi (arith.extsi %a), zp_a), (arith.extsi %b)
+static void foldMulInputZeroPoints(FunctionOpInterface funcOp, IRRewriter &rewriter) {
+    SmallVector<linalg::GenericOp> mulOps;
+    funcOp.walk([&](linalg::GenericOp op) {
+        if (isFoldableMul(op))
+            mulOps.push_back(op);
+    });
+
+    for (linalg::GenericOp mulOp : mulOps) {
+        if (std::optional<MulZeroPointFold> fold = chooseMulZeroPointFold(mulOp))
+            rebuildMulWithFold(mulOp, *fold, rewriter);
+    }
+}
+
 void populateCastI32MulPatterns(FunctionOpInterface funcOp, IRRewriter &rewriter) {
     convertRescaleI32ToI16ForMul(funcOp, rewriter);
+    if (clFoldMulInputZp)
+        foldMulInputZeroPoints(funcOp, rewriter);
 }
 
 } // namespace mlir::syna::torq

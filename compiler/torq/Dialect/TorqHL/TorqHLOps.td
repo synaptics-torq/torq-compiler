@@ -181,6 +181,12 @@ def TorqHL_MulOp: TorqHL_LayerOp<"mul"> {
     dimension of the output: then the bias is per-output-channel and the ACT applies
     it straight out of BRAM, at no cost in ACT width for a float result. A float
     `scale_bias` carries no scale, so `shift` must be 0.
+
+    The optional `input1_offset` is a 1-D tensor of the input1 element type that holds
+    one value: the negated zero point of a quantized input1. Its size is at least the
+    vector size of the kernel. The kernel adds it to each input1 vector before the
+    multiply, so the product is `(input1 + input1_offset) * input2`. Then input1 needs
+    no separate rescale. With an offset, `scale_bias` must be a single record.
   }];
 
   let arguments = !con(commonArgs, (ins
@@ -190,7 +196,8 @@ def TorqHL_MulOp: TorqHL_LayerOp<"mul"> {
     TensorOrMemref:$scale_bias,
     I8Attr:$shift, // result right shift, used with i32 data type only
     TensorOrMemref:$input1,
-    TensorOrMemref:$input2
+    TensorOrMemref:$input2,
+    Optional<TensorOrMemref>:$input1_offset
   ));
 }
 
