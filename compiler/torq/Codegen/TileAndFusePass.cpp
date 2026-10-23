@@ -450,7 +450,7 @@ TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp, int64_t sliceCount) 
     assert(iterDomainConstSizes && "iteration domain sizes are not constants");
 
     // Reduction tiling can move a group's principal generic into a marked loop. For example,
-    // Conv1DPattern can anchor a group on a one-reduction-dimension generic. Its outer group
+    // a conv pattern can anchor a group on a one-reduction-dimension generic. Its outer group
     // output can no longer reach that principal through operands. Only conv/pool principals
     // receive special minSize values below, so use the current op in that case.
     Operation *principalOp = tilingInterfaceOp;

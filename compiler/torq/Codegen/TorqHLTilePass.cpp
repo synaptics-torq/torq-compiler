@@ -51,7 +51,7 @@ namespace {
 /// tensor exceeds \\p threshold elements.
 static bool isTorqHLLargeInputCandidate(Operation *op, int64_t threshold) {
     if (!isa<
-            torq_hl::Conv2DOp, torq_hl::DepthwiseConv2DOp, torq_hl::Conv1DOp, torq_hl::MatMulOp,
+            torq_hl::Conv2DOp, torq_hl::DepthwiseConv2DOp, torq_hl::MatMulOp,
             torq_hl::FullyConnectedOp, torq_hl::FMAOp, torq_hl::AvgPool2DOp, torq_hl::MaxPool2dOp>(
             op
         ))

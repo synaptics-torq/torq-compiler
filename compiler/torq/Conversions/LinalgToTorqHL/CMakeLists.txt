@@ -4,7 +4,6 @@ set(sources
   PatternUtils.cpp
   ArithToTorqHLPattern.cpp
   ClampPattern.cpp
-  Conv1DPattern.cpp
   Conv1DMatmulPattern.cpp
   MatMulIntegerCorrectPattern.cpp
   Conv2DPattern.cpp

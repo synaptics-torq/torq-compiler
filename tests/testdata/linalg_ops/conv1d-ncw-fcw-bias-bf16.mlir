@@ -1,13 +1,11 @@
-// Regression: native Conv1D per-channel bias under NSS-only compilation
+// Regression: Conv1D per-channel bias under NSS-only compilation
 // (--torq-disable-host --torq-disable-css). Extracted from the real NNNR3 model
 // (NNNR3_0079_0.0960_torq_bf16, layer Conv_2): single-input-channel Conv1D,
 // kernel width 3, stride 2, asymmetric pad [0,1], per-channel bias, bf16.
 //
-// The native conv1d path lowers to
-//   conv1d(mul) -> reduce_sum(f32) -> collapse -> addf(bias) -> truncf(bf16)
-// The fp32 bias add has no NSS/CSS lowering, so with Host disabled
-// FoldConvBiasIntoReducePattern folds the bias into the reduce (applied in fp32
-// by the activation stage), bit-exact with round_bf16(sum_f32 + bias_f32).
+// The conv1d lowers through the rank-4 conv2d form (Conv1DNcwFcwToLinalgConv2DPattern);
+// the per-channel bias accumulates in the f32 output and the trailing truncf keeps
+// the bf16 result.
 #map = affine_map<(d0) -> (d0)>
 #map1 = affine_map<(d0, d1, d2) -> (d0, d1, d2)>
 module {

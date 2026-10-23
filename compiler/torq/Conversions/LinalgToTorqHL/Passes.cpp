@@ -56,8 +56,6 @@ void populateLinalgToTorqHLPrePatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
 
-    populateLinalgConv2DToTorqHLConv1DPatterns(context, patterns, markFuseGroups);
-
     populateLinalgToTorqHLConv2DPatterns(context, patterns, markFuseGroups);
 
     populateLinalgToTorqHLQConv2DPatterns(context, patterns, markFuseGroups);

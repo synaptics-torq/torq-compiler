@@ -683,12 +683,12 @@ void populateOptimizeConv1DPatterns(MLIRContext *context, RewritePatternSet &pat
     //      are tiled along the output width, and only a pathological conv whose
     //      single-column unfold still overflows LRAM falls back to a host-marked generic.
     //   3. native 5D linalg.generic with the kernel dim preserved, lowered to
-    //      torq_hl.conv1d (see LinalgGenericConv1DToTorqHLConv1DPattern), with Ow-tiling
-    //      to fit LRAM and the per-channel bias folded into the following reduce
-    //      (FoldConvBiasIntoReducePattern). It matched bf16 data/weights only and was an
-    //      NPU-only escape hatch for the convs (2) bails on (e.g. biased convs); gated
-    //      behind --torq-convert-conv1d-to-generic since 54c9058d and never enabled by
-    //      any test, script or model, so it is removed.
+    //      torq_hl.conv1d, with Ow-tiling to fit LRAM and the per-channel bias folded
+    //      into the following reduce (FoldConvBiasIntoReducePattern). It matched bf16
+    //      data/weights only and was an NPU-only escape hatch for the convs (2) bails on
+    //      (e.g. biased convs); gated behind --torq-convert-conv1d-to-generic since
+    //      54c9058d and never enabled by any test, script or model, so it is removed,
+    //      along with its consumer pattern and the now-creatorless torq_hl.conv1d op.
     patterns.insert<Conv1DNcwFcwToLinalgMatmulPattern>(context);
     patterns.insert<Conv1DNcwFcwToLinalgConv2DPattern>(context);
 }

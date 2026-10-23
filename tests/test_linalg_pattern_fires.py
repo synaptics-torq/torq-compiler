@@ -540,38 +540,6 @@ def test_perchannel_mul_resblob_bias_keeps_scalar_add_tail(torq_compiler, tmp_pa
 
 
 @pytest.mark.ci
-def test_conv1d_folds_truncf_add_clamp_tail(torq_compiler, tmp_path):
-    """A Conv1D (5D generic) followed by truncf + scalar add + ReLU must
-    become one torq_hl.conv1d whose ACT carries the +0.5 bias (per channel,
-    f32) and the [0, .] clip, with a bf16 output feeding the Kw reduce.
-
-    The conv1d pattern runs in the pre-conversion, whose bias probe evaluates
-    constants through the full compile context (standalone iree-opt cannot
-    load the dialects it needs), so this goes through torq-compile (with
-    slicing disabled, which would pull the tail out of the dispatch).
-    """
-    case = PATTERN_FIRES_DIR / "conv1d-add-clamp-tail-bf16.mlir"
-    cmd = [str(torq_compiler.file_path), str(case), "-o", str(tmp_path / "model.vmfb"),
-           "--torq-disable-host", "--torq-disable-css", "--torq-hw=SL2610",
-           "--torq-disable-slicing", "--mlir-disable-threading",
-           f"--mlir-print-ir-after=torq-linalg-to-torqhl-pre-conversion"]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    assert proc.returncode == 0, proc.stderr
-    dumps = [d for d in ir_dumps(proc.stderr, "After") if "main_dispatch" in d]
-    assert dumps, "no dump of the dispatch after torq-linalg-to-torqhl-pre-conversion"
-    dump = dumps[-1]
-    assert count_ops(dump, "torq_hl.conv1d") == 1, dump
-    assert count_ops(dump, "linalg.generic") == 0, dump
-    conv = op_lines(dump, "torq_hl.conv1d")[0]
-    # bf16 output (the truncf tail was absorbed) with the ReLU clip
-    assert "-> tensor<1x2x1x3x3xbf16>" in conv, conv
-    assert "output_min = 0 : i32" in conv, conv
-    assert "output_max = 2139095039 : i32" in conv, conv
-    # the scalar add folded into the f32 per-channel bias (F=2)
-    assert "dense<5.000000e-01> : tensor<2xf32>" in dump, dump
-
-
-@pytest.mark.ci
 def test_tail_stops_at_width_converting_clamp(torq_compiler, tmp_path):
     """A clamp that converts width (ReLU in bf16, extf to the f32 result --
     the form the elementwise fusion leaves at a model's f32 boundary) must

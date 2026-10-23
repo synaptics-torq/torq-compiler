@@ -123,7 +123,7 @@ This document provides a comprehensive list of operators supported by the Synapt
 |                  |        |                       | bf16 |   n/a    | bf16  | generic |                                  |
 | ArgMax           |  TOSA  |        ArgMax         |  i8  |    i8    |  i8   |   No    |                                  |
 | AvgPool          |  TOSA  |        AvgPool        |  i8  |    i8    |  i8   |   No    |                                  |
-| Conv1D           | Linalg |        Conv1D         | bf16 |   bf16   | bf16  | custom  |                                  |
+| Conv1D           | Linalg |     Conv2D / FC (im2col) | bf16 |   bf16   | bf16  | custom  | decomposed before lowering       |
 | Conv2D           | Linalg |        Conv2D         |  i8  |    i8    |  i8   | custom  |                                  |
 |                  | Linalg |        Conv2D         | i16  |    i8    |  i32  | custom  | TOSA specifies i48 output        |
 |                  | Linalg |        Conv2D         | bf16 |   bf16   | bf16  | custom  |                                  |

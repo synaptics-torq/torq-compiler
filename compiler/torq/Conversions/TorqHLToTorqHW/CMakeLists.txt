@@ -44,7 +44,6 @@ set(sources
     ZeroPointCorrectPattern.cpp
     ResizeNearestNeighborPattern.cpp
     BroadcastPattern.cpp
-    Conv1DPattern.cpp
     DepthToSpacePattern.cpp
     ReduceMeanPattern.cpp
     SelectPattern.cpp

@@ -727,35 +727,6 @@ def TorqHL_MaxPool2dOp: TorqHL_LayerOp<"maxpool2d"> {
   ));
 }
 
-def TorqHL_Conv1DOp : TorqHL_LayerOp<"conv1d"> {
-  let summary = "1-D Convolution operation";
-  let description = [{
-    1-D convolution operation.
-
-    Input:  [N, C_in,1, W]
-    Weights: [C_out, C_in,1, KW]
-    Output: [N, C_out,1, W_out]
-  }];
-
-  let arguments = !con(commonArgs, (ins
-    I32Attr:$input_zp,
-    I32Attr:$weight_zp,
-    I32Attr:$output_zp,
-    I32Attr:$output_min,
-    I32Attr:$output_max,
-    I32Attr:$shift_factor,
-    I32Attr:$groups,
-    DenseI64ArrayAttr:$pad,
-    DenseI64ArrayAttr:$stride,
-    DenseI64ArrayAttr:$dilation,
-    TorqHL_VectorizationModeEnum:$vectorization_mode,
-    TensorOrMemref:$weights,
-    TensorOrMemref:$scale_bias,
-    TensorOrMemref:$input,
-    DefaultValuedOptionalAttr<BoolAttr, "false">:$segment_output
-  ));
-}
-
 def TorqHL_ConvertOp : TorqHL_LayerOp<"convert"> {
   let summary = "Convert the tensor to a different encoding";
   let description = [{

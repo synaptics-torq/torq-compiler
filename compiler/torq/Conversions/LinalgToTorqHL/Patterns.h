@@ -15,9 +15,6 @@ namespace mlir::syna::torq {
 void populateLinalgToTorqHLPrePatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );
-void populateLinalgConv2DToTorqHLConv1DPatterns(
-    MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
-);
 void populateLinalgToTorqHLConv2DPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 );

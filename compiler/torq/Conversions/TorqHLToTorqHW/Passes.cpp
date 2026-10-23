@@ -73,7 +73,6 @@ void ConvertSliceProgramToTorqHwPass::runOnOperation() {
     patterns.add<IdentityPattern>(ctx);
     patterns.add<TablePattern>(ctx);
     patterns.add<ArgMaxPattern>(ctx);
-    patterns.add<Conv1DPattern>(ctx);
 
     patterns.add<ConvertPattern>(ctx);
     patterns.add<FMAPattern>(ctx);
