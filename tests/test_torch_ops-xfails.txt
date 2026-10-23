@@ -14,7 +14,3 @@ test_mlir_files[i1-bf16.mlir-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev
 # conv2d-host: 1 bf16 ULP at one element vs reference. Numeric, deferred.
 test_mlir_files[conv2d-host.mlir-sim-sl2610-v1]
 test_mlir_files[conv2d-host.mlir-aws_fpga-sl2610-v1]
-# instancenorm: torch-mlir 3.12 InstanceNorm decomposition computes in f32;
-# torq elementwise patterns don't convert f32 generics.
-test_mlir_files[instancenorm.mlir-sim-sl2610-v1]
-test_mlir_files[instancenorm.mlir-aws_fpga-sl2610-v1]

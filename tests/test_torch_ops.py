@@ -174,6 +174,10 @@ def case_config(request, runtime_hw_type, chip_config):
 
     if 'instancenorm' in request.param.data.name:
         extra_args["comparison_config"] = "comparison_config_for_instancenorm"
+        # torch-mlir 3.12 decomposes InstanceNormalization in f32 inside the
+        # dispatch (bf16 interfaces); the NSS elementwise path needs bf16, so
+        # demote the cone back (3.10 decomposed in bf16 directly).
+        extra_args["torq_compiler_options"] = ["--torq-convert-dtypes"]
 
     # Force the bf16-stash LayerNormalization (bert shape) onto the NSS/slice
     # path: the model carries stash_type=BFLOAT16 so torch-mlir decomposes it
