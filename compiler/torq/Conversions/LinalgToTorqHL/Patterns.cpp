@@ -1845,6 +1845,26 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         auto srcResultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
 
+        // The fp32 HW add uses the ALU accumulate mode, whose implicit weights are 1.0, so it
+        // can only compute a + b: a tensor-vs-tensor sub (weights [1, -1]) -- including its
+        // reversed encoding, a constant-minus-input renamed "add" -- would be silently
+        // computed as a + b. Check the weight constant here, while it is still one, and
+        // reject any non-unit-weight f32 tensor-tensor op before the torq_hl.add is created,
+        // so it falls back to the host. An f32 op with a scalar rhs is rejected too: the
+        // scalar paths load the input weight through the MUL mode's 16-bit weight bus, which
+        // cannot carry an fp32 weight.
+        if (srcResultType.getElementType().isF32() && rhs_is_scalar) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "f32 add/sub with a scalar operand is not supported on the NPU"
+            );
+        }
+        if (srcResultType.getElementType().isF32() &&
+            !(weights[0].convertToFloat() == 1.0f && weights[1].convertToFloat() == 1.0f)) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "f32 tensor-vs-tensor sub is not supported by the ALU accumulate mode"
+            );
+        }
+
         auto torqWeights = createConst(weights, rewriter, srcOp.getLoc());
 
         auto addOp = torq_hl::AddOp::create(
@@ -1887,16 +1907,15 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
 
         Value output = srcOp.getResultTensors()[0];
         const auto outType = cast<RankedTensorType>(output.getType());
-        if (outType.getElementType().isF32() || outType.getElementType().isF64()) {
-            return rewriter.notifyMatchFailure(
-                srcOp, "addOp doesn't support f32 and f64 right now\n"
-            );
+        if (outType.getElementType().isF64()) {
+            return rewriter.notifyMatchFailure(srcOp, "addOp doesn't support f64 right now\n");
         }
         if (outType.getElementType().isInteger(64)) {
             return rewriter.notifyMatchFailure(srcOp, "addOp doesn't support i64");
         }
 
         const bool isBF16 = outType.getElementType().isBF16();
+        const bool isF32 = outType.getElementType().isF32();
 
         auto opName = "";
         int sign = 1;
@@ -1914,7 +1933,7 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
             );
         }
 
-        if (isBF16) {
+        if (isBF16 || isF32) {
             // TODO: factorize common code with i8/i16 path
             return createBf16Add(opName, sign, srcOp, binaryOp, rewriter);
         }

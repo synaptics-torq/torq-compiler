@@ -30,9 +30,11 @@ FailureOr<SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> 
 FailureOr<SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
 
 // ALU is working with MUL and ACC operations on 32 input pixels at a time.
-// The 2 inputs are loaded from 2 different addresses.
-// Each input value is copied in two nearby ALU entries and multiplied by the same 16-bits weight.
-// We have 4 weights bytes in total that are precomputed and stored in lram.
+// The 2 inputs are loaded from 2 different addresses. For non-fp32 data, each
+// input value is copied in two nearby ALU entries and multiplied by the same
+// 16-bits weight (4 weights bytes in total precomputed in lram). fp32 data
+// cannot use the MUL mode, which only takes 16-bit weights, so it is added
+// with the accumulate mode's implicit unit weights instead.
 FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
 
 LogicalResult convertToHw(torq_hl::AddOp op, PatternRewriter &rewriter);
@@ -236,6 +238,23 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
     assert(weights.dim(0) == 2);
     assert(biasScale.dim(0) == biasScaleWidth(input1.elementType()));
 
+    // The ALU MUL mode only supports 16-bit weights, so fp32 tensors are added
+    // with the accumulate mode, whose implicit weights are 1.0 (exact for f32).
+    // It cannot apply a -1.0: the sign-invert accumulate (SACC) alternates
+    // [1, -1, 1, -1, ...] within a single data load, and the two tensors are
+    // loaded separately here. AddOpPattern (createBf16Add) checks the weight
+    // constant and rejects any non-unit-weight f32 tensor-tensor op before the
+    // torq_hl.add is created, so those fall back to the host. At this stage the
+    // weights are a slice-program argument DMA'd to LRAM rather than an
+    // inspectable constant, so assert the producer's "sub" label instead of
+    // failing the compilation.
+    const bool isFp32 = input1.elementType() == DType::fp32;
+    if (isFp32) {
+        assert(
+            op.getName() != "sub" && "f32 tensor-vs-tensor sub must be rejected in AddOpPattern"
+        );
+    }
+
     // A per-channel scale_bias arrives as the 2-D [channels, pairWidth] table. Serving it needs
     // the channel dimension blocked and the BRAM reloaded per block, the way FMAPattern /
     // Conv2DToHw / DWToHw do; the single load below would read only the first block. This was an
@@ -272,19 +291,26 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
 
     // Vectorize the input tensors and stack them
     Slice slice("add");
-    int vectorSize = slice.alu.iWidth(input1.elementType(), weights.elementType());
+    int vectorSize = isFp32
+                         ? slice.alu.iWidthForAccumulateClamp(input1.elementType(), ALUOp1Mode::ACC)
+                         : slice.alu.iWidth(input1.elementType(), weights.elementType());
     input1.fuse(denseDims).vectorize(vectorSize);
     input2.fuse(denseDims).vectorize(vectorSize);
     auto input = stack(params.rewriter, input1, input2);
 
-    WData wdata = slice.wram.load(weights);
+    WData wdata = isFp32 ? WData({}, DType::none) : slice.wram.load(weights);
     BData bdata = slice.bram.load(biasScale);
     For(auto ndd = slice.iterate(input.dims(In::NonDenseDims, In::Vectors))) {
         For(auto iv = slice.iterate(input.dim(In::Vectors))) {
             PData pdata;
             For(auto it = slice.iterate(input.dim(In::InputTensors))) {
                 IData idata = slice.iram.load(input[it][ndd][iv]);
-                pdata = slice.alu.scalarProductAccumulate(idata, wdata[it]);
+                if (isFp32) {
+                    pdata = slice.alu.accumulate(idata);
+                }
+                else {
+                    pdata = slice.alu.scalarProductAccumulate(idata, wdata[it]);
+                }
             }
             For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
                 QData res = slice.act.rescaleClamp(pdata[av], bdata, shift, zp, min, max);
