@@ -105,7 +105,7 @@ int64_t getMemRefTypeOffsetBytes(MemRefType memRefType) {
             // compute the offset in the backing buffer memory using the strides of the encoding
             int realOffset = 0;
             for (int i = 0; i < memRefType.getRank(); i++) {
-                realOffset += coords[i] * stridesAttr.getStrides()[i];
+                realOffset += coords[i] * encoding.getStrides()[i];
             }
 
             return elementOffsetToBytes(realOffset, memRefType.getElementType());
