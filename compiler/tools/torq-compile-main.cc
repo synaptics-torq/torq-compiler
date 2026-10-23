@@ -26,6 +26,12 @@ int main(int argc, char **argv) {
     allArgs.push_back("--iree-dispatch-creation-enable-elementwise-fusion=false");
     allArgs.push_back("--iree-preprocessing-enable-elementwise-fusion=false");
 
+    // Keep uniform scalar computations inside the dispatch: torq has no
+    // channel to deliver hal dispatch constants to the CSS programs that
+    // would consume them, so hal.interface.constant.load values would arrive
+    // as garbage (quantized_batch_matmul regression on 3.12).
+    allArgs.push_back("--iree-dispatch-creation-hoist-uniform-scalar-compute=false");
+
     for (int i = 1; i < argc; ++i) {
         allArgs.push_back(argv[i]);
     }

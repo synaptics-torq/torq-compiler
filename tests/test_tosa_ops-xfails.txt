@@ -46,7 +46,3 @@ test_mlir_files_torq[conv2d_f8_s4_1x1024_o256.mlir-aws_fpga-sl2610-v1]
 test_mlir_files_torq[conv2d_f8_s4_1x128_o32.mlir-aws_fpga-sl2610-v1]
 test_mlir_files_llvmcpu[conv2d_f8_s4_1x1024_o256.mlir-aws_fpga-sl2610-v1]
 test_mlir_files_llvmcpu[conv2d_f8_s4_1x128_o32.mlir-aws_fpga-sl2610-v1]
-# css_scalar: 3.12 numeric regression on the host CSS path (94% wrong);
-# passes on the 3.10 build. Deferred.
-test_mlir_files_torq[css_scalar.mlir-sim-sl2610-v1]
-test_mlir_files_torq[css_scalar.mlir-aws_fpga-sl2610-v1]
