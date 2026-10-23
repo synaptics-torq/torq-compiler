@@ -32,6 +32,14 @@ jobs:
   build_mpact:
     name: Build Mpact
     uses: ./.github/workflows/build-mpact.yml
+    with:
+      target: ubuntu-24.04
+  
+  build_mpact_macos:
+    name: Build Mpact for macOS
+    uses: ./.github/workflows/build-mpact.yml
+    with:
+      target: macos-26
    
   build_ko_dependencies:
     name: Build KO dependencies
@@ -39,9 +47,31 @@ jobs:
     secrets:
       LINUX_KERNEL_SSH_KEY: ${{ secrets.LINUX_KERNEL_SSH_KEY }}
 
-  build_docs:    
+  build_docs:
     name: Build documentation
     uses: ./.github/workflows/build-docs.yml
+
+  upload_macos_libs:
+    name: Upload macOS libs
+    needs: [build_mpact_macos]
+    if: ${{ inputs.push == 'true' }}
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download mpact simulation library from cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ needs.build_mpact_macos.outputs.path }}
+          key: ${{ needs.build_mpact_macos.outputs.cache_key }}
+          fail-on-cache-miss: true
+          enableCrossOsArchive: true
+
+      - name: Upload mpact
+        uses: actions/upload-artifact@v7
+        with:
+          name: mpact-macos
+          path: ${{ needs.build_mpact_macos.outputs.path }}
+          retention-days: 10
 
   build:
     name: Build compiler and runtime
@@ -98,6 +128,7 @@ jobs:
           path: ${{ needs.build_mpact.outputs.path }}
           key: ${{ needs.build_mpact.outputs.cache_key }}
           fail-on-cache-miss: true
+          enableCrossOsArchive: true
 
       - name: Uncompress mpact simulation library
         run: |
@@ -192,6 +223,7 @@ jobs:
         with:
           name: mpact
           path: ${{ needs.build_mpact.outputs.path }}
+          retention-days: 10
 
   docker_image_builder_astra:
     name: Create Astra Builder docker

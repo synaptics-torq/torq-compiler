@@ -105,7 +105,7 @@ If you are using a different environment you can use a Docker image:
 
 To enable CSS simulation on the host you need the mpact library.
 
-You can obtain the pre-built library for Ubuntu compatible 
+You can obtain the pre-built library for Linux (x86_64) or macOS (arm64) compatible
 with the code in main branch with the following steps:
 
 1. (optional) If you work on a private fork setup gh client tool the (see [official documentation](https://github.com/cli/cli/blob/trunk/docs/install_linux.md#installing-gh-on-linux-and-bsd])).
@@ -122,26 +122,24 @@ with the code in main branch with the following steps:
    ./scripts/setup_mpact.sh
    ```
 
+   To use the library built by a CI run instead, pass its `mpact` (Linux) or `mpact-macos`
+   artifact: `./scripts/setup_mpact.sh mpact-macos.zip`.
+
 To build mpact from sources use the following steps:
 
-1. Clone our fork:
+1. Check out the `third_party/coralnpu/mpact` submodule, which points to the
+   commit built by CI:
 
    ```{code} shell
-   git clone http://github.com/synaptics-torq/coralnpu-mpact   
+   git submodule update --init third_party/coralnpu/mpact
    ```
 
-2. Checkout the commit listed in `.github/workflows/build-mpact.yml`:
-  
-   ```{code} shell
-   git checkout ${MPACT_REF}
-   ```
+2. Install bazelisk (see the [official documentation](https://github.com/bazelbuild/bazelisk))
 
-3. Install bazelisk (see the [official documentation](https://github.com/bazelbuild/bazelisk))
-
-4. Build MPACT with bazel:
+3. Build MPACT with bazel:
 
    ```{code} shell
-   cd coralnpu-mpact
+   cd third_party/coralnpu/mpact
    bazel build sim/hw_sim:libcoralnpu_simulator_mpact.so
    ```
 
@@ -150,8 +148,8 @@ variables in the CMakeCache.txt file of the tree you will create in the next
 step as follows:
 
 ```{code} shell
-TORQ_MPACT_SIMULATOR_INC_DIR:PATH=YOUR_MPACT_DIR/sim/hw_sim
-TORQ_MPACT_SIMULATOR_LIB:FILEPATH=YOUR_MPACT_DIR/coralnpu-mpact/bazel-bin/sim/hw_sim/libcoralnpu_simulator_mpact.so
+TORQ_MPACT_SIMULATOR_INC_DIR:PATH=YOUR_TORQ_DIR/third_party/coralnpu/mpact/sim/hw_sim
+TORQ_MPACT_SIMULATOR_LIB:FILEPATH=YOUR_TORQ_DIR/third_party/coralnpu/mpact/bazel-bin/sim/hw_sim/libcoralnpu_simulator_mpact.so
 ```
 
 ## Build compiler and runtime for host

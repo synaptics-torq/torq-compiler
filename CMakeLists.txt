@@ -10,6 +10,12 @@ option(TORQ_ENABLE_AWS_FPGA "Enable AWS FPGA support" OFF)
 option(TORQ_ENABLE_SIMULATOR "Enable Simulator support" ON)
 option(TORQ_ENABLE_CORALNPU_SIMULATOR "Enable CoralNPU CSS Simulator support" OFF)
 
+# the AWS FPGA management SDK only builds on Linux (it needs sys/epoll.h)
+if(APPLE AND TORQ_ENABLE_AWS_FPGA)
+  message(WARNING "AWS FPGA support is not available on macOS, disabling TORQ_ENABLE_AWS_FPGA")
+  set(TORQ_ENABLE_AWS_FPGA OFF CACHE BOOL "Enable AWS FPGA support" FORCE)
+endif()
+
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(TORQ_HW_DIR ${CMAKE_CURRENT_LIST_DIR}/third_party/torq-hw)

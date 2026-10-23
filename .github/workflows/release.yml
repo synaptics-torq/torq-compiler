@@ -109,6 +109,13 @@ jobs:
           name: mpact
           path: dist
 
+      # uploaded by build-torq.yml on push, so that scripts/setup_mpact.sh also works on macOS
+      - name: Download mpact simulation library for macOS
+        uses: actions/download-artifact@v8
+        with:
+          name: mpact-macos
+          path: dist
+
       - name: Docker meta (generate tags & labels)
         id: meta
         uses: docker/metadata-action@v6
