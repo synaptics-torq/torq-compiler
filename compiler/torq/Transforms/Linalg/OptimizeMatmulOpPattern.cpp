@@ -1584,9 +1584,81 @@ class BatchMatmulOpPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
     }
 };
 
+// torch-mlir (ConvertAtenMatmulOp) accumulates a bf16 matmul in f32 and truncates the result to
+// bf16 in a separate generic. The torq matmul can write bf16 directly, so the f32 result only
+// adds a full f32 tensor between the two ops and a separate conversion pass. Write bf16 from the
+// matmul instead.
+class FoldTruncfIntoFloatMatmulPattern : public OpRewritePattern<linalg::GenericOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(linalg::GenericOp truncOp, PatternRewriter &rewriter) const {
+        if (truncOp.getNumDpsInputs() != 1 || truncOp.getNumDpsInits() != 1 ||
+            !linalg::isElementwise(truncOp) ||
+            !llvm::all_of(truncOp.getIndexingMapsArray(), [](AffineMap m) {
+                return m.isIdentity();
+            })) {
+            return failure();
+        }
+        Block *body = truncOp.getBody();
+        auto truncf = body->getTerminator()->getOperand(0).getDefiningOp<arith::TruncFOp>();
+        if (!truncf || truncf.getIn() != body->getArgument(0) ||
+            !llvm::hasNItems(body->getOperations(), 2)) {
+            return failure();
+        }
+
+        Value acc = truncOp.getDpsInputOperand(0)->get();
+        auto matmul = acc.getDefiningOp<linalg::LinalgOp>();
+        if (!matmul || !isa<linalg::MatmulOp, linalg::BatchMatmulOp>(matmul) || !acc.hasOneUse()) {
+            return failure();
+        }
+        auto outType = cast<RankedTensorType>(truncOp.getResult(0).getType());
+        if (!getElementTypeOrSelf(acc.getType()).isF32() || !outType.getElementType().isBF16() ||
+            !outType.hasStaticShape() || !llvm::all_of(matmul.getDpsInputs(), [](Value v) {
+                return getElementTypeOrSelf(v.getType()).isBF16();
+            })) {
+            return failure();
+        }
+        auto fill = matmul.getDpsInitOperand(0)->get().getDefiningOp<linalg::FillOp>();
+        if (!fill || !fill->hasOneUse() || !matchPattern(fill.value(), m_AnyZeroFloat())) {
+            return failure();
+        }
+
+        rewriter.setInsertionPoint(matmul);
+        Location loc = matmul.getLoc();
+        Value zero = arith::ConstantOp::create(
+            rewriter, loc, rewriter.getZeroAttr(outType.getElementType())
+        );
+        Value empty =
+            tensor::EmptyOp::create(rewriter, loc, outType.getShape(), outType.getElementType());
+        Value init = linalg::FillOp::create(rewriter, loc, zero, empty).getResult(0);
+        // Build a new op rather than cloning: the body of a named op follows its result type.
+        SmallVector<NamedAttribute> attrs =
+            llvm::to_vector(llvm::make_filter_range(matmul->getAttrs(), [](NamedAttribute attr) {
+                return attr.getName() != "operandSegmentSizes";
+            }));
+        SmallVector<Value> inputs(matmul.getDpsInputs());
+        Value bf16Matmul;
+        if (isa<linalg::MatmulOp>(matmul)) {
+            bf16Matmul =
+                linalg::MatmulOp::create(rewriter, loc, TypeRange{outType}, inputs, init, attrs)
+                    .getResult(0);
+        }
+        else {
+            bf16Matmul = linalg::BatchMatmulOp::create(
+                             rewriter, loc, TypeRange{outType}, inputs, init, attrs
+            )
+                             .getResult(0);
+        }
+        rewriter.replaceOp(truncOp, bf16Matmul);
+        return success();
+    }
+};
+
 void populateOptimizeMatmuOpPatterns(MLIRContext *context, RewritePatternSet &patterns) {
     patterns.add<RaiseUnitBatchMatmulPattern>(context);
     patterns.add<BatchMatmulOpPattern>(context);
+    patterns.add<FoldTruncfIntoFloatMatmulPattern>(context);
 }
 
 } // namespace mlir::syna::torq
