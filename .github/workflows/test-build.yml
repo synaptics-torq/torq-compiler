@@ -76,7 +76,7 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
   test_astra_machina_sl:
-    needs: [docker_image_tests, test_aws_fpga]
+    needs: [docker_image_tests, test_cmodel]
     name: Test with Astra Machina SL
     if: ${{ inputs.test_astra_machina_sl }}
     uses: ./.github/workflows/test-astra-machina-sl.yml
