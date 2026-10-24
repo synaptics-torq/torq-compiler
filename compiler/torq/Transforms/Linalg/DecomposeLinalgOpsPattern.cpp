@@ -133,10 +133,10 @@ class CanonicalizeBF16CastComparePattern : public OpRewritePattern<linalg::Gener
     }
 };
 
-// Rewrites linalg.generic ops containing math.powf(x, 2) or math.fpowi(x, 2)
-// (for bf16, i8, i16, i32 element types) into a linalg.generic with a multiplication
-// (mul) of the input with itself. This is useful for lowering pow(x, 2) to mul(x, x)
-// until the target dialect does not support powf/fpowi.
+// Rewrites linalg.generic ops containing math.powf(x, n) or math.fpowi(x, n) with
+// n = 2 or n = 3 (for bf16, i8, i16, i32 element types) into elementwise multiplications:
+// pow(x, 2) becomes mul(x, x), and pow(x, 3) becomes mul(mul(x, x), x) as two generics.
+// This is useful until the target dialect supports powf/fpowi.
 // Handles inline arith.constant exponents, constant tensor inputs,
 // and math.fpowi with integer exponents (torch-mlir lowering).
 class PowToMulPattern : public OpRewritePattern<linalg::GenericOp> {
@@ -152,22 +152,27 @@ class PowToMulPattern : public OpRewritePattern<linalg::GenericOp> {
         unsigned inputIdx = 0;
     };
 
-    // Check whether an attribute represents the value 2 for the given type.
-    static bool attrIsTwo(Attribute attr, Type ty) {
+    // Exponents this pattern expands into multiplications.
+    static bool isSupportedExponent(double exponent) { return exponent == 2.0 || exponent == 3.0; }
+
+    // Return the exponent an attribute represents for the given type, if it is supported.
+    static std::optional<int64_t> attrExponent(Attribute attr, Type ty) {
         if (ty.isBF16()) {
             if (auto f = dyn_cast<FloatAttr>(attr))
-                return f.getValueAsDouble() == 2.0;
+                if (isSupportedExponent(f.getValueAsDouble()))
+                    return static_cast<int64_t>(f.getValueAsDouble());
         }
         else if (ty.isInteger(8) || ty.isInteger(16) || ty.isInteger(32)) {
             if (auto i = dyn_cast<IntegerAttr>(attr))
-                return i.getInt() == 2;
+                if (isSupportedExponent(i.getInt()))
+                    return i.getInt();
         }
-        return false;
+        return std::nullopt;
     }
 
-    // Try to match the exponent operand as the constant 2.
+    // Try to match the exponent operand as the constant 2 or 3 and return it.
     // On success, populates `match` with tensor-input metadata.
-    LogicalResult matchExponentTwo(
+    FailureOr<int64_t> matchExponent(
         linalg::GenericOp srcOp, math::PowFOp powfOp, math::FPowIOp fpowiOp, ExponentMatch &match,
         PatternRewriter &rewriter
     ) const {
@@ -175,9 +180,9 @@ class PowToMulPattern : public OpRewritePattern<linalg::GenericOp> {
             auto power = fpowiOp.getRhs();
             if (auto cOp = power.getDefiningOp<arith::ConstantOp>())
                 if (auto intAttr = dyn_cast<IntegerAttr>(cOp.getValue()))
-                    if (intAttr.getInt() == 2)
-                        return success();
-            return rewriter.notifyMatchFailure(srcOp, "fpowi exponent is not constant 2");
+                    if (isSupportedExponent(intAttr.getInt()))
+                        return intAttr.getInt();
+            return rewriter.notifyMatchFailure(srcOp, "fpowi exponent is not constant 2 or 3");
         }
 
         auto rhs = powfOp.getRhs();
@@ -214,10 +219,27 @@ class PowToMulPattern : public OpRewritePattern<linalg::GenericOp> {
         if (rhsType.isF32())
             return rewriter.notifyMatchFailure(srcOp, "Type f32 not supported");
 
-        if (!attrIsTwo(rhsAttr, rhsType))
-            return rewriter.notifyMatchFailure(srcOp, "RHS constant is not 2");
+        std::optional<int64_t> exponent = attrExponent(rhsAttr, rhsType);
+        if (!exponent)
+            return rewriter.notifyMatchFailure(srcOp, "RHS constant is not 2 or 3");
 
-        return success();
+        return *exponent;
+    }
+
+    // Body of an elementwise generic that multiplies its first two payload arguments.
+    static void buildMulBody(OpBuilder &b, Location l, Type elemType, Value lhs, Value rhs) {
+        Value val;
+        if (mlir::isa<FloatType>(elemType)) {
+            val = arith::MulFOp::create(b, l, lhs, rhs);
+        }
+        else if (mlir::isa<IntegerType>(elemType)) {
+            val = arith::MulIOp::create(b, l, lhs, rhs);
+        }
+        else {
+            // fallback: yield input as-is (should not happen)
+            val = lhs;
+        }
+        linalg::YieldOp::create(b, l, val);
     }
 
   public:
@@ -234,7 +256,8 @@ class PowToMulPattern : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(srcOp, "Not a math.powf or math.fpowi op");
 
         ExponentMatch expMatch;
-        if (failed(matchExponentTwo(srcOp, powfOp, fpowiOp, expMatch, rewriter)))
+        FailureOr<int64_t> exponent = matchExponent(srcOp, powfOp, fpowiOp, expMatch, rewriter);
+        if (failed(exponent))
             return failure();
 
         auto elemType = cast<RankedTensorType>(srcOp.getResultTypes()[0]).getElementType();
@@ -263,23 +286,27 @@ class PowToMulPattern : public OpRewritePattern<linalg::GenericOp> {
             newMaps = SmallVector<AffineMap>(maps);
         }
 
-        // Replace pow(x, 2) with mul(x, x)
+        // pow(x, 2) -> mul(x, x)
+        auto square = linalg::GenericOp::create(
+            rewriter, srcOp.getLoc(), srcOp.getResultTypes(), newInputs, srcOp.getOutputs(),
+            newMaps, srcOp.getIteratorTypesArray(),
+            [&](OpBuilder &b, Location l, ValueRange args) {
+                buildMulBody(b, l, elemType, args[0], args[0]);
+            }
+        );
+        if (*exponent == 2) {
+            rewriter.replaceOp(srcOp, square.getResults());
+            return success();
+        }
+
+        // pow(x, 3) -> mul(mul(x, x), x). The square is read with the output map.
+        AffineMap outMap = newMaps.back();
         rewriter.replaceOpWithNewOp<linalg::GenericOp>(
-            srcOp, srcOp.getResultTypes(), newInputs, srcOp.getOutputs(), newMaps,
+            srcOp, srcOp.getResultTypes(), ValueRange{square.getResult(0), newInputs[0]},
+            srcOp.getOutputs(), ArrayRef<AffineMap>{outMap, newMaps[0], outMap},
             srcOp.getIteratorTypesArray(),
             [&](OpBuilder &b, Location l, ValueRange args) {
-                Value val;
-                if (mlir::isa<FloatType>(elemType)) {
-                    val = arith::MulFOp::create(b, l, args[0], args[0]);
-                }
-                else if (mlir::isa<IntegerType>(elemType)) {
-                    val = arith::MulIOp::create(b, l, args[0], args[0]);
-                }
-                else {
-                    // fallback: yield input as-is (should not happen)
-                    val = args[0];
-                }
-                linalg::YieldOp::create(b, l, val);
+                buildMulBody(b, l, elemType, args[0], args[1]);
             }
         );
         return success();
