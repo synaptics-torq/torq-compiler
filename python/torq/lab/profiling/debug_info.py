@@ -5,9 +5,11 @@ from typing import (
     List,
     Optional,
     Tuple,
+    Union,
 )
 from dataclasses import dataclass, field
-from iree.compiler.ir import Context, Operation, Value, Location, Block, BlockArgument, Module
+from iree.compiler.ir import Context, Operation, Value, Location, Block, BlockArgument, Module, MemRefType, \
+    FlatSymbolRefAttr
 from collections import OrderedDict
 from enum import Enum
 from abc import ABC, abstractmethod
@@ -213,6 +215,100 @@ class Executor(Enum):
     HAL = "HAL"
 
 
+# Ops that only give a new view of the memref in operand 0
+_MEMREF_VIEW_OPS = {"memref.subview", "memref.collapse_shape", "memref.expand_shape", "memref.cast",
+                    "memref.reinterpret_cast", "memref.reshape", "torq_hl.reinterpret_cast"}
+
+# Ops that give code or a descriptor that a DMA loads, and the label of that data
+_CODE_SOURCE_LABELS = {
+    "torq_hl.get_block": "nss code",
+    "torq_hl.program_code": "code css",
+    "torq_hl.create_invocation": "code invocation",
+}
+
+_SLICE_CODE_PREFIX = "__const_descriptor_slice_program_torq_hl."
+
+
+def buffer_key(value: Value, dispatch):
+    """
+    Identify the buffer that a memref value points into. Views are followed to their source, and
+    the block arguments of an NSS program are followed to the values that the program gets (see
+    dispatch.nss_blocks_info). A global buffer is identified by its symbol name, because each
+    memref.get_global op of the same symbol gives a different value. Other buffers are identified
+    by their root value.
+    """
+    seen = set()
+    while value not in seen:
+        seen.add(value)
+        if isinstance(value.owner, Block):
+            block_info = dispatch.nss_blocks_info.get(value.owner)
+            if block_info is None:
+                break
+            value = block_info.get_argument(value)
+            continue
+        operation = value.owner.operation
+        if operation.name in _MEMREF_VIEW_OPS:
+            value = operation.operands[0]
+        elif operation.name == "memref.get_global":
+            return str(operation.attributes["name"])
+        else:
+            break
+    return value
+
+
+def buffer_label(key) -> str:
+    """
+    Short name of the kind of data in a buffer (see buffer_key): "code <kernel>" for program code,
+    "const", "intermediate", "nss code", or "external" for a buffer of the model inputs and outputs.
+    """
+    if isinstance(key, str):
+        symbol = key.lstrip("@").strip('"')
+        if symbol.startswith(_SLICE_CODE_PREFIX):
+            # Drop the invocation indexes, e.g. "conv2d_3_3" -> "conv2d"
+            return "code " + re.sub(r"(_[0-9]+)+$", "", symbol[len(_SLICE_CODE_PREFIX):])
+        if symbol.startswith("__const"):
+            return "const"
+        if symbol.startswith("__intermediate"):
+            return "intermediate"
+        return symbol
+    if isinstance(key.owner, Block) or key.owner.operation.name == "torq_hl.map_binding":
+        return "external"
+    return _CODE_SOURCE_LABELS.get(key.owner.operation.name, key.owner.operation.name)
+
+
+def memref_bytes(value: Value) -> Optional[int]:
+    """Size in bytes of a statically shaped memref value, or None."""
+    return memref_type_bytes(value.type)
+
+
+def memref_type_bytes(memref_type) -> Optional[int]:
+    """Size in bytes of a statically shaped memref type, or None."""
+    memref_type = MemRefType(memref_type)
+    bit_width = getattr(memref_type.element_type, "width", None)
+    if not memref_type.has_static_shape or bit_width is None:
+        return None
+    count = 1
+    for dim in memref_type.shape:
+        count *= dim
+    return count * bit_width // 8
+
+
+def format_bytes(size: int) -> str:
+    """Format a byte count, e.g. "640 B" or "17.1 KiB"."""
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KiB"
+    return f"{size / (1024 * 1024):.1f} MiB"
+
+
+def _transfer_trace_name(label: str, size: Optional[int]) -> str:
+    """Slice name of a data transfer: the kind of data, and its size unless it is program code."""
+    if size is None or label.startswith("code ") or label == "nss code":
+        return label
+    return f"{label} {format_bytes(size)}"
+
+
 def _optional_int_attr(operation: Operation, name: str) -> Optional[int]:
     if name in operation.attributes:
         return operation.attributes[name].value
@@ -224,6 +320,10 @@ def _dma_data_annotations(
 ) -> Dict[str, str]:
     """Detail-panel entries (source/dest memref type and address) for a DMA transfer."""
     result = {}
+
+    size = memref_bytes(dst)
+    if size is not None:
+        result["bytes"] = size
 
     result["source"] = str(src.type)
     if src_address is not None:
@@ -263,9 +363,33 @@ class WorkUnitDebugInfo(ABC):
         return self.start_operation.location
 
     @property
-    def annotations(self) -> Dict[str, str]:
+    def trace_name(self) -> str:
+        """
+        Short slice name for the trace viewer. Work units of the same kind share
+        this name, so the viewer gives them one color and groups them in its
+        summary tables. The details go in annotations.
+        """
+        return self.pretty_name()
+
+    @property
+    def annotations(self) -> Dict[str, Union[str, int]]:
         """Key/value details shown in the profiler's slice detail panel."""
-        return {}
+        return {"location": self.dispatch.debug_info.pretty_print_location(self.location)}
+
+    @property
+    def buffers_read(self) -> List:
+        """Keys (see buffer_key) of the buffers that a data transfer reads."""
+        return []
+
+    @property
+    def buffers_written(self) -> List:
+        """Keys (see buffer_key) of the buffers that a data transfer writes."""
+        return []
+
+    @property
+    def buffers_used(self) -> List:
+        """Keys (see buffer_key) of the buffers that a compute unit uses (read or write is not known)."""
+        return []
 
     @property
     def start_time_ns(self) -> Optional[int]:
@@ -390,6 +514,21 @@ class NssProgramWorkUnitDebugInfo(WorkUnitDebugInfo):
 
         return details
 
+    @property
+    def trace_name(self) -> str:
+        return self.program_name
+
+    @property
+    def annotations(self) -> Dict[str, Union[str, int]]:
+        result = super().annotations
+        result["job"] = self.job_id
+        result["start action"] = self.start_action.action_id if self.start_action else "N/A"
+        result["wait action"] = self.end_action.action_id if self.end_action else "N/A"
+        invocation_names = self.related_slice_invocations_names
+        if invocation_names:
+            result["torq kernels"] = ", ".join(sorted(invocation_names))
+        return result
+
 
 class NssCfgWorkUnitDebugInfo(WorkUnitDebugInfo):
 
@@ -407,6 +546,28 @@ class NssCfgWorkUnitDebugInfo(WorkUnitDebugInfo):
     @property
     def pretty_print(self):
         return f"{self.pretty_name()} | Task: {self.task_id} | " + self.dispatch.debug_info.pretty_print_location(self.location)
+
+    @property
+    def trace_name(self) -> str:
+        """What the task starts and waits for, e.g. "dma_in start+wait" or "slice 0 start"."""
+        actions = OrderedDict()
+        for op in self.start_operation.regions[0].blocks[0].operations:
+            unit, _, action = op.name.removeprefix("torq_hw.").rpartition("_")
+            if action not in ("start", "wait"):
+                continue
+            if "id" in op.attributes:
+                unit = f"{unit} {op.attributes['id'].value}"
+            actions.setdefault(unit, []).append(action)
+
+        if not actions:
+            return self.pretty_name()
+        return ", ".join(f"{unit} {'+'.join(unit_actions)}" for unit, unit_actions in actions.items())
+
+    @property
+    def annotations(self) -> Dict[str, Union[str, int]]:
+        result = super().annotations
+        result["task"] = self.task_id
+        return result
 
 
 class NssManagedWorkUnitDebugInfo(WorkUnitDebugInfo):
@@ -445,6 +606,11 @@ class SliceProgramWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
         return Executor.SLICE
 
     @property
+    def buffers_used(self) -> List:
+        # Operand 0 is the invocation, the other operands are the memrefs of the program
+        return [buffer_key(value, self.dispatch) for value in self.start_operation.operands[1:]]
+
+    @property
     def invocation_name(self) -> str:
         invocation = self.dispatch.resolve_argument(self.start_operation, 0)
         return invocation.owner.attributes["name"].value[len("slice_program_torq_hl.") :]
@@ -454,8 +620,14 @@ class SliceProgramWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
         return f"{self.pretty_name()} | {self.invocation_name}"
 
     @property
-    def annotations(self) -> Dict[str, str]:
-        result = {"location": self.dispatch.debug_info.pretty_print_location(self.location)}
+    def trace_name(self) -> str:
+        # Drop the invocation index (e.g. "conv2d_3" -> "conv2d") so all calls of a kernel share a name
+        return re.sub(r'_[0-9]+$', '', self.invocation_name)
+
+    @property
+    def annotations(self) -> Dict[str, Union[str, int]]:
+        result = super().annotations
+        result["invocation"] = self.invocation_name
         program_address = _optional_int_attr(self.start_operation, "program_address")
         if program_address is not None:
             result["program address"] = hex(program_address)
@@ -488,15 +660,30 @@ class CdmaWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
         return Executor.CDMA
 
     @property
-    def annotations(self) -> Dict[str, str]:
+    def trace_name(self) -> str:
+        source = self.start_operation.operands[1]
+        return _transfer_trace_name(buffer_label(buffer_key(source, self.dispatch)), memref_bytes(source))
+
+    @property
+    def buffers_read(self) -> List:
+        return [buffer_key(self.start_operation.operands[1], self.dispatch)]
+
+    @property
+    def buffers_written(self) -> List:
+        return [buffer_key(self.start_operation.operands[0], self.dispatch)]
+
+    @property
+    def annotations(self) -> Dict[str, Union[str, int]]:
+        result = super().annotations
         op = self.start_operation
         if len(op.operands) < 2:
-            return {}
-        return _dma_data_annotations(
+            return result
+        result.update(_dma_data_annotations(
             src=op.operands[1], dst=op.operands[0],
             src_address=_optional_int_attr(op, "src_address"),
             dst_address=_optional_int_attr(op, "dest_address"),
-        )
+        ))
+        return result
 
 
 class NdmaWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
@@ -504,6 +691,9 @@ class NdmaWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
     *_cfg op, not the *_start op, so annotations are read from there."""
 
     _cfg_op_name: Optional[str] = None
+    # Operand of the cfg op that is outside LRAM, and the label of an external buffer there
+    _outside_operand_index: int = 0
+    _external_label: str = ""
 
     @property
     def cfg_op(self) -> Optional[Operation]:
@@ -516,20 +706,45 @@ class NdmaWorkUnitDebugInfo(NssManagedWorkUnitDebugInfo):
         return None
 
     @property
-    def annotations(self) -> Dict[str, str]:
+    def trace_name(self) -> str:
         cfg = self.cfg_op
         if cfg is None:
-            return {}
-        return _dma_data_annotations(
+            return self.pretty_name()
+        outside = cfg.operands[self._outside_operand_index]
+        label = buffer_label(buffer_key(outside, self.dispatch))
+        if label == "external":
+            label = self._external_label
+        return _transfer_trace_name(label, memref_bytes(outside))
+
+    @property
+    def buffers_read(self) -> List:
+        cfg = self.cfg_op
+        return [buffer_key(cfg.operands[0], self.dispatch)] if cfg is not None else []
+
+    @property
+    def buffers_written(self) -> List:
+        cfg = self.cfg_op
+        return [buffer_key(cfg.operands[1], self.dispatch)] if cfg is not None else []
+
+    @property
+    def annotations(self) -> Dict[str, Union[str, int]]:
+        result = super().annotations
+        cfg = self.cfg_op
+        if cfg is None:
+            return result
+        result.update(_dma_data_annotations(
             src=cfg.operands[0], dst=cfg.operands[1],
             src_address=_optional_int_attr(cfg, "read_address"),
             dst_address=_optional_int_attr(cfg, "write_address"),
-        )
+        ))
+        return result
 
 
 class DmaInWorkUnitDebugInfo(NdmaWorkUnitDebugInfo):
 
     _cfg_op_name = "torq_hw.dma_in_cfg"
+    _outside_operand_index = 0
+    _external_label = "input"
 
     @property
     def executor(self) -> Executor:
@@ -539,6 +754,8 @@ class DmaInWorkUnitDebugInfo(NdmaWorkUnitDebugInfo):
 class DmaOutWorkUnitDebugInfo(NdmaWorkUnitDebugInfo):
 
     _cfg_op_name = "torq_hw.dma_out_cfg"
+    _outside_operand_index = 1
+    _external_label = "output"
 
     @property
     def executor(self) -> Executor:
@@ -606,6 +823,10 @@ class BaseDispatchDebugInfo(ABC):
         self.workunits: List[WorkUnitDebugInfo] = []
         self.original_locations: List = []
 
+    def lram_dispatches(self) -> List['DispatchDebugInfo']:
+        """The MLIR dispatches in this view that have LRAM buffer information."""
+        return []
+
     # --- operation-level time queries ---
 
     def get_operation_start_time_ns(self, operation) -> Optional[int]:
@@ -667,6 +888,28 @@ class DispatchDebugInfo(BaseDispatchDebugInfo):
         self._load_nss_blocks_info()
         self.workunits = self._load_host_workunits()
         self.original_locations = self._load_original_locations()
+
+    def lram_dispatches(self) -> List['DispatchDebugInfo']:
+        return [self]
+
+    def lram_buffer_ranges(self) -> Dict[str, Tuple[int, int]]:
+        """
+        LRAM address range (start, end) of each global LRAM buffer, by buffer_key
+        (the symbol name). Buffers without an LRAM address or a static size are left out.
+        """
+        ranges = {}
+        for op in self.module.body.operations:
+            operation = op.operation
+            if operation.name != "memref.global" or "lram_address" not in operation.attributes:
+                continue
+            size = memref_type_bytes(operation.attributes["type"].value)
+            if size is None:
+                continue
+            address = operation.attributes["lram_address"].value
+            # Print the symbol the same way as the name attribute of memref.get_global (see buffer_key)
+            symbol = FlatSymbolRefAttr.get(operation.attributes["sym_name"].value, context=operation.context)
+            ranges[str(symbol)] = (address, address + size)
+        return ranges
 
     def _load_actions(self) -> OrderedDict[int, ActionDebugInfo]:
         actions = []
@@ -1118,8 +1361,13 @@ class CombinedDispatchDebugInfo(BaseDispatchDebugInfo):
     def __init__(self):
         super().__init__()
         self._next_action_index = 0
+        self._dispatches: List[BaseDispatchDebugInfo] = []
+
+    def lram_dispatches(self) -> List['DispatchDebugInfo']:
+        return [part for dispatch in self._dispatches for part in dispatch.lram_dispatches()]
 
     def add_dispatch(self, dispatch_debug_info):
+        self._dispatches.append(dispatch_debug_info)
         for action in dispatch_debug_info.actions.values():
             self.actions[self._next_action_index] = action
             self._next_action_index += 1

@@ -14,11 +14,13 @@ except ImportError:
     import perfetto_pb2 as perfetto
 
 import argparse
+import bisect
 from collections import OrderedDict
 import os
+import re
 from pathlib import Path
 from typing import Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .debug_info import DebugInfo, DispatchDebugInfo, HostCopyWorkUnitDebugInfo, HostProgramWorkUnitDebugInfo, HalWorkUnitDebugInfo, NssProgramWorkUnitDebugInfo, NssCfgWorkUnitDebugInfo, \
                                 DmaInWorkUnitDebugInfo, DmaOutWorkUnitDebugInfo, CdmaWorkUnitDebugInfo, SliceProgramWorkUnitDebugInfo, CssProgramWorkUnitDebugInfo
@@ -66,8 +68,10 @@ class PerfettoEvent:
     start_time: int
     end_time: int
     category: Optional[str] = None
-    correlation_id: Optional[str] = None
     annotations: Optional[dict] = None
+    # Flow arrows: the viewer links this slice to the next slice with the same flow id
+    flow_ids: list = field(default_factory=list)
+    terminating_flow_ids: list = field(default_factory=list)
 
 
 class PerfettoTraceWriter:
@@ -98,7 +102,8 @@ class PerfettoTraceWriter:
         self.global_uuid += 1
         return self.global_uuid
 
-    def add_process_descriptor(self, process_name):
+    def add_process_descriptor(self, process_name,
+                               child_ordering=perfetto.TrackDescriptor.ChildTracksOrdering.CHRONOLOGICAL):
         """Register a new process in the trace."""
         
         puuid = self.get_next_uuid()        
@@ -107,15 +112,18 @@ class PerfettoTraceWriter:
         track_des = perfetto.TrackDescriptor()        
         track_des.uuid = puuid
         track_des.name = process_name
-        track_des.child_ordering = perfetto.TrackDescriptor.ChildTracksOrdering.CHRONOLOGICAL
+        track_des.child_ordering = child_ordering
         packet.track_descriptor.CopyFrom(track_des)
 
         return puuid
 
-    def add_thread_descriptor(self, puuid, thread_name):
-        """Register a new thread within a process."""
+    def add_thread_descriptor(self, puuid, thread_name, order_rank=None, child_ordering=None):
+        """
+        Register a new thread within a process, or a child track within another track.
+        order_rank is used when the parent has EXPLICIT ordering. child_ordering is set when
+        this track has child tracks.
+        """
 
-        puuid = puuid
         tuuid = self.get_next_uuid()
         
         packet = self.trace.packet.add()
@@ -123,9 +131,43 @@ class PerfettoTraceWriter:
         track_des.name = thread_name        
         track_des.uuid = tuuid
         track_des.parent_uuid = puuid
+        if order_rank is not None:
+            track_des.sibling_order_rank = order_rank
+        if child_ordering is not None:
+            track_des.child_ordering = child_ordering
         packet.track_descriptor.CopyFrom(track_des)
 
         return tuuid
+
+    def add_counter_descriptor(self, puuid, counter_name, order_rank=None):
+        """Register a counter track (values in bytes) within a process."""
+
+        tuuid = self.get_next_uuid()
+
+        packet = self.trace.packet.add()
+        track_des = perfetto.TrackDescriptor()
+        track_des.name = counter_name
+        track_des.uuid = tuuid
+        track_des.parent_uuid = puuid
+        track_des.counter.unit = perfetto.CounterDescriptor.Unit.UNIT_SIZE_BYTES
+        if order_rank is not None:
+            track_des.sibling_order_rank = order_rank
+        packet.track_descriptor.CopyFrom(track_des)
+
+        return tuuid
+
+    def add_counter_value(self, tuuid, time, value):
+        """Set the value of a counter track from the given time on."""
+
+        packet = self.trace.packet.add()
+        packet.timestamp = int(time - self.timestamp_origin_ns)
+        packet.track_event.type = perfetto.TrackEvent.Type.TYPE_COUNTER
+        packet.track_event.track_uuid = tuuid
+        packet.track_event.counter_value = int(value)
+        packet.trusted_packet_sequence_id = 1
+
+        if len(self.trace.packet) > 1024:
+            self.flush()
 
     def add_event(self, event):
         """Add a trace event (slice) to the timeline."""
@@ -151,16 +193,19 @@ class PerfettoTraceWriter:
         if event.category is not None:
             track_event.categories.append(event.category)
 
-        # Attach detail-panel key/values to the slice's begin event
-        if event_type == perfetto.TrackEvent.Type.TYPE_SLICE_BEGIN and event.annotations:
-            for key, value in event.annotations.items():
+        # Attach detail-panel key/values and flow arrows to the slice's begin event
+        if event_type == perfetto.TrackEvent.Type.TYPE_SLICE_BEGIN:
+            for key, value in (event.annotations or {}).items():
                 annotation = track_event.debug_annotations.add()
                 annotation.name = str(key)
-                annotation.string_value = str(value)
+                # Keep integers typed so they can be filtered and summed with SQL in the viewer
+                if isinstance(value, int) and not isinstance(value, bool):
+                    annotation.int_value = value
+                else:
+                    annotation.string_value = str(value)
 
-        # we need to upgrade perfetto
-        #if event.correlation_id is not None:
-        #    track_event.correlation_id = event.correlation_id
+            track_event.flow_ids.extend(event.flow_ids)
+            track_event.terminating_flow_ids.extend(event.terminating_flow_ids)
 
         packet.timestamp = int(time - self.timestamp_origin_ns)
         packet.track_event.CopyFrom(track_event)
@@ -397,27 +442,64 @@ _METRICS = [
 ]
 
 
+def _interval_total(intervals):
+    """Sum the lengths of merged (non-overlapping) intervals."""
+    return sum(end - start for start, end in intervals)
+
+
+def _split_dma_compute(dma_combined, compute_combined):
+    """Split merged DMA and compute intervals into DMA-only, compute-only and overlap intervals."""
+    return {
+        'DMA_ONLY': subtract_intervals(dma_combined, compute_combined),
+        'COMPUTE_ONLY': subtract_intervals(compute_combined, dma_combined),
+        'DMA_COMPUTE_OVERLAP': intersect_intervals(dma_combined, compute_combined),
+    }
+
+
+def _overall_intervals(overall_start, overall_end):
+    """Return the dispatch interval as a list, or an empty list if a bound is missing."""
+    if overall_start is None or overall_end is None:
+        return []
+    return [(overall_start, overall_end)]
+
+
+def _build_metrics(intervals, overall_start, overall_end, busy_intervals):
+    """
+    Build the metrics dict ({name: {'time', 'percent'}}) from merged intervals.
+
+    IDLE time is the overall time minus the busy time, and OVERALL has no percent.
+    """
+    overall_time = (overall_end - overall_start) if (overall_start is not None and overall_end is not None) else 0
+    busy_time = _interval_total(busy_intervals)
+    idle_time = overall_time - busy_time if overall_time >= busy_time else 0
+
+    def calc_percent(time):
+        return (time / overall_time * 100) if overall_time else 0
+
+    metrics = {}
+    for name, merged in intervals.items():
+        if name in ('IDLE', 'OVERALL'):
+            continue
+        total = _interval_total(merged)
+        metrics[name] = {'time': total, 'percent': calc_percent(total)}
+
+    metrics['IDLE'] = {'time': idle_time, 'percent': calc_percent(idle_time)}
+    metrics['OVERALL'] = {'time': overall_time}
+    return metrics
+
+
 def compute_compile_metrics(dispatch: DispatchDebugInfo):
     """
-    Compute hardware utilization metrics from parsed compile profile intervals.
-    
-    Args:
-        dma_intervals: List of (start, end) tuples for DMA
-        cdma_dtcm_intervals: List of (start, end) tuples for CDMA DTCM
-        cdma_itcm_intervals: List of (start, end) tuples for CDMA ITCM
-        slice_intervals: List of (start, end) tuples for Slice
-        css_intervals: List of (start, end) tuples for CSS
-        overall_start: Start timestamp
-        overall_end: End timestamp
-        
+    Compute hardware utilization metrics from the compile-time work unit timings.
+
     Returns:
-        Dictionary containing metrics, overall_start, overall_end
+        Dictionary with 'metrics', 'intervals' (merged intervals per metric),
+        'overall_start' and 'overall_end'
     """
 
     overall_end = dispatch.end_time_ns
     overall_start = dispatch.start_time_ns
 
-    dma_intervals = []
     dma_in_intervals = []
     dma_out_intervals = []
     cdma_dtcm_intervals = []
@@ -433,14 +515,11 @@ def compute_compile_metrics(dispatch: DispatchDebugInfo):
         if start_time_ns is None or end_time_ns is None:
             continue
 
-        if isinstance(workunit, DmaOutWorkUnitDebugInfo) or \
-              isinstance(workunit, DmaInWorkUnitDebugInfo):
-            dma_intervals.append((start_time_ns, end_time_ns))
+        if isinstance(workunit, DmaInWorkUnitDebugInfo):
+            dma_in_intervals.append((start_time_ns, end_time_ns))
 
-            if isinstance(workunit, DmaInWorkUnitDebugInfo):
-                dma_in_intervals.append((start_time_ns, end_time_ns))
-            else:
-                dma_out_intervals.append((start_time_ns, end_time_ns))
+        elif isinstance(workunit, DmaOutWorkUnitDebugInfo):
+            dma_out_intervals.append((start_time_ns, end_time_ns))
 
         elif isinstance(workunit, SliceProgramWorkUnitDebugInfo):
             slice_intervals.append((start_time_ns, end_time_ns))
@@ -454,266 +533,127 @@ def compute_compile_metrics(dispatch: DispatchDebugInfo):
         elif isinstance(workunit, CssProgramWorkUnitDebugInfo):
             css_intervals.append((start_time_ns, end_time_ns))            
 
-    # Merge overlapping intervals
-    merged_dma = merge_intervals(dma_intervals)
-    merged_dma_in = merge_intervals(dma_in_intervals)
-    merged_dma_out = merge_intervals(dma_out_intervals)
-    merged_slice = merge_intervals(slice_intervals)
-    merged_cdma_dtcm = merge_intervals(cdma_dtcm_intervals)
-    merged_cdma_itcm = merge_intervals(cdma_itcm_intervals)
-    merged_cdma_all = merge_intervals(cdma_dtcm_intervals + cdma_itcm_intervals)
-    merged_css = merge_intervals(css_intervals)
-    
-    # Combine DMA and CDMA for "DMA" statistics
-    # Use merge_intervals to calculate the Union (handling any overlaps between DMA and CDMA)
-    merged_dma_combined = merge_intervals(dma_intervals + cdma_dtcm_intervals + cdma_itcm_intervals)
-    
-    # Combine SLICE and CSS for "COMPUTE" statistics
-    # Use merge_intervals to calculate the Union (handling any overlaps between Slice and CSS)
-    merged_compute_combined = merge_intervals(slice_intervals + css_intervals)
-    
-    # Calculate DMA-only time (DMA/CDMA active, SLICE/CSS inactive)
-    # This subtracts any time where Compute is active from the DMA Combined time
-    dma_only_intervals = subtract_intervals(merged_dma_combined, merged_compute_combined)
-    total_dma_only = sum(end - start for start, end in dma_only_intervals)
-    
-    # Calculate COMPUTE-only time (SLICE/CSS active, DMA/CDMA inactive)
-    compute_only_intervals = subtract_intervals(merged_compute_combined, merged_dma_combined)
-    total_compute_only = sum(end - start for start, end in compute_only_intervals)
-    
-    # Calculate DMA+COMPUTE overlap time
-    # This finds the time where BOTH DMA/CDMA and Compute are active
-    overlap_intervals = intersect_intervals(merged_dma_combined, merged_compute_combined)
-    total_overlap = sum(end - start for start, end in overlap_intervals)
-    
-    # Calculate totals
-    total_dma = sum(end - start for start, end in merged_dma)
-    total_dma_in = sum(end - start for start, end in merged_dma_in)
-    total_dma_out = sum(end - start for start, end in merged_dma_out)
-    total_slice = sum(end - start for start, end in merged_slice)
-    total_cdma_dtcm = sum(end - start for start, end in merged_cdma_dtcm)
-    total_cdma_itcm = sum(end - start for start, end in merged_cdma_itcm)
-    total_cdma_all = sum(end - start for start, end in merged_cdma_all)
-    total_css = sum(end - start for start, end in merged_css)
-    
-    total_dma_combined = sum(end - start for start, end in merged_dma_combined)
-    total_compute_combined = sum(end - start for start, end in merged_compute_combined)
-    
-    overall_time = (overall_end - overall_start) if (overall_start is not None and overall_end is not None) else 0
-    
-    # Calculate BUSY time (union of DMA/CDMA and SLICE/CSS)
-    busy_intervals = merge_intervals(merged_dma_combined + merged_compute_combined)
-    busy_time = sum(end - start for start, end in busy_intervals)
-    
-    # Calculate IDLE time
-    idle_time = overall_time - busy_time if overall_time >= busy_time else 0
-    
-    # Calculate percentages
-    def calc_percent(time):
-        return (time / overall_time * 100) if overall_time else 0
-    
-    metrics = {
-        'DMA': {'time': total_dma, 'percent': calc_percent(total_dma)},
-        'DMA_IN': {'time': total_dma_in, 'percent': calc_percent(total_dma_in)},
-        'DMA_OUT': {'time': total_dma_out, 'percent': calc_percent(total_dma_out)},
-        'SLICE': {'time': total_slice, 'percent': calc_percent(total_slice)},
-        'CDMA_DTCM': {'time': total_cdma_dtcm, 'percent': calc_percent(total_cdma_dtcm)},
-        'CDMA_ITCM': {'time': total_cdma_itcm, 'percent': calc_percent(total_cdma_itcm)},
-        'CDMA': {'time': total_cdma_all, 'percent': calc_percent(total_cdma_all)},
-        'CSS': {'time': total_css, 'percent': calc_percent(total_css)},
-        'DMA_COMBINED': {'time': total_dma_combined, 'percent': calc_percent(total_dma_combined)},
-        'COMPUTE_COMBINED': {'time': total_compute_combined, 'percent': calc_percent(total_compute_combined)},
-        'IDLE': {'time': idle_time, 'percent': calc_percent(idle_time)},
-        'DMA_ONLY': {'time': total_dma_only, 'percent': calc_percent(total_dma_only)},
-        'COMPUTE_ONLY': {'time': total_compute_only, 'percent': calc_percent(total_compute_only)},
-        'DMA_COMPUTE_OVERLAP': {'time': total_overlap, 'percent': calc_percent(total_overlap)},
-        'OVERALL': {'time': overall_time}
+    cdma_intervals = cdma_dtcm_intervals + cdma_itcm_intervals
+
+    # "DMA" statistics use the union of DMA and CDMA, "COMPUTE" statistics the union of SLICE and CSS
+    dma_combined = merge_intervals(dma_in_intervals + dma_out_intervals + cdma_intervals)
+    compute_combined = merge_intervals(slice_intervals + css_intervals)
+    busy = merge_intervals(dma_combined + compute_combined)
+    overall = _overall_intervals(overall_start, overall_end)
+
+    intervals = {
+        'DMA': merge_intervals(dma_in_intervals + dma_out_intervals),
+        'DMA_IN': merge_intervals(dma_in_intervals),
+        'DMA_OUT': merge_intervals(dma_out_intervals),
+        'SLICE': merge_intervals(slice_intervals),
+        'CDMA_DTCM': merge_intervals(cdma_dtcm_intervals),
+        'CDMA_ITCM': merge_intervals(cdma_itcm_intervals),
+        'CDMA': merge_intervals(cdma_intervals),
+        'CSS': merge_intervals(css_intervals),
+        'DMA_COMBINED': dma_combined,
+        'COMPUTE_COMBINED': compute_combined,
+        **_split_dma_compute(dma_combined, compute_combined),
+        'IDLE': subtract_intervals(overall, busy),
+        'OVERALL': overall,
     }
-    
+
     return {
-        'metrics': metrics,
+        'metrics': _build_metrics(intervals, overall_start, overall_end, busy),
+        'intervals': intervals,
         'overall_start': overall_start,
         'overall_end': overall_end
     }
 
 
+def _collect_runtime_intervals(workunits):
+    """Collect the raw (start, end) intervals of each runtime executor from the work units."""
+    collected = {name: [] for name in (
+        'DMA', 'DMA_IN', 'DMA_OUT', 'CDMA', 'SLICE', 'SLICE_0', 'SLICE_1', 'CSS', 'HAL', 'HOST_COPY', 'HOST')}
 
-def compute_runtime_metrics(dispatch: DispatchDebugInfo):
-    """
-    Compute utilization metrics from parsed runtime profile rows.
-    
-    Args:
-        all_rows: List of event tuples
-        overall_start: Start timestamp
-        overall_end: End timestamp
-        
-    Returns:
-        Dictionary containing metrics, overall_start, overall_end
-    """
-    
-    overall_start = dispatch.start_time_ns
-    overall_end = dispatch.end_time_ns
-    non_hal_start, non_hal_end = get_non_hal_bounds(dispatch.workunits)
-
-    dma_intervals = []
-    dma_in_intervals = []
-    dma_out_intervals = []
-    slice_intervals = []
-    slice_0_intervals = []
-    slice_1_intervals = []
-    cdma_intervals = []
-    css_intervals = []
-    hal_intervals = []
-    host_copy_intervals = []
-    host_intervals = []
-    
-    for workunit in dispatch.workunits:
+    for workunit in workunits:
         
         start_time_ns = workunit.start_time_ns
         end_time_ns = workunit.end_time_ns
 
         if start_time_ns is None or end_time_ns is None:
             continue
+
+        interval = (start_time_ns, end_time_ns)
         
         if isinstance(workunit, NssProgramWorkUnitDebugInfo):
-
-            if start_time_ns is None or end_time_ns is None:
-                raise ValueError(f"WorkUnit {workunit} is missing start or end time.")
-
+            # NSS program timing covers every unit it uses
             if workunit.dma_in_used or workunit.dma_out_used:
-                dma_intervals.append((start_time_ns, end_time_ns))
-
-                if workunit.dma_in_used:
-                    dma_in_intervals.append((start_time_ns, end_time_ns))
-
-                if workunit.dma_out_used:
-                    dma_out_intervals.append((start_time_ns, end_time_ns))
-
+                collected['DMA'].append(interval)
+            if workunit.dma_in_used:
+                collected['DMA_IN'].append(interval)
+            if workunit.dma_out_used:
+                collected['DMA_OUT'].append(interval)
             if workunit.cdma_used:
-                cdma_intervals.append((start_time_ns, end_time_ns))
-            
+                collected['CDMA'].append(interval)
             if workunit.slice_used[0] or workunit.slice_used[1]:
-                slice_intervals.append((start_time_ns, end_time_ns))
-                
+                collected['SLICE'].append(interval)
             if workunit.slice_used[0]:
-                slice_0_intervals.append((start_time_ns, end_time_ns))
-                
+                collected['SLICE_0'].append(interval)
             if workunit.slice_used[1]:
-                slice_1_intervals.append((start_time_ns, end_time_ns))
-
+                collected['SLICE_1'].append(interval)
             if workunit.css_used:
-                css_intervals.append((start_time_ns, end_time_ns))
-    
+                collected['CSS'].append(interval)
         elif isinstance(workunit, HostCopyWorkUnitDebugInfo):        
-
-            if start_time_ns is None or end_time_ns is None:
-                raise ValueError(f"WorkUnit {workunit} is missing start or end time.")
-
-            host_copy_intervals.append((start_time_ns, end_time_ns))
-
+            collected['HOST_COPY'].append(interval)
         elif isinstance(workunit, HostProgramWorkUnitDebugInfo):
-
-            if start_time_ns is None or end_time_ns is None:
-                raise ValueError(f"WorkUnit {workunit} is missing start or end time.")
-
-            host_intervals.append((start_time_ns, end_time_ns))
-
+            collected['HOST'].append(interval)
         elif isinstance(workunit, HalWorkUnitDebugInfo):
+            collected['HAL'].append(interval)
 
-            if start_time_ns is None or end_time_ns is None:
-                raise ValueError(f"WorkUnit {workunit} is missing start or end time.")
+    return collected
 
-            hal_intervals.append((start_time_ns, end_time_ns))
-    
-    # Merge overlapping intervals
-    merged_dma = merge_intervals(dma_intervals)
-    merged_dma_in = merge_intervals(dma_in_intervals)
-    merged_dma_out = merge_intervals(dma_out_intervals)
-    merged_cdma = merge_intervals(cdma_intervals)
-    merged_slice = merge_intervals(slice_intervals)
-    merged_slice_0 = merge_intervals(slice_0_intervals)
-    merged_slice_1 = merge_intervals(slice_1_intervals)
-    merged_css = merge_intervals(css_intervals)
-    merged_hal = merge_intervals(hal_intervals)
-    merged_host_copy = merge_intervals(host_copy_intervals)
-    merged_host = merge_intervals(host_intervals)
-    
-    merged_compute_combined = merge_intervals(slice_0_intervals + slice_1_intervals + css_intervals)
-    
-    # Combined DMA = DMA + CDMA
-    merged_dma_combined = merge_intervals(dma_intervals + cdma_intervals)
 
-    # Calculate exclusive and overlap times
-    dma_only_intervals = subtract_intervals(merged_dma_combined, merged_compute_combined)
-    compute_only_intervals = subtract_intervals(merged_compute_combined, merged_dma_combined)
-    overlap_intervals = intersect_intervals(merged_dma_combined, merged_compute_combined)
-    
-    # Calculate totals
-    total_dma = sum(end - start for start, end in merged_dma)
-    total_dma_in = sum(end - start for start, end in merged_dma_in)
-    total_dma_out = sum(end - start for start, end in merged_dma_out)
-    total_cdma = sum(end - start for start, end in merged_cdma)
-    total_slice = sum(end - start for start, end in merged_slice)
-    total_slice_0 = sum(end - start for start, end in merged_slice_0)
-    total_slice_1 = sum(end - start for start, end in merged_slice_1)
-    total_css = sum(end - start for start, end in merged_css)
-    total_hal = sum(end - start for start, end in merged_hal)
-    total_compute_combined = sum(end - start for start, end in merged_compute_combined)
-    total_dma_only = sum(end - start for start, end in dma_only_intervals)
-    total_compute_only = sum(end - start for start, end in compute_only_intervals)
-    total_overlap = sum(end - start for start, end in overlap_intervals)
-    total_dma_combined = sum(end - start for start, end in merged_dma_combined)
-    total_host_copy = sum(end - start for start, end in merged_host_copy)
-    total_host = sum(end - start for start, end in merged_host)
-    
-    overall_time = (overall_end - overall_start) if (overall_start is not None and overall_end is not None) else 0
+def compute_runtime_metrics(dispatch: DispatchDebugInfo):
+    """
+    Compute utilization metrics from the measured runtime work unit timings.
+
+    Returns:
+        Dictionary with 'metrics', 'intervals' (merged intervals per metric),
+        'overall_start' and 'overall_end'
+    """
+
+    overall_start = dispatch.start_time_ns
+    overall_end = dispatch.end_time_ns
+    non_hal_start, non_hal_end = get_non_hal_bounds(dispatch.workunits)
+
+    collected = _collect_runtime_intervals(dispatch.workunits)
+    intervals = {name: merge_intervals(raw) for name, raw in collected.items()}
+
+    dma_combined = merge_intervals(collected['DMA'] + collected['CDMA'])
+    compute_combined = merge_intervals(collected['SLICE_0'] + collected['SLICE_1'] + collected['CSS'])
+
+    # BUSY covers DMA, compute, HAL, host copy, and host activity.
+    busy = merge_intervals(dma_combined + compute_combined + intervals['HAL'] + intervals['HOST_COPY'] + intervals['HOST'])
+    overall = _overall_intervals(overall_start, overall_end)
+
+    intervals.update({
+        'DMA_COMBINED': dma_combined,
+        'COMPUTE_COMBINED': compute_combined,
+        **_split_dma_compute(dma_combined, compute_combined),
+        'IDLE': subtract_intervals(overall, busy),
+        'OVERALL': overall,
+    })
+
+    metrics = _build_metrics(intervals, overall_start, overall_end, busy)
+
     base_npu_ops = (
         non_hal_end - non_hal_start
         if (non_hal_start is not None and non_hal_end is not None)
         else 0
     )
-    npu_activity = merge_intervals(merged_dma_combined + merged_compute_combined)
-    host_activity = merge_intervals(merged_host_copy + merged_host)
-    exclusive_host_intervals = subtract_intervals(host_activity, npu_activity + merged_hal)
-    total_exclusive_host = sum(end - start for start, end in exclusive_host_intervals)
-    total_npu_operations = max(0, base_npu_ops - total_exclusive_host)
-    
-    # BUSY covers DMA, compute, HAL, host copy, and host activity.
-    busy_intervals = merge_intervals(
-        merged_dma_combined + merged_compute_combined + merged_hal + merged_host_copy + merged_host
-    )
-    busy_time = sum(end - start for start, end in busy_intervals)
-    
-    # Calculate IDLE time
-    idle_time = overall_time - busy_time if overall_time >= busy_time else 0
-    
-    def calc_percent(time):
-        return (time / overall_time * 100) if overall_time else 0
-    
-    metrics = {
-        'DMA': {'time': total_dma, 'percent': calc_percent(total_dma)},
-        'DMA_IN': {'time': total_dma_in, 'percent': calc_percent(total_dma_in)},
-        'DMA_OUT': {'time': total_dma_out, 'percent': calc_percent(total_dma_out)},
-        'SLICE': {'time': total_slice, 'percent': calc_percent(total_slice)},
-        'SLICE_0': {'time': total_slice_0, 'percent': calc_percent(total_slice_0)},
-        'SLICE_1': {'time': total_slice_1, 'percent': calc_percent(total_slice_1)},
-        'CDMA': {'time': total_cdma, 'percent': calc_percent(total_cdma)}, 
-        'CSS': {'time': total_css, 'percent': calc_percent(total_css)},
-        'DMA_COMBINED': {'time': total_dma_combined, 'percent': calc_percent(total_dma_combined)},
-        'COMPUTE_COMBINED': {'time': total_compute_combined, 'percent': calc_percent(total_compute_combined)},
-        'IDLE': {'time': idle_time, 'percent': calc_percent(idle_time)},
-        'DMA_ONLY': {'time': total_dma_only, 'percent': calc_percent(total_dma_only)},
-        'COMPUTE_ONLY': {'time': total_compute_only, 'percent': calc_percent(total_compute_only)},
-        'DMA_COMPUTE_OVERLAP': {'time': total_overlap, 'percent': calc_percent(total_overlap)},
-        'OVERALL': {'time': overall_time},
-        'TOTAL_NPU_OPERATIONS': {'time': total_npu_operations},
-        'HAL': {'time': total_hal, 'percent': calc_percent(total_hal)},
-        'HOST_COPY': {'time': total_host_copy, 'percent': calc_percent(total_host_copy)},
-        'HOST': {'time': total_host, 'percent': calc_percent(total_host)}
-    }
+    npu_activity = merge_intervals(dma_combined + compute_combined)
+    host_activity = merge_intervals(intervals['HOST_COPY'] + intervals['HOST'])
+    exclusive_host_intervals = subtract_intervals(host_activity, npu_activity + intervals['HAL'])
+    metrics['TOTAL_NPU_OPERATIONS'] = {'time': max(0, base_npu_ops - _interval_total(exclusive_host_intervals))}
     
     return {
         'metrics': metrics,
+        'intervals': intervals,
         'overall_start': overall_start,
         'overall_end': overall_end
     }
@@ -742,26 +682,16 @@ def print_metrics_summary(profile_name, metrics):
 # =============================================================================
 
 
-def create_overview_event(tuuid, label, metric, base_start):
+def format_overview_summary(label, metric):
     """
-    Create a Perfetto event for an overview track.
-    
-    Returns:
-        PerfettoEvent instance or None if duration is invalid
-    """
-    duration = metric['time']
-    if duration < 0:
-        return None
-    
-    start = base_start
-    end = base_start + duration
-    
-    # Build name with formatted duration and percent (if available)
-    name = f"{label}: {format_time_duration(duration)}"
-    if 'percent' in metric:
-        name += f" ({metric['percent']:.2f}%)"
+    Format an overview total such as "DMA total: 1.234µs (5.00%)".
 
-    return PerfettoEvent(tuuid, name, start, end, "overview")
+    report.py reads these strings back from the .pb file, so keep the format.
+    """
+    summary = f"{label}: {format_time_duration(metric['time'])}"
+    if 'percent' in metric:
+        summary += f" ({metric['percent']:.2f}%)"
+    return summary
 
 
 @dataclass
@@ -801,45 +731,36 @@ def _get_compile_runtime_scale(compile_duration_ns, runtime_start_ns, runtime_en
     return runtime_duration_ns / compile_duration_ns
 
 
-def _emit_compile_event(trace_writer, tuuid, details, event_start, event_end, async_duration_ns=None, annotations=None):
-    """Emit a compile-time event, splitting into active + WAITING if async duration is shorter."""
-    duration = event_end - event_start
-    if async_duration_ns is not None and async_duration_ns < duration:
-        ready_time = event_start + async_duration_ns
-        trace_writer.add_event(PerfettoEvent(tuuid, details, event_start, ready_time, annotations=annotations))
-        trace_writer.add_event(PerfettoEvent(tuuid, "WAITING", ready_time, event_end))
-    else:
-        trace_writer.add_event(PerfettoEvent(tuuid, details, event_start, event_end, annotations=annotations))
+# Compile-time tracks for each work unit type. Other work unit types have no compile-time slice.
+_COMPILE_TRACK_NAMES = OrderedDict([
+    (torq_debug_info.NssProgramWorkUnitDebugInfo, ["NSS Programs (Compile)"]),
+    (torq_debug_info.NssCfgWorkUnitDebugInfo, ["NSS CFG Tasks (Compile)"]),
+    (torq_debug_info.CdmaWorkUnitDebugInfo, ["CDMA (Compile)"]),
+    (torq_debug_info.DmaInWorkUnitDebugInfo, ["NDMA In (Compile)"]),
+    (torq_debug_info.DmaOutWorkUnitDebugInfo, ["NDMA Out (Compile)"]),
+    (torq_debug_info.SliceProgramWorkUnitDebugInfo, ["Slice 0 (Compile)", "Slice 1 (Compile)"]),
+    (torq_debug_info.CssProgramWorkUnitDebugInfo, ["CSS (Compile)"]),
+])
 
 
-def _log_compile_time_traces(trace_writer, dispatch):
-    """Log compile-time estimates scaled into measured runtime NSS intervals."""
-    if not dispatch.compile_operation_times_ns:
-        return
+@dataclass
+class CompilePlacement:
+    """Where the compile-time estimate of a work unit is drawn, in runtime time."""
+    workunit: object
+    track_index: int  # index in the compile tracks of the work unit type (the executor instance)
+    start: int
+    end: int
+    async_duration_ns: Optional[int]
 
-    # --- NPU (Compile): detailed per-workunit view ---
-    compile_npu_process = trace_writer.add_process_descriptor("NPU Task Breakdown")
 
-    compile_workunits_track_names = OrderedDict([
-        (torq_debug_info.NssProgramWorkUnitDebugInfo, ["NSS Programs (Compile)"]),
-        (torq_debug_info.NssCfgWorkUnitDebugInfo, ["NSS CFG Tasks (Compile)"]),
-        (torq_debug_info.CdmaWorkUnitDebugInfo, ["CDMA (Compile)"]),
-        (torq_debug_info.DmaInWorkUnitDebugInfo, ["NDMA In (Compile)"]),
-        (torq_debug_info.DmaOutWorkUnitDebugInfo, ["NDMA Out (Compile)"]),
-        (torq_debug_info.SliceProgramWorkUnitDebugInfo, ["Slice 0 (Compile)", "Slice 1 (Compile)"]),
-        (torq_debug_info.CssProgramWorkUnitDebugInfo, ["CSS (Compile)"]),
-    ])
-
-    compile_workunits_tracks = {}
-    for workunit_type, track_names in compile_workunits_track_names.items():
-        for track_name in track_names:
-            tuuid = trace_writer.add_thread_descriptor(compile_npu_process, track_name)
-            compile_workunits_tracks.setdefault(workunit_type, []).append(tuuid)
-
-    # Pre-index NSS program workunits with their compile time ranges and build child->parent map
-    nss_program_lookup = []  # (workunit, compile_start, compile_end, scale)
-    parent_nss_map = {}  # child_workunit -> (parent_nss_wu, parent_compile_start, scale)
-    nss_scale_map = {}  # nss_workunit -> scale, reused below to avoid recomputing
+def _index_nss_programs(dispatch):
+    """
+    Index the NSS programs that have compile times. Returns [(program, compile start, compile end,
+    scale)], {related work unit: (program, compile start, scale)} and {program: scale}.
+    """
+    nss_program_lookup = []
+    parent_nss_map = {}
+    nss_scale_map = {}
 
     for wu in dispatch.workunits:
         if not isinstance(wu, NssProgramWorkUnitDebugInfo):
@@ -849,94 +770,766 @@ def _log_compile_time_traces(trace_writer, dispatch):
             scale = _get_compile_runtime_scale(time_range[2], wu.start_time_ns, wu.end_time_ns)
             nss_program_lookup.append((wu, time_range[0], time_range[1], scale))
             nss_scale_map[wu] = scale
-            # Index all related workunits for O(1) parent lookup
             for related_wu in wu.related_workunits:
                 parent_nss_map[related_wu] = (wu, time_range[0], scale)
 
+    return nss_program_lookup, parent_nss_map, nss_scale_map
+
+
+def _scaled_async_duration(dispatch, workunit, scale):
+    """Compile-time async duration of a work unit, scaled to runtime, or None."""
+    compile_info = dispatch.get_compile_time_info(workunit.start_operation)
+    async_dur = compile_info.async_duration_ns if compile_info else None
+    return round(async_dur * scale) if async_dur is not None else None
+
+
+def _nss_program_placement(dispatch, workunit, nss_scale_map):
+    """Place an NSS program at its runtime start, with its scaled compile duration."""
+    time_range = _get_compile_time_range(dispatch, workunit.start_operation, workunit.end_operation)
+    if time_range is None or workunit.start_time_ns is None:
+        return None
+    scale = nss_scale_map[workunit]
+    end = workunit.start_time_ns + round(time_range[2] * scale)
+    return CompilePlacement(workunit, 0, workunit.start_time_ns, end,
+                            _scaled_async_duration(dispatch, workunit, scale))
+
+
+def _managed_parent(dispatch, workunit, parent_nss_map):
+    """
+    Compile range and parent NSS program of an NSS-managed work unit, from its nss_task op.
+    Returns (compile start, compile duration, parent, parent compile start, scale), or None.
+    """
+    has_parent_start = workunit.start_operation is not None and hasattr(workunit.start_operation, 'parent')
+    has_parent_end = workunit.end_operation is not None and hasattr(workunit.end_operation, 'parent')
+    if not has_parent_start or not has_parent_end:
+        return None
+    time_range = _get_compile_time_range(dispatch, workunit.start_operation.parent, workunit.end_operation.parent)
+    parent_entry = parent_nss_map.get(workunit)
+    if time_range is None or parent_entry is None:
+        return None
+    parent_nss, parent_nss_compile_start, scale = parent_entry
+    return time_range[0], time_range[2], parent_nss, parent_nss_compile_start, scale
+
+
+def _cfg_parent(dispatch, workunit, nss_program_lookup):
+    """
+    Compile range and parent NSS program of an NSS CFG task. The parent is the NSS program whose
+    compile range contains the task. Returns the same tuple as _managed_parent, or None.
+    """
+    time_range = _get_compile_time_range(dispatch, workunit.start_operation, workunit.end_operation)
+    if time_range is None:
+        return None
+    compile_start, compile_end, compile_duration = time_range
+    for (nss_wu, nss_cs, nss_ce, nss_scale) in nss_program_lookup:
+        if nss_cs <= compile_start and compile_end <= nss_ce and workunit.dispatch is nss_wu.dispatch:
+            return compile_start, compile_duration, nss_wu, nss_cs, nss_scale
+    return None
+
+
+def _child_placement(dispatch, workunit, parent_info):
+    """Place a work unit at the runtime start of its parent NSS program, plus its scaled compile offset."""
+    compile_start, compile_duration, parent_nss, parent_nss_compile_start, scale = parent_info
+    if parent_nss.start_time_ns is None:
+        return None
+    track_index = workunit.executor_instance_id
+    if track_index >= len(_COMPILE_TRACK_NAMES[type(workunit)]):
+        return None
+    offset_within_nss = compile_start - parent_nss_compile_start
+    start = parent_nss.start_time_ns + round(offset_within_nss * scale)
+    end = parent_nss.start_time_ns + round((offset_within_nss + compile_duration) * scale)
+    return CompilePlacement(workunit, track_index, start, end, _scaled_async_duration(dispatch, workunit, scale))
+
+
+def _compile_placements(dispatch):
+    """
+    Return the CompilePlacement of each work unit whose compile-time estimate can be drawn:
+    the estimates are scaled into the measured runtime interval of their NSS program.
+    """
+    if not dispatch.compile_operation_times_ns:
+        return []
+
+    nss_program_lookup, parent_nss_map, nss_scale_map = _index_nss_programs(dispatch)
+    placements = []
     for workunit in dispatch.workunits:
-        # NSS Programs: place directly at runtime start
+        if type(workunit) not in _COMPILE_TRACK_NAMES:
+            continue
         if isinstance(workunit, NssProgramWorkUnitDebugInfo):
-            time_range = _get_compile_time_range(dispatch, workunit.start_operation, workunit.end_operation)
-            if time_range is None:
-                continue
-            compile_start, _, compile_duration = time_range
-            runtime_start = workunit.start_time_ns
-            if runtime_start is None:
-                continue
-
-            track_uuids = compile_workunits_tracks.get(type(workunit))
-            if track_uuids:
-                compile_info = dispatch.get_compile_time_info(workunit.start_operation)
-                async_dur = compile_info.async_duration_ns if compile_info else None
-                scale = nss_scale_map[workunit]
-                if async_dur is not None:
-                    async_dur = round(async_dur * scale)
-                event_end = runtime_start + round(compile_duration * scale)
-                _emit_compile_event(trace_writer, track_uuids[0], workunit.pretty_print,
-                                    runtime_start, event_end, async_dur,
-                                    annotations=workunit.annotations)
-            continue
-
-        # NSS-managed workunits: get timing from parent nss_task op
-        if isinstance(workunit, torq_debug_info.NssManagedWorkUnitDebugInfo):
-            has_parent_start = workunit.start_operation is not None and hasattr(workunit.start_operation, 'parent')
-            has_parent_end = workunit.end_operation is not None and hasattr(workunit.end_operation, 'parent')
-            if not has_parent_start or not has_parent_end:
-                continue
-            time_range = _get_compile_time_range(dispatch, workunit.start_operation.parent,
-                                                 workunit.end_operation.parent)
-            if time_range is None:
-                continue
-            compile_start, _, compile_duration = time_range
-
-            parent_entry = parent_nss_map.get(workunit)
-            if parent_entry is None:
-                continue
-            parent_nss, parent_nss_compile_start, scale = parent_entry
-            if parent_nss.start_time_ns is None:
-                continue
-
-        elif isinstance(workunit, torq_debug_info.NssCfgWorkUnitDebugInfo):
-            time_range = _get_compile_time_range(dispatch, workunit.start_operation, workunit.end_operation)
-            if time_range is None:
-                continue
-            compile_start, compile_end, compile_duration = time_range
-
-            # Find parent NSS program by compile range containment + dispatch match
-            parent_nss = None
-            parent_nss_compile_start = None
-            for (nss_wu, nss_cs, nss_ce, nss_scale) in nss_program_lookup:
-                if nss_cs <= compile_start and compile_end <= nss_ce and workunit.dispatch is nss_wu.dispatch:
-                    parent_nss = nss_wu
-                    parent_nss_compile_start = nss_cs
-                    scale = nss_scale
-                    break
-
-            if parent_nss is None or parent_nss.start_time_ns is None or parent_nss_compile_start is None:
-                continue
+            placement = _nss_program_placement(dispatch, workunit, nss_scale_map)
         else:
+            if isinstance(workunit, torq_debug_info.NssManagedWorkUnitDebugInfo):
+                parent_info = _managed_parent(dispatch, workunit, parent_nss_map)
+            else:
+                parent_info = _cfg_parent(dispatch, workunit, nss_program_lookup)
+            placement = _child_placement(dispatch, workunit, parent_info) if parent_info is not None else None
+        if placement is not None:
+            placements.append(placement)
+    return placements
+
+
+def _emit_compile_event(trace_writer, tuuid, placement, flow_ids):
+    """Emit a compile-time event, splitting into active + WAITING if async duration is shorter."""
+    workunit = placement.workunit
+    async_duration_ns = placement.async_duration_ns
+    if async_duration_ns is not None and async_duration_ns < placement.end - placement.start:
+        active_end = placement.start + async_duration_ns
+    else:
+        active_end = placement.end
+
+    trace_writer.add_event(PerfettoEvent(tuuid, workunit.trace_name, placement.start, active_end,
+                                         annotations=workunit.annotations,
+                                         terminating_flow_ids=flow_ids.get(workunit, [])))
+    if active_end < placement.end:
+        trace_writer.add_event(PerfettoEvent(tuuid, "WAITING", active_end, placement.end))
+
+
+def _log_compile_time_traces(trace_writer, dispatch, placements, flow_ids):
+    """
+    Log compile-time estimates (see _compile_placements) on their own tracks.
+
+    flow_ids maps a work unit to the flow that links its runtime slice to its compile slice.
+    """
+    if not dispatch.compile_operation_times_ns:
+        return
+
+    # --- NPU (Compile): detailed per-workunit view ---
+    compile_npu_process = trace_writer.add_process_descriptor("NPU Task Breakdown")
+
+    compile_workunits_tracks = {}
+    for workunit_type, track_names in _COMPILE_TRACK_NAMES.items():
+        for track_name in track_names:
+            tuuid = trace_writer.add_thread_descriptor(compile_npu_process, track_name)
+            compile_workunits_tracks.setdefault(workunit_type, []).append(tuuid)
+
+    for placement in placements:
+        tuuid = compile_workunits_tracks[type(placement.workunit)][placement.track_index]
+        _emit_compile_event(trace_writer, tuuid, placement, flow_ids)
+
+
+@dataclass
+class WorkUnitFlows:
+    """Flow ids that start at (outgoing) or end at (incoming) the runtime slice of one work unit."""
+    outgoing: list = field(default_factory=list)
+    incoming: list = field(default_factory=list)
+
+
+def _data_dependency_links(workunits):
+    """
+    Find (producer, consumer) pairs of work units that pass data through a buffer:
+    - a DMA In or CDMA links to each later Slice program that uses the buffer it wrote
+    - a Slice program links to each later DMA Out or CDMA that reads a buffer the slice used last
+
+    Slice programs give no read/write direction for their buffers, so Slice -> Slice links are not made.
+    Buffers are keyed with their dispatch, because each dispatch numbers its global buffers from 0
+    and a combined view has the work units of more than one dispatch.
+    """
+    last_transfer = {}  # (dispatch, buffer) -> data transfer that wrote it last
+    last_slice = {}     # (dispatch, buffer) -> Slice program that used it last
+    links = []
+
+    timed = [wu for wu in workunits if wu.start_time_ns is not None]
+    for workunit in sorted(timed, key=lambda wu: wu.start_time_ns):
+        for buffer in workunit.buffers_used:
+            key = (workunit.dispatch, buffer)
+            if key in last_transfer:
+                links.append((last_transfer[key], workunit))
+            last_slice[key] = workunit
+
+        for buffer in workunit.buffers_read:
+            key = (workunit.dispatch, buffer)
+            if key in last_slice:
+                links.append((last_slice[key], workunit))
+
+        for buffer in workunit.buffers_written:
+            key = (workunit.dispatch, buffer)
+            last_transfer[key] = workunit
+            last_slice.pop(key, None)
+
+    # A pair can share more than one buffer, keep one arrow per pair
+    return list(dict.fromkeys(links))
+
+
+def _assign_flow_ids(trace_writer, dispatch, compile_placements):
+    """
+    Choose the flow arrows of the runtime slices:
+    - data dependencies between DMA/CDMA transfers and Slice programs (see _data_dependency_links)
+    - each work unit with a compile-time slice (see _compile_placements) links to that slice
+
+    Returns the runtime flows per work unit and the compile flow id per work unit.
+    """
+    runtime_flows = {}
+    compile_flow_ids = {}
+
+    for producer, consumer in _data_dependency_links(dispatch.workunits):
+        flow_id = trace_writer.get_next_uuid()
+        runtime_flows.setdefault(producer, WorkUnitFlows()).outgoing.append(flow_id)
+        runtime_flows.setdefault(consumer, WorkUnitFlows()).incoming.append(flow_id)
+
+    for placement in compile_placements:
+        flow_id = trace_writer.get_next_uuid()
+        runtime_flows.setdefault(placement.workunit, WorkUnitFlows()).outgoing.append(flow_id)
+        compile_flow_ids[placement.workunit] = [flow_id]
+
+    return runtime_flows, compile_flow_ids
+
+
+def _emit_runtime_workunit(trace_writer, tuuid, workunit, flows):
+    """Emit the slice of one runtime work unit, plus a WAITING slice if it is ready before it releases the executor."""
+    ready_time_ns = workunit.ready_time_ns
+    active_end = ready_time_ns if ready_time_ns is not None else workunit.end_time_ns
+
+    trace_writer.add_event(PerfettoEvent(tuuid, workunit.trace_name, workunit.start_time_ns, active_end,
+                                         annotations=workunit.annotations,
+                                         flow_ids=flows.outgoing, terminating_flow_ids=flows.incoming))
+    if ready_time_ns is not None:
+        trace_writer.add_event(PerfettoEvent(tuuid, "WAITING", ready_time_ns, workunit.end_time_ns))
+
+
+# Kind of data that a DMA/CDMA source label (see torq_debug_info.buffer_label) puts in an LRAM buffer
+_LRAM_KINDS = ("const", "code", "activations")
+
+
+def _lram_buffer_kind(source_label):
+    """Group the label of a transfer source into one of _LRAM_KINDS."""
+    if source_label == "const":
+        return "const"
+    if source_label.startswith("code ") or source_label == "nss code":
+        return "code"
+    return "activations"
+
+
+def _lram_buffer_lifetimes(dispatch, lram_ranges):
+    """
+    Return {buffer: (first start, last end)} of the LRAM buffers, from the first to the last
+    work unit that touches the buffer, and {buffer: kind} from the transfer that fills it.
+    A buffer that no transfer fills is written by a slice, so it holds activations.
+    """
+    lifetimes = {}
+    kinds = {}
+
+    for workunit in dispatch.workunits:
+        if workunit.start_time_ns is None or workunit.end_time_ns is None:
             continue
 
-        # Place at runtime_start plus the scaled offset within the parent interval
-        offset_within_nss = compile_start - parent_nss_compile_start
-        event_start = parent_nss.start_time_ns + round(offset_within_nss * scale)
-        event_end = parent_nss.start_time_ns + round((offset_within_nss + compile_duration) * scale)
+        buffers = workunit.buffers_read + workunit.buffers_written + workunit.buffers_used
+        for buffer in buffers:
+            if buffer not in lram_ranges:
+                continue
+            start, end = lifetimes.get(buffer, (workunit.start_time_ns, workunit.end_time_ns))
+            lifetimes[buffer] = (min(start, workunit.start_time_ns), max(end, workunit.end_time_ns))
 
-        track_uuids = compile_workunits_tracks.get(type(workunit))
-        if track_uuids is None:
+        for buffer in workunit.buffers_written:
+            if buffer in lram_ranges and buffer not in kinds:
+                kinds[buffer] = _lram_buffer_kind(torq_debug_info.buffer_label(workunit.buffers_read[0]))
+
+    return lifetimes, {buffer: kinds.get(buffer, "activations") for buffer in lifetimes}
+
+
+def _lram_usage_steps(lifetimes, lram_ranges):
+    """
+    Return [(time, used bytes)] at each time where the set of live buffers changes.
+    Used bytes is the size of the union of the address ranges of the live buffers.
+    """
+    changes = {}
+    for buffer, (start, end) in lifetimes.items():
+        changes.setdefault(start, []).append((buffer, True))
+        changes.setdefault(end, []).append((buffer, False))
+
+    live = set()
+    steps = []
+    for time in sorted(changes):
+        for buffer, is_start in changes[time]:
+            if is_start:
+                live.add(buffer)
+            else:
+                live.discard(buffer)
+        # A buffer that starts and ends at the same time is not counted
+        used = _interval_total(merge_intervals([lram_ranges[buffer] for buffer in live]))
+        steps.append((time, used))
+    return steps
+
+
+def _lram_counter_steps(dispatch):
+    """
+    Return {counter name: [(time, used bytes)]} for one MLIR dispatch: "LRAM used" for all
+    buffers, and "LRAM <kind>" for each kind of data (see _LRAM_KINDS).
+    """
+    lram_ranges = dispatch.lram_buffer_ranges()
+    lifetimes, kinds = _lram_buffer_lifetimes(dispatch, lram_ranges)
+
+    steps = {"LRAM used": _lram_usage_steps(lifetimes, lram_ranges)}
+    for kind in _LRAM_KINDS:
+        kind_lifetimes = {buffer: span for buffer, span in lifetimes.items() if kinds[buffer] == kind}
+        steps[f"LRAM {kind}"] = _lram_usage_steps(kind_lifetimes, lram_ranges)
+    return steps
+
+
+def log_lram_usage(trace_writer, dispatch):
+    """
+    Add counter tracks with the bytes of LRAM in use over time. A combined view runs its
+    dispatches one after the other, so the steps of all dispatches are joined on one track.
+    """
+    counters = OrderedDict()
+    for part in dispatch.lram_dispatches():
+        for counter_name, steps in _lram_counter_steps(part).items():
+            counters.setdefault(counter_name, []).extend(steps)
+
+    if not any(counters.values()):
+        return
+
+    process_uuid = trace_writer.add_process_descriptor(
+        "LRAM Usage", perfetto.TrackDescriptor.ChildTracksOrdering.EXPLICIT)
+
+    for rank, (counter_name, steps) in enumerate(counters.items()):
+        peak = max((used for _, used in steps), default=0)
+        tuuid = trace_writer.add_counter_descriptor(
+            process_uuid, f"{counter_name} (peak {torq_debug_info.format_bytes(peak)})", order_rank=rank)
+        for time, used in sorted(steps):
+            trace_writer.add_counter_value(tuuid, time, used)
+
+
+# Causes of a slice stall. When units overlap during a stall, the time goes to the unit
+# with the lowest number.
+_STALL_PRIORITY = {"DMA In": 0, "CDMA": 1, "DMA Out": 2, "css": 3, "host copy": 4, "slice": 5, "nss": 6}
+
+_TRANSFER_DIRECTIONS = [
+    (DmaInWorkUnitDebugInfo, "DMA In"),
+    (CdmaWorkUnitDebugInfo, "CDMA"),
+    (DmaOutWorkUnitDebugInfo, "DMA Out"),
+]
+
+
+@dataclass
+class StallActivity:
+    """A unit that can run while a slice stalls: its active interval and how a stall shows it."""
+    start: int
+    end: int
+    name: str      # child slice name, e.g. "DMA In const 768 B"
+    kind: str      # cause, e.g. "DMA In const"
+    priority: int
+
+
+def _active_end_ns(workunit):
+    """End of the active part of a work unit: when its result is ready."""
+    return workunit.ready_time_ns if workunit.ready_time_ns is not None else workunit.end_time_ns
+
+
+def _transfer_kind(direction, trace_name):
+    """Cause of a transfer without its size, e.g. "DMA In const" or "DMA In code"."""
+    label = re.sub(r" [0-9.]+ (B|KiB|MiB)$", "", trace_name)
+    if label.startswith("code "):
+        label = "code"
+    return f"{direction} {label}"
+
+
+def _stall_activity(workunit):
+    """Return the StallActivity of a work unit, or None if the work unit is not a stall cause."""
+    start, end = workunit.start_time_ns, _active_end_ns(workunit)
+    if start is None or end is None or end <= start:
+        return None
+
+    for workunit_type, direction in _TRANSFER_DIRECTIONS:
+        if isinstance(workunit, workunit_type):
+            name = workunit.trace_name
+            return StallActivity(start, end, f"{direction} {name}", _transfer_kind(direction, name),
+                                 _STALL_PRIORITY[direction])
+
+    if isinstance(workunit, SliceProgramWorkUnitDebugInfo):
+        slice_name = f"slice {workunit.executor_instance_id}"
+        return StallActivity(start, end, f"{slice_name} {workunit.trace_name}", slice_name, _STALL_PRIORITY["slice"])
+
+    if isinstance(workunit, CssProgramWorkUnitDebugInfo):
+        return StallActivity(start, end, "css", "css", _STALL_PRIORITY["css"])
+
+    if isinstance(workunit, HostCopyWorkUnitDebugInfo):
+        return StallActivity(start, end, "host copy", "host copy", _STALL_PRIORITY["host copy"])
+
+    if isinstance(workunit, NssCfgWorkUnitDebugInfo):
+        return StallActivity(start, end, "nss", "nss", _STALL_PRIORITY["nss"])
+
+    return None
+
+
+class _ActivityIndex:
+    """Stall activities sorted by start time, to find the ones that overlap an interval."""
+
+    def __init__(self, activities):
+        self.activities = sorted(activities, key=lambda activity: activity.start)
+        self.starts = [activity.start for activity in self.activities]
+        self.max_duration = max((activity.end - activity.start for activity in self.activities), default=0)
+
+    def overlapping(self, start, end):
+        first = bisect.bisect_left(self.starts, start - self.max_duration)
+        last = bisect.bisect_left(self.starts, end)
+        return [activity for activity in self.activities[first:last] if activity.end > start]
+
+
+def _slice_gaps(dispatch, slice_id):
+    """
+    Return the stalls of one slice as [(start, end, next slice program or None)]: the time from
+    the dispatch start to the first program, between programs, and after the last program.
+    """
+    programs = [wu for wu in dispatch.workunits
+                if isinstance(wu, SliceProgramWorkUnitDebugInfo) and wu.executor_instance_id == slice_id
+                and wu.start_time_ns is not None and _active_end_ns(wu) is not None]
+    if not programs:
+        return []
+    programs.sort(key=lambda wu: wu.start_time_ns)
+
+    gaps = []
+    previous_end = dispatch.start_time_ns if dispatch.start_time_ns is not None else programs[0].start_time_ns
+    for program in programs:
+        if program.start_time_ns > previous_end:
+            gaps.append((previous_end, program.start_time_ns, program))
+        previous_end = max(previous_end, _active_end_ns(program))
+
+    if dispatch.end_time_ns is not None and dispatch.end_time_ns > previous_end:
+        gaps.append((previous_end, dispatch.end_time_ns, None))
+    return gaps
+
+
+def _stall_segments(gap_start, gap_end, activities):
+    """
+    Split a stall into segments [(start, end, name, kind)]. Each segment goes to the running
+    activity with the highest priority, or to "idle" if nothing runs. Neighbor segments with
+    the same name are joined.
+    """
+    points = {gap_start, gap_end}
+    for activity in activities:
+        points.update((max(activity.start, gap_start), min(activity.end, gap_end)))
+    points = sorted(points)
+
+    segments = []
+    for seg_start, seg_end in zip(points, points[1:]):
+        running = [a for a in activities if a.start < seg_end and a.end > seg_start]
+        if running:
+            top = min(running, key=lambda activity: activity.priority)
+            name, kind = top.name, top.kind
+        else:
+            name, kind = "idle", "idle"
+
+        if segments and segments[-1][2] == name:
+            segments[-1] = (segments[-1][0], seg_end, name, kind)
+        else:
+            segments.append((seg_start, seg_end, name, kind))
+    return segments
+
+
+def _emit_stall(trace_writer, tuuid, start, end, next_program, segments):
+    """
+    Emit one stall slice, named after the cause with the most time, and one child slice per
+    segment. The events are written in time order so that the children nest in the stall.
+    Returns the name of the stall slice.
+    """
+    time_per_kind = OrderedDict()
+    for seg_start, seg_end, _, kind in segments:
+        time_per_kind[kind] = time_per_kind.get(kind, 0) + seg_end - seg_start
+    main_kind = max(time_per_kind, key=time_per_kind.get)
+
+    annotations = {"stall ns": end - start}
+    if next_program is not None:
+        annotations["waiting slice"] = next_program.trace_name
+        annotations["location"] = next_program.annotations["location"]
+        annotations["operator"] = _operator_label(next_program)
+    annotations.update({f"{kind} ns": time for kind, time in time_per_kind.items()})
+
+    stall = PerfettoEvent(tuuid, f"stall: {main_kind}", start, end, annotations=annotations)
+    trace_writer.set_track_event(start, perfetto.TrackEvent.Type.TYPE_SLICE_BEGIN, stall)
+    for seg_start, seg_end, name, _ in segments:
+        trace_writer.add_event(PerfettoEvent(tuuid, name, seg_start, seg_end))
+    trace_writer.set_track_event(end, perfetto.TrackEvent.Type.TYPE_SLICE_END, stall)
+    return stall.function
+
+
+def log_slice_stalls(trace_writer, dispatch):
+    """
+    Add one track per slice with its stalls (see _slice_gaps). Each stall shows what runs
+    during it (see _stall_segments), so you can see which transfer a slice waits for.
+
+    Returns the stalls as [(start, end, next slice program or None, stall name)].
+    """
+    slice_ids = sorted({wu.executor_instance_id for wu in dispatch.workunits
+                        if isinstance(wu, SliceProgramWorkUnitDebugInfo)})
+    if not slice_ids:
+        return []
+
+    activities = [activity for activity in map(_stall_activity, dispatch.workunits) if activity is not None]
+    index = _ActivityIndex(activities)
+
+    process_uuid = trace_writer.add_process_descriptor(
+        "Slice Stalls", perfetto.TrackDescriptor.ChildTracksOrdering.EXPLICIT)
+
+    stalls = []
+    for rank, slice_id in enumerate(slice_ids):
+        gaps = _slice_gaps(dispatch, slice_id)
+        total = sum(end - start for start, end, _ in gaps)
+        tuuid = trace_writer.add_thread_descriptor(
+            process_uuid, f"Slice {slice_id} stalls (total {format_time_duration(total)})", order_rank=rank)
+        for start, end, next_program in gaps:
+            segments = _stall_segments(start, end, index.overlapping(start, end))
+            name = _emit_stall(trace_writer, tuuid, start, end, next_program, segments)
+            stalls.append((start, end, next_program, name))
+    return stalls
+
+
+def _operator_label(workunit):
+    """
+    Input operators of a work unit, e.g. "tosa.conv2d@L317". If the input file cannot be read,
+    the short location of the work unit, e.g. "@L317C12".
+    """
+    debug_info = workunit.dispatch.debug_info
+    try:
+        operators = debug_info.get_original_operators(workunit.location)
+    except (OSError, IndexError):
+        operators = []
+    return " ".join(operators) if operators else debug_info.pretty_print_location(workunit.location)
+
+
+def _join_overlapping(intervals):
+    """Join (start, end, name) intervals that overlap in time. A joined interval keeps the first name."""
+    joined = []
+    for start, end, name in sorted(intervals):
+        if joined and start < joined[-1][1]:
+            joined[-1] = (joined[-1][0], max(end, joined[-1][1]), joined[-1][2])
+        else:
+            joined.append((start, end, name))
+    return joined
+
+
+def log_operator_stalls(trace_writer, stalls):
+    """
+    Add one track per input operator with the stalls before its slice programs, ranked by the
+    stall time. Stalls of two slices that overlap in time are joined, and the time in the track
+    name is the joined time, so it is the length of the slices on the track.
+    """
+    stalls_per_operator = {}
+    for start, end, next_program, name in stalls:
+        if next_program is not None:
+            stalls_per_operator.setdefault(_operator_label(next_program), []).append((start, end, name))
+    if not stalls_per_operator:
+        return
+
+    joined = {label: _join_overlapping(intervals) for label, intervals in stalls_per_operator.items()}
+    totals = {label: sum(end - start for start, end, _ in intervals) for label, intervals in joined.items()}
+    ranked = sorted(totals, key=lambda label: (-totals[label], label))
+    width = max(2, len(str(len(ranked))))
+
+    process_uuid = trace_writer.add_process_descriptor(
+        "Operator Stalls", perfetto.TrackDescriptor.ChildTracksOrdering.EXPLICIT)
+    for rank, label in enumerate(ranked):
+        tuuid = trace_writer.add_thread_descriptor(
+            process_uuid, f"{rank + 1:0{width}d} {label} - {format_time_duration(totals[label])}", order_rank=rank)
+        for start, end, name in joined[label]:
+            trace_writer.add_event(PerfettoEvent(tuuid, name, start, end))
+
+
+# Operator type of the locations whose operator is not known
+_OTHER_LOCATIONS = "other locations"
+
+# Per-location metrics, in the order of the summary slice annotations
+_LOCATION_METRICS = ("SLICE", "DMA", "DMA_IN", "DMA_OUT", "CDMA", "CSS", "DMA_COMBINED", "COMPUTE_COMBINED",
+                     "DMA_ONLY", "COMPUTE_ONLY", "DMA_COMPUTE_OVERLAP")
+
+
+def _location_metrics(workunits):
+    """
+    Return the total time of a location (the union of the intervals of its timed work units,
+    see _timed_location_workunits) and its metrics ({name: ns}).
+    """
+    intervals = []
+    per_type = {"DMA_IN": [], "DMA_OUT": [], "CDMA": [], "SLICE": [], "CSS": []}
+    type_names = [(DmaInWorkUnitDebugInfo, "DMA_IN"), (DmaOutWorkUnitDebugInfo, "DMA_OUT"),
+                  (CdmaWorkUnitDebugInfo, "CDMA"), (SliceProgramWorkUnitDebugInfo, "SLICE"),
+                  (CssProgramWorkUnitDebugInfo, "CSS")]
+
+    for workunit in workunits:
+        start, end = workunit.start_time_ns, workunit.end_time_ns
+        intervals.append((start, end))
+        for workunit_type, name in type_names:
+            if isinstance(workunit, workunit_type):
+                per_type[name].append((start, end))
+
+    dma_combined = merge_intervals(per_type["DMA_IN"] + per_type["DMA_OUT"] + per_type["CDMA"])
+    compute_combined = merge_intervals(per_type["SLICE"] + per_type["CSS"])
+    merged = {name: merge_intervals(raw) for name, raw in per_type.items()}
+    merged.update({
+        "DMA": merge_intervals(per_type["DMA_IN"] + per_type["DMA_OUT"]),
+        "DMA_COMBINED": dma_combined,
+        "COMPUTE_COMBINED": compute_combined,
+        **_split_dma_compute(dma_combined, compute_combined),
+    })
+
+    metrics = {name: _interval_total(merged[name]) for name in _LOCATION_METRICS}
+    return _interval_total(merge_intervals(intervals)), metrics
+
+
+def _read_source_lines(original_locations):
+    """Read the input source lines of the locations: {file: {line number: text}}."""
+    requests = {}
+    for original_loc_info in original_locations:
+        raw_file = original_loc_info.location.file.strip('"') if original_loc_info.location.file else ""
+        if not raw_file or not os.path.isfile(raw_file):
             continue
-
         try:
-            tuuid = track_uuids[workunit.executor_instance_id]
-        except IndexError:
+            requests.setdefault(raw_file, set()).add(int(original_loc_info.location.line))
+        except ValueError:
             continue
 
-        compile_info = dispatch.get_compile_time_info(workunit.start_operation)
-        async_dur = compile_info.async_duration_ns if compile_info else None
-        if async_dur is not None:
-            async_dur = round(async_dur * scale)
-        _emit_compile_event(trace_writer, tuuid, workunit.pretty_print, event_start, event_end, async_dur,
-                            annotations=workunit.annotations)
+    source_lines = {}
+    for raw_file, requested in requests.items():
+        found = {}
+        try:
+            with open(raw_file, "r") as src_f:
+                for line_no, line in enumerate(src_f, start=1):
+                    if line_no in requested:
+                        found[line_no] = line
+                        if len(found) == len(requested):
+                            break
+        except OSError:
+            found = {}
+        source_lines[raw_file] = found
+    return source_lines
+
+
+def _location_source_line(original_loc_info, source_lines):
+    """Return (line number, text) of the input source line of a location, or None."""
+    raw_file = original_loc_info.location.file.strip('"') if original_loc_info.location.file else ""
+    try:
+        line_no = int(original_loc_info.location.line)
+    except ValueError:
+        return None
+    line = source_lines.get(raw_file, {}).get(line_no)
+    return (line_no, line) if line is not None else None
+
+
+@dataclass
+class LocationGroup:
+    """One input location in the location tracks: its label, operator type, times and work units."""
+    info: object
+    label: str          # e.g. "tosa.conv2d@L294", or "file:line:col" if the operator is not known
+    operator_type: str  # e.g. "tosa.conv2d"
+    total_ns: int
+    metrics: dict
+    workunits: list     # the work units with valid times, without NSS programs
+
+
+def _timed_location_workunits(original_loc_info):
+    """Work units of a location with valid times. NSS programs are left out, because they contain the others."""
+    return [wu for wu in original_loc_info.workunits
+            if not isinstance(wu, NssProgramWorkUnitDebugInfo)
+            and wu.start_time_ns is not None and wu.end_time_ns is not None
+            and wu.end_time_ns >= wu.start_time_ns]
+
+
+def _location_groups(dispatch):
+    """
+    Return the LocationGroup of each input location that has timed work units. In a runtime
+    profile, only the host actions have times, so most locations are left out. A location on a
+    func.func line is left out, because it is the whole function and not one operator. The
+    operator name is read with the location's own dispatch, because a combined view has no debug info.
+    """
+    source_lines = _read_source_lines(dispatch.original_locations)
+    groups = []
+    for original_loc_info in dispatch.original_locations:
+        workunits = _timed_location_workunits(original_loc_info)
+        if not workunits:
+            continue
+        source_line = _location_source_line(original_loc_info, source_lines)
+        if source_line is not None and "func.func" in source_line[1]:
+            continue
+        op_name = None
+        if source_line is not None:
+            op_name = original_loc_info.dispatch.debug_info._extract_operator(*source_line)
+        location = original_loc_info.location
+        label = op_name if op_name is not None else f"{location.file}:{location.line}:{location.col}"
+        operator_type = op_name.split("@L", 1)[0] if op_name is not None else _OTHER_LOCATIONS
+        total_ns, metrics = _location_metrics(workunits)
+        groups.append(LocationGroup(original_loc_info, label, operator_type, total_ns, metrics, workunits))
+    return groups
+
+
+def _location_workunit_track_name(workunit):
+    """Name of the work unit track in a location group, e.g. "Dma In" or "Slice Program 1"."""
+    if isinstance(workunit, SliceProgramWorkUnitDebugInfo):
+        return f"{workunit.pretty_name()} {workunit.executor_instance_id}"
+    return workunit.pretty_name()
+
+
+def _emit_location_group(trace_writer, parent_uuid, rank, group):
+    """
+    Emit the tracks of one location: a summary track with one slice per time span in which the
+    location is busy (the merged work unit intervals), with the location metrics as annotations,
+    and one track per work unit type with the work units of the location.
+    """
+    explicit = perfetto.TrackDescriptor.ChildTracksOrdering.EXPLICIT
+    location_uuid = trace_writer.add_thread_descriptor(
+        parent_uuid, f"{group.label} - {format_time_duration(group.total_ns)}", order_rank=rank,
+        child_ordering=explicit)
+
+    summary_uuid = trace_writer.add_thread_descriptor(location_uuid, "summary", order_rank=0)
+    annotations = {f"{name} ns": value for name, value in group.metrics.items() if value > 0}
+    annotations["total ns"] = group.total_ns
+    for start, end in merge_intervals([(wu.start_time_ns, wu.end_time_ns) for wu in group.workunits]):
+        trace_writer.add_event(PerfettoEvent(summary_uuid, group.label, start, end, annotations=annotations))
+
+    tracks = {}
+    for workunit in group.workunits:
+        track_name = _location_workunit_track_name(workunit)
+        if track_name not in tracks:
+            tracks[track_name] = trace_writer.add_thread_descriptor(location_uuid, track_name,
+                                                                    order_rank=len(tracks) + 1)
+        trace_writer.add_event(PerfettoEvent(tracks[track_name], workunit.trace_name, workunit.start_time_ns,
+                                             workunit.end_time_ns, annotations=workunit.annotations))
+
+
+def _log_operator_type_totals(trace_writer, dispatch, groups):
+    """Add one track per operator type with a bar of its total time, sorted by the total."""
+    operator_total_times = {}
+    for group in groups:
+        if group.operator_type != _OTHER_LOCATIONS and group.total_ns > 0:
+            operator_total_times[group.operator_type] = operator_total_times.get(group.operator_type, 0) + group.total_ns
+    if not operator_total_times:
+        return
+
+    process_uuid = trace_writer.add_process_descriptor("Operator Type Totals")
+    base_start = dispatch.start_time_ns if dispatch.start_time_ns is not None else 0
+    sorted_operator_totals = sorted(operator_total_times.items(), key=lambda item: (-item[1], item[0]))
+    width = max(2, len(str(len(sorted_operator_totals))))
+
+    for index, (operator_type, total_time_ns) in enumerate(sorted_operator_totals, start=1):
+        tuuid = trace_writer.add_thread_descriptor(process_uuid, f"{index:0{width}d} {operator_type}")
+        trace_writer.add_event(PerfettoEvent(tuuid, f"{operator_type}: {format_time_duration(total_time_ns)}",
+                                             base_start, base_start + total_time_ns, "overview"))
+
+
+def log_location_tracks(trace_writer, dispatch):
+    """
+    Add the "Compiler Input Locations" tracks, grouped as operator type -> location -> work unit
+    type. Operator types and locations are sorted by their total time, and the locations without
+    a known operator come last. Then add the operator type totals.
+    """
+    groups = _location_groups(dispatch)
+    if not groups:
+        return
+    explicit = perfetto.TrackDescriptor.ChildTracksOrdering.EXPLICIT
+
+    groups_per_type = {}
+    for group in groups:
+        groups_per_type.setdefault(group.operator_type, []).append(group)
+    type_totals = {operator_type: sum(group.total_ns for group in type_groups)
+                   for operator_type, type_groups in groups_per_type.items()}
+
+    process_uuid = trace_writer.add_process_descriptor("Compiler Input Locations", explicit)
+    ranked_types = sorted(type_totals, key=lambda name: (name == _OTHER_LOCATIONS, -type_totals[name], name))
+    for type_rank, operator_type in enumerate(ranked_types):
+        type_uuid = trace_writer.add_thread_descriptor(
+            process_uuid, f"{operator_type} - {format_time_duration(type_totals[operator_type])}",
+            order_rank=type_rank, child_ordering=explicit)
+        type_groups = sorted(groups_per_type[operator_type], key=lambda group: (-group.total_ns, group.label))
+        for rank, group in enumerate(type_groups):
+            _emit_location_group(trace_writer, type_uuid, rank, group)
+
+    _log_operator_type_totals(trace_writer, dispatch, groups)
+
 
 def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
     """
@@ -999,6 +1592,9 @@ def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
     
     for busy_track in busy_tracks:
         busy_track.uuid = trace_writer.add_thread_descriptor(busy_track_process, busy_track.thread_name)
+
+    compile_placements = _compile_placements(dispatch)
+    runtime_flows, compile_flow_ids = _assign_flow_ids(trace_writer, dispatch, compile_placements)
     
     # create an event for each workunit on the appropriate track with detailed information
     for workunit in dispatch.workunits:
@@ -1015,27 +1611,11 @@ def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
             # Unsupported executor instance - skip
             continue
 
-        start_time_ns = workunit.start_time_ns
-        end_time_ns = workunit.end_time_ns
-        duration_ns = workunit.total_time_ns
-
         # workunit with invalid timing - skip
-        if duration_ns is None:
+        if workunit.total_time_ns is None:
             continue
 
-        # create label for event                
-        details = workunit.pretty_print
-
-        ready_time_ns = workunit.ready_time_ns
-
-        if ready_time_ns is not None:
-            event = PerfettoEvent(tuuid, details, start_time_ns, ready_time_ns, annotations=workunit.annotations)
-            trace_writer.add_event(event)
-            event = PerfettoEvent(tuuid, "WAITING", ready_time_ns, end_time_ns)
-            trace_writer.add_event(event)
-        else:
-            event = PerfettoEvent(tuuid, details, start_time_ns, end_time_ns, annotations=workunit.annotations)
-            trace_writer.add_event(event)
+        _emit_runtime_workunit(trace_writer, tuuid, workunit, runtime_flows.get(workunit, WorkUnitFlows()))
 
         # if this is a NSS program workunit, also log events on the busy tracks for each hardware component used
         # during this workunit's execution
@@ -1051,232 +1631,46 @@ def log_runtime_profile_data(trace_writer, dispatch: DispatchDebugInfo):
 
                 # if it busy add an event to the corresponding busy track for the entire duration of the workunit
                 if usage_attr:                    
-                    busy_event = PerfettoEvent(busy_track.uuid, details, start_time_ns, end_time_ns)
+                    busy_event = PerfettoEvent(busy_track.uuid, workunit.trace_name,
+                                               workunit.start_time_ns, workunit.end_time_ns)
                     trace_writer.add_event(busy_event)
 
-    _log_compile_time_traces(trace_writer, dispatch)
+    _log_compile_time_traces(trace_writer, dispatch, compile_placements, compile_flow_ids)
 
-    original_lines_process = trace_writer.add_process_descriptor("Compiler Input Locations")
+    log_lram_usage(trace_writer, dispatch)
 
-    # Compute total time per original location as the union of contributing intervals
-    location_total_times = {}
-    location_union_metrics = {}
-    operator_total_times = {}
+    stalls = log_slice_stalls(trace_writer, dispatch)
 
-    for original_loc_info in dispatch.original_locations:
-        intervals = []
-        dma_intervals = []
-        dma_in_intervals = []
-        dma_out_intervals = []
-        cdma_intervals = []
-        slice_intervals = []
-        css_intervals = []
+    log_operator_stalls(trace_writer, stalls)
 
-        for workunit in original_loc_info.workunits:
-            # Skip NssProgramWorkUnitDebugInfo as its not needed for the location time calculation
-            if isinstance(workunit, NssProgramWorkUnitDebugInfo):
-                continue
-            start_time_ns = workunit.start_time_ns
-            end_time_ns = workunit.end_time_ns
-            if start_time_ns is None or end_time_ns is None:
-                continue
-            if end_time_ns < start_time_ns:
-                continue
-
-            interval = (start_time_ns, end_time_ns)
-            intervals.append(interval)
-
-            if isinstance(workunit, DmaOutWorkUnitDebugInfo) or isinstance(workunit, DmaInWorkUnitDebugInfo):
-                dma_intervals.append(interval)
-                if isinstance(workunit, DmaInWorkUnitDebugInfo):
-                    dma_in_intervals.append(interval)
-                else:
-                    dma_out_intervals.append(interval)
-            elif isinstance(workunit, SliceProgramWorkUnitDebugInfo):
-                slice_intervals.append(interval)
-            elif isinstance(workunit, CdmaWorkUnitDebugInfo):
-                cdma_intervals.append(interval)
-            elif isinstance(workunit, CssProgramWorkUnitDebugInfo):
-                css_intervals.append(interval)
-
-        merged_intervals = merge_intervals(intervals)
-        total_ns = sum(end_time_ns - start_time_ns for start_time_ns, end_time_ns in merged_intervals)
-
-        merged_dma = merge_intervals(dma_intervals)
-        merged_dma_in = merge_intervals(dma_in_intervals)
-        merged_dma_out = merge_intervals(dma_out_intervals)
-        merged_cdma = merge_intervals(cdma_intervals)
-        merged_slice = merge_intervals(slice_intervals)
-        merged_css = merge_intervals(css_intervals)
-        merged_dma_combined = merge_intervals(dma_intervals + cdma_intervals)
-        merged_compute_combined = merge_intervals(slice_intervals + css_intervals)
-        dma_only_intervals = subtract_intervals(merged_dma_combined, merged_compute_combined)
-        compute_only_intervals = subtract_intervals(merged_compute_combined, merged_dma_combined)
-        overlap_intervals = intersect_intervals(merged_dma_combined, merged_compute_combined)
-
-        loc_key = f"{original_loc_info.location.file}:{original_loc_info.location.line}:{original_loc_info.location.col}"
-        location_total_times[loc_key] = total_ns
-        location_union_metrics[loc_key] = {
-            'TOTAL': total_ns,
-            'DMA': sum(end - start for start, end in merged_dma),
-            'DMA_IN': sum(end - start for start, end in merged_dma_in),
-            'DMA_OUT': sum(end - start for start, end in merged_dma_out),
-            'CDMA': sum(end - start for start, end in merged_cdma),
-            'SLICE': sum(end - start for start, end in merged_slice),
-            'CSS': sum(end - start for start, end in merged_css),
-            'DMA_COMBINED': sum(end - start for start, end in merged_dma_combined),
-            'COMPUTE_COMBINED': sum(end - start for start, end in merged_compute_combined),
-            'DMA_ONLY': sum(end - start for start, end in dma_only_intervals),
-            'COMPUTE_ONLY': sum(end - start for start, end in compute_only_intervals),
-            'DMA_COMPUTE_OVERLAP': sum(end - start for start, end in overlap_intervals),
-        }
-
-    source_line_requests = {}
-    for original_loc_info in dispatch.original_locations:
-        raw_file = original_loc_info.location.file.strip('"') if original_loc_info.location.file else ""
-        if not raw_file or not os.path.isfile(raw_file):
-            continue
-        try:
-            line_no = int(original_loc_info.location.line)
-        except Exception:
-            continue
-        source_line_requests.setdefault(raw_file, set()).add(line_no)
-
-    source_line_cache = {}
-    for raw_file, requested_lines in source_line_requests.items():
-        requested_lines = set(requested_lines)
-        found_lines = {}
-        try:
-            with open(raw_file, "r") as src_f:
-                for current_line_no, line in enumerate(src_f, start=1):
-                    if current_line_no in requested_lines:
-                        found_lines[current_line_no] = line
-                        if len(found_lines) == len(requested_lines):
-                            break
-        except Exception:
-            found_lines = {}
-        source_line_cache[raw_file] = found_lines
-
-    for original_loc_info in dispatch.original_locations:
-
-        original_line_desc = f"{original_loc_info.location.file}:{original_loc_info.location.line}:{original_loc_info.location.col}"        
-
-        # we create a new track for each workunit type so that we can have overlapping
-        # slices. Perfetto will group all these tracks that have the same name.
-        workunits_tracks = {}
-
-        # Extract the operator name from the original MLIR source file at the given line
-        op_name = None
-        raw_file = original_loc_info.location.file.strip('"') if original_loc_info.location.file else ""
-        if raw_file and os.path.isfile(raw_file):
-            try:
-                line_no = int(original_loc_info.location.line)
-                line = source_line_cache.get(raw_file, {}).get(line_no)
-                if line is not None:
-                    op_name = dispatch.debug_info._extract_operator(line_no, line)
-            except Exception:
-                pass
-        if op_name is not None:
-            # If op name has func.func then ignore that one and continue next loop
-            if "func.func" in op_name:
-                continue
-
-        # Use op_name as the track label if available, otherwise fall back to file:line:col
-        track_label = op_name if op_name is not None else original_line_desc
-
-        # Append total time for this original location to the track label for easier identification in Perfetto UI
-        total_time_ns = location_total_times.get(original_line_desc)
-        if total_time_ns is not None:
-            track_label += f" - {format_time_duration(total_time_ns)}"
-            if op_name is not None:
-                operator_type = op_name.split("@L", 1)[0]
-                operator_total_times[operator_type] = operator_total_times.get(operator_type, 0) + total_time_ns
-
-        location_metrics = location_union_metrics.get(original_line_desc)
-        if location_metrics is not None:
-            metric_parts = []
-            for metric_name in (
-                "SLICE",
-                "DMA",
-                "DMA_IN",
-                "DMA_OUT",
-                "CDMA",
-                "CSS",
-                "DMA_COMBINED",
-                "COMPUTE_COMBINED",
-                "DMA_ONLY",
-                "COMPUTE_ONLY",
-                "DMA_COMPUTE_OVERLAP",
-            ):
-                metric_value = location_metrics.get(metric_name, 0)
-                if metric_value > 0:
-                    metric_parts.append(f"{metric_name}: {format_time_duration(metric_value)}")
-            if metric_parts:
-                track_label += " \n " + " \n ".join(metric_parts)
-
-        for workunit in original_loc_info.workunits:
-            if isinstance(workunit, NssProgramWorkUnitDebugInfo):
-                continue
-
-            details = workunit.pretty_print
-            start_time_ns = workunit.start_time_ns
-            end_time_ns = workunit.end_time_ns
-
-            if start_time_ns is None or end_time_ns is None:
-                continue
-
-            workunit_track = workunits_tracks.get(type(workunit))
-
-            if workunit_track is None:
-                workunit_track = trace_writer.add_thread_descriptor(original_lines_process, track_label)
-                workunits_tracks[type(workunit)] = workunit_track
-            
-            event = PerfettoEvent(workunit_track, details, start_time_ns, end_time_ns, correlation_id=type(workunit).__name__, annotations=workunit.annotations)
-            trace_writer.add_event(event)
-
-    if operator_total_times:
-        process_uuid = trace_writer.add_process_descriptor("Operator Type Totals")
-        base_start = dispatch.start_time_ns if dispatch.start_time_ns is not None else 0
-        sorted_operator_totals = sorted(operator_total_times.items(), key=lambda item: (-item[1], item[0]))
-        width = max(2, len(str(len(sorted_operator_totals))))
-
-        for index, (operator_type, total_time_ns) in enumerate(sorted_operator_totals, start=1):
-            if total_time_ns <= 0:
-                continue
-
-            thread_name = f"{index:0{width}d} {operator_type}"
-            tuuid = trace_writer.add_thread_descriptor(process_uuid, thread_name)
-            event = PerfettoEvent(
-                tuuid,
-                f"{operator_type}: {format_time_duration(total_time_ns)}",
-                base_start,
-                base_start + total_time_ns,
-                "overview",
-            )
-            trace_writer.add_event(event)
-        
+    log_location_tracks(trace_writer, dispatch)
 
 
-def render_overview_tracks(view_name, overall_start, metrics, trace_writer):
+def render_overview_tracks(view_name, overview_data, trace_writer):
     """
-    Render summary overview tracks showing total DMA, SLICE, IDLE time.
-    
-    Creates a separate process with overview tracks in fixed order.
+    Render one overview track per metric (DMA, SLICE, IDLE, ...).
+
+    The track name holds the metric total. The slices on the track are the real
+    intervals of the metric, so you can see where in the timeline the hardware
+    is idle, only moves data or only computes.
     """
-    process_uuid= trace_writer.add_process_descriptor(f"{view_name} Overview")
+    process_uuid = trace_writer.add_process_descriptor(
+        f"{view_name} Overview", perfetto.TrackDescriptor.ChildTracksOrdering.EXPLICIT)
 
-    base_start = overall_start if overall_start is not None else 0
-        
-    overview_tracks = [(m.perfetto_thread_name, m.perfetto_label, metrics.get(m.perfetto_name[0], {m.perfetto_name[1]: 0})) 
-                        for m in _METRICS if m.perfetto_thread_name is not None]
-    
-    overview_tracks = sorted(overview_tracks, key=lambda x: x[0])
+    metrics = overview_data['metrics']
+    intervals = overview_data['intervals']
 
-    for thread_name, label, metric in overview_tracks:
-        tuuid = trace_writer.add_thread_descriptor(process_uuid, thread_name)
-        perfetto_event = create_overview_event(tuuid, label, metric, base_start)
-        if perfetto_event:
-            trace_writer.add_event(perfetto_event)
+    overview_metrics = sorted((m for m in _METRICS if m.perfetto_thread_name is not None),
+                              key=lambda m: m.perfetto_thread_name)
+
+    for rank, m in enumerate(overview_metrics):
+        metric_name = m.perfetto_name[0]
+        metric = metrics.get(metric_name, {m.perfetto_name[1]: 0})
+        thread_name = f"{m.perfetto_thread_name} | {format_overview_summary(m.perfetto_label, metric)}"
+        tuuid = trace_writer.add_thread_descriptor(process_uuid, thread_name, order_rank=rank)
+
+        for start, end in intervals.get(metric_name, []):
+            trace_writer.add_event(PerfettoEvent(tuuid, m.perfetto_label, start, end, "overview"))
 
 
 def get_dashboard_metrics():
@@ -1334,8 +1728,7 @@ def convert_to_perfetto(debug_dir, pb_path, frequency_mhz, view_name="Compile Pr
 
             overview_data = compute_compile_metrics(dispatch)
             
-            render_overview_tracks(view_name, overview_data['overall_start'], 
-                                overview_data['metrics'], trace_writer)
+            render_overview_tracks(view_name, overview_data, trace_writer)
 
         finally:        
             trace_writer.close()

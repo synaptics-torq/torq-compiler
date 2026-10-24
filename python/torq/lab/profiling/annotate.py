@@ -122,7 +122,7 @@ def _write_perfetto_trace(debug_info: BaseDispatchDebugInfo, perfetto_file: str)
 
     # Compute Metrics and Render Overview
     metrics_result = perfetto.compute_runtime_metrics(debug_info)
-    perfetto.render_overview_tracks("Host Profile", metrics_result['overall_start'], metrics_result['metrics'], trace_writer)
+    perfetto.render_overview_tracks("Host Profile", metrics_result, trace_writer)
 
     trace_writer.close()
     logger.debug(f"Perfetto trace complete: {perfetto_file}")
