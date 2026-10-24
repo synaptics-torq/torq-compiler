@@ -76,20 +76,21 @@ static bool is1DPooling(llvm::ArrayRef<int64_t> kernels, llvm::ArrayRef<int64_t>
 /// Look for a downstream linalg.generic that performs an elementwise mulf or divf
 /// by a constant. If found, return the constant scale value and the generic op.
 /// For divf, the scale is the reciprocal of the divisor.
-static std::pair<float, linalg::GenericOp> tryExtractFusedScale(Value output) {
+// The scale is a double so that it is rounded only once, to the weight type.
+static std::pair<double, linalg::GenericOp> tryExtractFusedScale(Value output) {
     auto genericOp = getSingleUser<linalg::GenericOp>(output);
     if (!genericOp || genericOp.getNumDpsInputs() != 1 || genericOp.getNumDpsInits() != 1 ||
         genericOp.getNumReductionLoops() != 0)
-        return {1.0f, nullptr};
+        return {1.0, nullptr};
 
     auto yieldOp = dyn_cast<linalg::YieldOp>(genericOp.getBody()->getTerminator());
     if (!yieldOp || yieldOp.getNumOperands() != 1)
-        return {1.0f, nullptr};
+        return {1.0, nullptr};
 
     auto mulOp = dyn_cast<arith::MulFOp>(yieldOp.getOperand(0).getDefiningOp());
     auto divOp = dyn_cast<arith::DivFOp>(yieldOp.getOperand(0).getDefiningOp());
     if (!mulOp && !divOp)
-        return {1.0f, nullptr};
+        return {1.0, nullptr};
 
     Value lhs = mulOp ? mulOp.getLhs() : divOp.getLhs();
     Value rhs = mulOp ? mulOp.getRhs() : divOp.getRhs();
@@ -106,17 +107,17 @@ static std::pair<float, linalg::GenericOp> tryExtractFusedScale(Value output) {
         constOp = lhs.getDefiningOp<arith::ConstantOp>();
 
     if (!constOp)
-        return {1.0f, nullptr};
+        return {1.0, nullptr};
 
     auto floatAttr = dyn_cast<FloatAttr>(constOp.getValue());
     if (!floatAttr)
-        return {1.0f, nullptr};
+        return {1.0, nullptr};
 
-    float value = floatAttr.getValueAsDouble();
+    double value = floatAttr.getValueAsDouble();
     if (divOp) {
-        if (value == 0.0f)
-            return {1.0f, nullptr};
-        value = 1.0f / value;
+        if (value == 0.0)
+            return {1.0, nullptr};
+        value = 1.0 / value;
     }
     return {value, genericOp};
 }
@@ -445,9 +446,10 @@ struct PoolingNchwSumOpConversion : public OpRewritePattern<linalg::PoolingNchwS
             shiftFactor = scInfo.scaleShift;
         }
         else {
-            const llvm::fltSemantics &bf16sem = APFloat::BFloat();
+            // Round the scale to bf16 once. A decimal string with six digits would lose
+            // most of the precision of 1 / N for a large N.
             std::vector<llvm::APFloat> weightsData(
-                1, llvm::APFloat(bf16sem, std::to_string(scaleValue))
+                1, *convertFloatToType(APFloat(scaleValue), rewriter.getBF16Type())
             );
             weights = createConst(weightsData, rewriter, loc);
             std::vector<float> biasScaleData{0.0f};

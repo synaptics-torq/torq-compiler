@@ -66,7 +66,8 @@ struct ReduceMeanPattern : public OpRewritePattern<linalg::GenericOp> {
         // check for divf or mulf
         auto divFOp = dyn_cast_or_null<arith::DivFOp>(yieldOp.getValues()[0].getDefiningOp());
         auto mulFOp = dyn_cast_or_null<arith::MulFOp>(yieldOp.getValues()[0].getDefiningOp());
-        float meanValue;
+        // Keep the scale in double so that it is rounded only once, to bf16.
+        double meanValue;
         if (divFOp) {
             if (!isa<BlockArgument>(divFOp.getLhs())) {
                 return rewriter.notifyMatchFailure(srcOp, "Div lhs must be block arg");
@@ -88,7 +89,7 @@ struct ReduceMeanPattern : public OpRewritePattern<linalg::GenericOp> {
             }
 
             // Scale = 1 / meanConst for mean calculation
-            meanValue = 1.0f / divConst;
+            meanValue = 1.0 / divConst;
         }
         else if (mulFOp) {
             if (!isa<BlockArgument>(mulFOp.getLhs())) {
@@ -179,8 +180,11 @@ struct ReduceMeanPattern : public OpRewritePattern<linalg::GenericOp> {
         Permutation dataPerm(permVec.begin(), permVec.end());
         input = transposeValue(input, dataPerm, loc, rewriter);
 
-        const llvm::fltSemantics &bf16 = APFloat::BFloat();
-        std::vector<llvm::APFloat> weightsData(1, llvm::APFloat(bf16, std::to_string(meanValue)));
+        // Round the scale to bf16 once. A decimal string with six digits would lose most of
+        // the precision of 1 / N for a large N.
+        std::vector<llvm::APFloat> weightsData(
+            1, *convertFloatToType(APFloat(meanValue), rewriter.getBF16Type())
+        );
         auto weights = createConst(weightsData, rewriter, srcOp.getLoc());
 
         std::vector<float> biasScaleData{0.0};
@@ -392,8 +396,11 @@ struct ReduceMeanConvert : public OpRewritePattern<linalg::GenericOp> {
         }
 
         // Scale = 1/reducedDimSize for mean calculation (e.g., 1/288 = 0.003472)
-        const llvm::fltSemantics &bf16 = APFloat::BFloat();
-        std::vector<llvm::APFloat> weightsData(1, llvm::APFloat(bf16, std::to_string(meanValue)));
+        // Round the scale to bf16 once. A decimal string with six digits would lose most of
+        // the precision of 1 / N for a large N.
+        std::vector<llvm::APFloat> weightsData(
+            1, *convertFloatToType(APFloat(meanValue), rewriter.getBF16Type())
+        );
         auto weights = createConst(weightsData, rewriter, loc);
 
         // Create f32 bias tensor
