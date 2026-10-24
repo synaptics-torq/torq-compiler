@@ -55,6 +55,24 @@ static Value emitTruncfToBF16(PatternRewriter &rewriter, Location loc, Value val
     return generic.getResult(0);
 }
 
+// True when `op` is an elementwise f32 -> bf16 truncf of its only input and does
+// nothing else (a fused clamp + truncf, for example, is not).
+static bool isPlainTruncfF32ToBF16(linalg::GenericOp op) {
+    if (op.getNumDpsInputs() != 1 || op.getNumResults() != 1 ||
+        op.getNumParallelLoops() != op.getNumLoops() ||
+        !llvm::all_of(op.getIndexingMapsArray(), [](AffineMap m) { return m.isIdentity(); })) {
+        return false;
+    }
+    Block &body = op.getRegion().front();
+    if (body.getOperations().size() != 2) {
+        return false;
+    }
+    auto truncf = dyn_cast<arith::TruncFOp>(&body.front());
+    return truncf && truncf.getIn() == body.getArgument(0) && truncf.getType().isBF16() &&
+           truncf.getIn().getType().isF32() &&
+           body.getTerminator()->getOperand(0) == truncf.getResult();
+}
+
 // Emit the im2col unfold ([Ow, C*Kw]) as an affine-map linalg.generic marked torq.im2col.
 // Used when the NDL im2col op is too large to stay LRAM-resident: MarkHostExecutorPass routes
 // the marked generic to the host (torq_hl.im2col is not tileable).
@@ -453,19 +471,14 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
         // if convOp has only one use
         if (conv1dResult.hasOneUse()) {
             auto userOp = conv1dResult.use_begin()->getOwner();
-            if (auto genericOp = llvm::dyn_cast<linalg::GenericOp>(userOp)) {
-
-                if (genericOp.getNumResults() == 1 &&
-                    dyn_cast<RankedTensorType>(genericOp.getResult(0).getType())
-                        .getElementType()
-                        .isBF16() &&
-                    dyn_cast<RankedTensorType>(conv1dResult.getType()).getElementType().isF32()) {
-
-                    // Re-emit the conv1d's f32->bf16 truncf on the new conv2d result; the
-                    // original generic is dropped below once the collapse is wired up.
-                    currentResult = emitTruncfToBF16(rewriter, loc, conv2dResult);
-                    truncfGenericOp = genericOp;
-                }
+            // Only a plain truncf is re-emitted; any other user (e.g. a clamp fused
+            // with the truncf) keeps reading the collapsed conv2d result.
+            auto genericOp = llvm::dyn_cast<linalg::GenericOp>(userOp);
+            if (genericOp && isPlainTruncfF32ToBF16(genericOp)) {
+                // Re-emit the conv1d's f32->bf16 truncf on the new conv2d result; the
+                // original generic is dropped below once the collapse is wired up.
+                currentResult = emitTruncfToBF16(rewriter, loc, conv2dResult);
+                truncfGenericOp = genericOp;
             }
         }
 

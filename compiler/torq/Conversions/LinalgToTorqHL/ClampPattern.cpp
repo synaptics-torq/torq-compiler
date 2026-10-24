@@ -125,9 +125,8 @@ struct ClampOpConversion : public OpRewritePattern<linalg::GenericOp> {
             auto resultTy = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
             rewriter.replaceOpWithNewOp<torq_hl::ActOp>(
                 srcOp, resultTy, createInitTensor(srcOp, rewriter, resultTy), "clamp", 0, 0,
-                clampInfo.minInt, clampInfo.maxInt,
-                APFloat(llvm::APFloat::IEEEsingle(), std::to_string(clampInfo.minFloat)),
-                APFloat(llvm::APFloat::IEEEsingle(), std::to_string(clampInfo.maxFloat)), input,
+                clampInfo.minInt, clampInfo.maxInt, APFloat(clampInfo.minFloat),
+                APFloat(clampInfo.maxFloat), input,
                 /*weights=*/mlir::Value()
             );
             return success();
@@ -168,9 +167,8 @@ struct ClampOpConversion : public OpRewritePattern<linalg::GenericOp> {
         auto srcResultTy = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
         auto actOp = torq_hl::ActOp::create(
             rewriter, srcOp.getLoc(), srcResultTy, createInitTensor(srcOp, rewriter, srcResultTy),
-            "clamp", 0, scInfo.zp, clampInfo.minInt, clampInfo.maxInt,
-            APFloat(llvm::APFloat::IEEEsingle(), std::to_string(clampInfo.minFloat)),
-            APFloat(llvm::APFloat::IEEEsingle(), std::to_string(clampInfo.maxFloat)), input,
+            "clamp", 0, scInfo.zp, clampInfo.minInt, clampInfo.maxInt, APFloat(clampInfo.minFloat),
+            APFloat(clampInfo.maxFloat), input,
             /*weights=*/mlir::Value()
         );
         rewriter.replaceOp(output.getDefiningOp(), actOp.getResult(0));
