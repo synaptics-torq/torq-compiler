@@ -68,6 +68,10 @@ class VirtualObject {
 
     void addAlias(VirtualAlias *alias) { aliases_.push_back(alias); }
 
+    // Re-create the object if it is a swapped-out alias; a buffer is re-created
+    // only by its scheduled swap, so a swapped-out buffer is left as is.
+    virtual void materialize(IRRewriter &rewriter) {}
+
     virtual VirtualBuffer &root() = 0;
 };
 
@@ -136,7 +140,19 @@ class VirtualAlias : public VirtualObject {
         invalidateAliases();
     }
 
+    void materialize(IRRewriter &rewriter) override {
+        if (isSwappedOut()) {
+            swapIn(rewriter);
+        }
+    }
+
     void swapIn(IRRewriter &rewriter) {
+        // A view of a view: an intermediate view is re-created only where it is
+        // directly used as an operand, and the plan tracks the root buffer's
+        // residency, not the intermediate views'. Re-create the parent chain
+        // down to the buffer the plan keeps resident here; the clones land at
+        // the same insertion point, parents first.
+        parent_.materialize(rewriter);
         if (parent_.isSwappedOut()) {
             llvm::report_fatal_error("LRAM plan: a view is used while its buffer is swapped out");
         }

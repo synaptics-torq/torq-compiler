@@ -78,6 +78,17 @@ def case_config(request, runtime_hw_type, chip_config):
   if "full_model_efficientnetb0" in request.param.name.lower():
     extra_args["comparison_config"] = "comparison_config_for_efficientnetb0"
 
+  if request.param.name.lower() == "layer_resnet50_conv3_block1_3_conv" and chip_config.data.get("target") == "SL2610":
+    # Tiling this layer splits the large conv inputs into 64-element chunks
+    # addressed through chained subviews; the buffer then no longer fits
+    # alongside its neighbors, so the LRAM plan swaps it out and back in.
+    # Regression for the fatal "LRAM plan: a view is used while its buffer is
+    # swapped out" (synaptics-torq/torq-compiler-dev#2697).
+    extra_args["torq_compiler_options"] = [
+        "--torq-hl-tile-input-size-threshold=40000",
+        "--torq-hl-tile-dim-size=64",
+    ]
+
   aws_fpga = (runtime_hw_type.data == "aws_fpga")
   if aws_fpga:
     # Only run full model tests on AWS FPGA
