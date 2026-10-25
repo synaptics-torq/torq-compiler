@@ -6,6 +6,7 @@
 
 #include "Patterns.h"
 
+#include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/Kernel.h"
 #include "torq/Utils/TorqUtils.h"
 
@@ -47,7 +48,20 @@ Avgpool2DPattern::transform(torq_hl::AvgPool2DOp op, PatternRewriter &rewriter) 
     const uint32_t blockSize = slice.alu.iWidth(inputDType, weightDType);
 
     uint32_t blockCount = div_ceil(input_channel, blockSize);
-    uint32_t frameSizeStride = input_channel;
+
+    // The input can be strided (e.g. a block transpose pads its output rows): read each frame
+    // position at the stride of the last frame dim. The channels and the frame dims must be
+    // contiguous so that the frame is a single dimension.
+    SmallVector<int64_t> strides = getEncodedStridesElements(input_type);
+    int rank = input_shape.size();
+    bool contiguous = strides[rank - 1] == 1;
+    for (int i = 1; i < rank - 2 && contiguous; i++) {
+        contiguous = strides[i] == strides[i + 1] * input_shape[i + 1];
+    }
+    if (!contiguous) {
+        return op.emitError("avgpool input channels and frame dims must be contiguous");
+    }
+    uint32_t frameSizeStride = rank > 2 ? strides[rank - 2] : input_channel;
 
     // input memory read address when we do loop
     LData input({{frame_size, frameSizeStride}, blockCount, blockSize}, inputDType);

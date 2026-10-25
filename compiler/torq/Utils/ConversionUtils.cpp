@@ -445,76 +445,49 @@ const Permutation &Permutation::none() {
     return perm;
 }
 
-bool supportedByOptimizedTranspose(const ArrayRef<int64_t> &perm) {
-#define TORQ_ALWAYS_USE_EK_TRANSPOSE true
-#if TORQ_ALWAYS_USE_EK_TRANSPOSE
-    // Always use EK (currently unoptimized) transpose for all cases
-    // This can bring a 2x performance penalty in some cases but avoids all issues
-    // related to the need to align input and output tensors
-    return false;
-#endif
-    return perm.size() < 6;
-}
-
-void identifyTransposeDim(
-    torq_hl::TransposeOp op, llvm::ArrayRef<int64_t> out_shape, int32_t &transposeDim,
-    int32_t &leftDim, int32_t &rightDim
-) {
-    ArrayRef<int64_t> perm = op.getPerm();
-
-    int rank = out_shape.size();
-    if (rank < 2) {
-        llvm::report_fatal_error("Transpose rank must be at least 2", true);
-        return;
+bool isGroupSwapTranspose(ArrayRef<int64_t> perm, int &batchDims, int &rowDims) {
+    int rank = perm.size();
+    int l = 0;
+    while (l < rank && perm[l] == l) {
+        l++;
     }
-
-    int idx = 0;
-    int i = 0;
-
-    // Splitting the total dimensions into 3 parts
-    // * transpose_dim is either a single dimension or a set of sequential
-    // dimension that is going to be moved to last
-    // * left_dim is that which is left of the tranpose dim and is sequential
-    // * right_dim is that which is the right of the transpose dim and is
-    // sequential
-    while (i < perm.size()) {
-        if (perm[i] != idx) {
-            if (perm[i] == idx + 1) { // perm:(1, 2, 0), (0, 2, 1), (1, 2, 3, 0),
-                // (0, 2, 3, 1), (0, 1, 3, 2) -> the dimension after batch is send
-                // to last. Extended to more dim 0, 1, 3, 4, 2
-                transposeDim = idx + 1;
-            }
-            else { // perm: (2, 0, 1), (3, 0, 1, 2), (0, 3, 1, 2), (0, 1, 3, 2)
-                // -> the dimension is send to first after batch. Extended to more
-                // dim 0, 1, 4, 2, 3
-                transposeDim = perm[i];
-            }
-            leftDim = idx - 1;
-            rightDim = idx;
-            break;
+    if (l == rank) {
+        // Identity permutation
+        return false;
+    }
+    int r = perm[l] - l;
+    int c = rank - l - r;
+    if (r < 1 || c < 1) {
+        return false;
+    }
+    for (int i = 0; i < c; i++) {
+        if (perm[l + i] != l + r + i) {
+            return false;
         }
-        i++;
-        idx++;
     }
+    for (int i = 0; i < r; i++) {
+        if (perm[l + c + i] != l + i) {
+            return false;
+        }
+    }
+    batchDims = l;
+    rowDims = r;
+    return true;
 }
 
-void groupContinuousDim(
-    llvm::ArrayRef<int64_t> inputShape, int32_t &leftDim, int32_t &transposeDim, int32_t &rightDim,
-    int32_t &leftDimSize, int32_t &transposeDimSize, int32_t &rightDimSize
+bool useBlockTranspose(
+    ArrayRef<int64_t> perm, ArrayRef<int64_t> inputShape, int elementSize, int &batchDims,
+    int &rowDims
 ) {
-
-    leftDimSize = 1;
-    for (int i = 0; i < leftDim + 1; ++i) {
-        leftDimSize *= inputShape[i];
+    if (!isGroupSwapTranspose(perm, batchDims, rowDims) || elementSize > 2) {
+        return false;
     }
-    transposeDimSize = 1;
-    for (int i = transposeDim; i < inputShape.size(); ++i) {
-        transposeDimSize *= inputShape[i];
+    int64_t inRows = 1; // product of the first group of swapped dims
+    int64_t inCols = 1; // product of the second group of swapped dims
+    for (int i = batchDims; i < (int)inputShape.size(); i++) {
+        (i < batchDims + rowDims ? inRows : inCols) *= inputShape[i];
     }
-    rightDimSize = 1;
-    for (int i = rightDim; i < transposeDim; ++i) {
-        rightDimSize *= inputShape[i];
-    }
+    return inRows >= 32 && inCols >= 32;
 }
 
 // Groups the given dimensions that are continuous

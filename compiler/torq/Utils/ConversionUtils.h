@@ -393,16 +393,21 @@ struct Permutation : SmallVector<int64_t> {
     static const Permutation &none();
 };
 
-bool supportedByOptimizedTranspose(const ArrayRef<int64_t> &perm);
+// Check if a transpose permutation keeps the first batchDims dimensions in place and swaps the two
+// groups of adjacent dimensions that follow: perm = [0, .., L-1, L+R, .., rank-1, L, .., L+R-1]
+// with L = batchDims and R = rowDims. Such a transpose is a 2D transpose of a
+// (rows, cols) matrix, rows being the first group (R dimensions) and cols the second one.
+// For example NCHW -> NHWC (perm [0, 2, 3, 1]) has batchDims = 1 and rowDims = 1 (C),
+// NHWC -> NCHW (perm [0, 3, 1, 2]) has batchDims = 1 and rowDims = 2 (H, W).
+bool isGroupSwapTranspose(ArrayRef<int64_t> perm, int &batchDims, int &rowDims);
 
-void identifyTransposeDim(
-    torq_hl::TransposeOp op, llvm::ArrayRef<int64_t> out_shape, int32_t &transposeDim,
-    int32_t &leftDim, int32_t &rightDim
-);
-
-void groupContinuousDim(
-    llvm::ArrayRef<int64_t> inputShape, int32_t &leftDim, int32_t &transposeDim, int32_t &rightDim,
-    int32_t &leftDimSize, int32_t &transposeDimSize, int32_t &rightDimSize
+// Whether a transpose of an input of the given shape and element size is lowered with the block
+// transpose (TransposePattern.cpp, which uses the generalized transpose for the rows and cols that
+// don't fill a block): for group-swap permutations of 8 and 16-bit elements with at least 32 rows
+// and cols.
+bool useBlockTranspose(
+    ArrayRef<int64_t> perm, ArrayRef<int64_t> inputShape, int elementSize, int &batchDims,
+    int &rowDims
 );
 
 struct ShapeStrideTuple {
