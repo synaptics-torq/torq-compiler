@@ -54,6 +54,10 @@ struct TilingInfo {
     // Downward size adjustments per iter domain index. May return 0 to signal
     // that the requested size is too small to be a valid (byte-aligned) tile.
     llvm::SmallVector<std::function<int64_t(int64_t)>, 4> adjustSize;
+
+    // For the domain whose tiles are rounded to the LinalgSlicing chunk (see
+    // applySliceAlignedTiles in TileAndFusePass.cpp), its adjustSize without that rounding.
+    std::optional<std::pair<int64_t, std::function<int64_t(int64_t)>>> unalignedAdjustSize;
 };
 
 // Compose a downward size adjustment onto an existing one, iterating to a

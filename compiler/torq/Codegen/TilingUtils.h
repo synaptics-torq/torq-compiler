@@ -33,6 +33,10 @@ std::optional<size_t> getSlicingIterationDomainIndex(Operation *op);
 // sizes only for ops that are sliced. Defined in LinalgSlicingPass.cpp.
 std::optional<int64_t> getElementwiseSlicingDim(Operation *op, StringRef *reason = nullptr);
 
+// The iteration-domain dimension LinalgSlicing slices `op` on when `op` is a conv, depthwise conv
+// or pool principal that its ConvPattern slices, or nullopt. Defined in LinalgSlicingPass.cpp.
+std::optional<int64_t> getConvSlicingDim(Operation *op);
+
 // Slicing granularity
 constexpr int64_t kGrouping = 4;
 

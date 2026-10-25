@@ -1570,6 +1570,12 @@ static SmallVector<int64_t> relocationFreeCandidateSizes(
     int64_t previous = 0;
     for (int64_t factor = div_ceil(domainSize, size) + 1; factor <= domainSize; ++factor) {
         int64_t smallest = tileSizeForFactor(tilingInfo, domain, domainSize, factor);
+        // Rounding to the LinalgSlicing chunk can cut the domain into more tiles than
+        // allowed: then try the size without the rounding, which leaves a remainder on
+        // one slice but no relocation
+        if (smallest > 0 && otherTiles * div_ceil(domainSize, smallest) > maxCount &&
+            tilingInfo.unalignedAdjustSize && tilingInfo.unalignedAdjustSize->first == domain)
+            smallest = tilingInfo.unalignedAdjustSize->second(div_ceil(domainSize, factor));
         if (smallest == 0 || smallest >= size || smallest == previous)
             continue;
         previous = smallest;
@@ -1990,11 +1996,25 @@ static int64_t makeSliceAlignedTileSize(int64_t sliceCount, int64_t domainSize, 
 
 // The domain of `consumerOp` that LinalgSlicing slices for this principal, or
 // nullopt if LinalgSlicing leaves the principal on one slice. The slicing checks
-// are shared with ElementwisePattern and ReciprocalPattern.
+// are shared with ElementwisePattern, ReciprocalPattern and ConvPattern.
 static std::optional<int64_t> getSlicedDomain(
     Operation *principalOp, TilingInterface consumerOp, ArrayRef<int64_t> iterDomainSizes
 ) {
-    std::optional<int64_t> dim = getElementwiseSlicingDim(principalOp);
+    std::optional<int64_t> dim;
+    if (std::optional<int64_t> convDim = getConvSlicingDim(principalOp)) {
+        if (consumerOp.getOperation() == principalOp)
+            return convDim;
+        // The consumer (e.g. the rescale of a conv) indexes the principal's result: slice
+        // along the result dim of the principal's sliced loop dim
+        AffineMap outMap = cast<linalg::LinalgOp>(principalOp)
+                               .getIndexingMapMatchingResult(principalOp->getResult(0));
+        if (std::optional<unsigned> pos =
+                outMap.getResultPosition(getAffineDimExpr(*convDim, principalOp->getContext())))
+            dim = *pos;
+    }
+    else {
+        dim = getElementwiseSlicingDim(principalOp);
+    }
     if (!dim)
         return std::nullopt;
 
@@ -2032,6 +2052,7 @@ static void applySliceAlignedTiles(
     if (!dim || !tilingInfo.tilingOrder.contains(*dim))
         return;
     int64_t domainSize = iterDomainSizes[*dim];
+    tilingInfo.unalignedAdjustSize = {*dim, tilingInfo.adjustSize[*dim]};
     tilingInfo.adjustSize[*dim] = composeSizeAdjustments(
         [=](int64_t size) { return makeSliceAlignedTileSize(sliceCount, domainSize, size); },
         tilingInfo.adjustSize[*dim]

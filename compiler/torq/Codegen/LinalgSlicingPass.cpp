@@ -573,6 +573,19 @@ static Operation *findBlockedConvProducer(Operation *op, IntegerAttr fuseGroup) 
 
 } // namespace
 
+// Keep in sync with ConvPattern::matchAndRewrite. Before tiling, inputFromConvInBlock() looks at
+// the untiled block, so a depthwise conv that reads a conv's output is taken as kept on one slice
+// even if tiling later puts the two in different loops: its tiles are then not aligned, as before.
+std::optional<int64_t> getConvSlicingDim(Operation *op) {
+    std::optional<size_t> dim = getSlicingIterationDomainIndex(op);
+    if (!dim || !isFuseGroupPrincipalOp(op) || convKeptSingleSlice(op))
+        return std::nullopt;
+    if (isa<linalg::DepthwiseConv2DNchwChwOp, linalg::DepthwiseConv2DNhwcHwcOp>(op) &&
+        inputFromConvInBlock(op))
+        return std::nullopt;
+    return *dim;
+}
+
 std::optional<int64_t> getElementwiseSlicingDim(Operation *op, StringRef *reason) {
     auto skip = [&](StringRef why) -> std::optional<int64_t> {
         if (reason)
