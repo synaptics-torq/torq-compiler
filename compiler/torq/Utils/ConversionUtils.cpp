@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "torq/Utils/ConversionUtils.h"
+#include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -596,30 +597,59 @@ bool hasEkLoweringMaxPool(mlir::syna::torq_hl::MaxPool2dOp op) {
     int strideH = stride[0];
     int strideW = stride[1];
 
-    auto pad = op.getPad();
-    int32_t pad_top = pad[0];
-    int32_t pad_left = pad[2];
-
-    // Stride > 2 is not supported by EK kernel
-    if (strideH > 2 || strideW > 2) {
+    // Stride > 2 and different strides along H and W are not supported by EK kernel
+    if (strideH > 2 || strideW > 2 || strideH != strideW) {
         return false;
     }
 
-    // For stride 2, only 2x2 and 3x3 kernels are supported by EK kernel
-    if ((strideH == 2 || strideW == 2) && !((kh == 2 && kw == 2) || (kh == 3 && kw == 3))) {
-        return false;
-    }
-
-    // Top-left padding with stride 2 and 3x3 kernel is not supported by EK kernel
-    if ((strideH == 2 || strideW == 2) && (kh == 3 || kw == 3) && (pad_top > 0 || pad_left > 0)) {
-        return false;
-    }
-
-    // Limit kernel sizes (similar to conv constraints)
-    if (kh > 3 || kw > 3) {
+    // Kernel size is limited by the HW like for convolutions
+    if (kw > HwInfo::nss_max_kernel_width || kh > HwInfo::nss_max_kernel_height) {
         return false;
     }
     return true;
+}
+
+MaxPoolLowering getMaxPoolLowering(
+    ArrayRef<int64_t> kernel, ArrayRef<int64_t> stride, ArrayRef<int64_t> pad, int64_t inputH,
+    int64_t inputW
+) {
+    // The reshape-based 1D lowerings only handle exact non-overlapping, unpadded windows
+    bool hasNoPadding = llvm::all_of(pad, [](int64_t p) { return p == 0; });
+    if (kernel[1] == 1 && stride[1] == 1 && kernel[0] != 1 && stride[0] == kernel[0] &&
+        hasNoPadding && inputH % kernel[0] == 0) {
+        return MaxPoolLowering::Vertical1D;
+    }
+    if (kernel[0] == 1 && stride[0] == 1 && kernel[1] != 1 && stride[1] == kernel[1] &&
+        hasNoPadding && inputW % kernel[1] == 0) {
+        return MaxPoolLowering::Horizontal1D;
+    }
+    if (stride[0] == stride[1] && stride[0] <= 2) {
+        if (kernel[0] > HwInfo::nss_max_kernel_height || kernel[1] > HwInfo::nss_max_kernel_width) {
+            return MaxPoolLowering::None;
+        }
+        return MaxPoolLowering::Generic;
+    }
+    return MaxPoolLowering::None;
+}
+
+SmallVector<int64_t> getMaxPoolInputPadding(Value input, int hDim, int wDim) {
+    if (auto padOp = input.getDefiningOp<tensor::PadOp>()) {
+        auto low = padOp.getStaticLow();
+        auto high = padOp.getStaticHigh();
+        SmallVector<int64_t> pad = {low[wDim], high[wDim], low[hDim], high[hDim]};
+        if (llvm::any_of(pad, [](int64_t p) { return ShapedType::isDynamic(p); })) {
+            return SmallVector<int64_t>(4, -1);
+        }
+        return pad;
+    }
+    // A 1D pooling lifted to 2D can have a unit-dim expand between its padding and the pooling
+    if (auto expandOp = input.getDefiningOp<tensor::ExpandShapeOp>()) {
+        input = expandOp.getSrc();
+    }
+    if (input.getDefiningOp<tensor::PadOp>() || input.getDefiningOp<tensor::InsertSliceOp>()) {
+        return SmallVector<int64_t>(4, -1);
+    }
+    return SmallVector<int64_t>(4, 0);
 }
 
 Value cloneAndReplaceToBody(

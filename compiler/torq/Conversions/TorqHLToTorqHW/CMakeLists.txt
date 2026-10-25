@@ -25,7 +25,6 @@ set(sources
     MatMulPattern.cpp
     MixedQuantMatMulPattern.cpp
     MaxPool2dPattern.cpp
-    MaxPool2dToHw.cpp
     MulPattern.cpp
     Passes.cpp
     Patterns.cpp

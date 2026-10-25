@@ -69,10 +69,6 @@ static Value applyOutputTranspose(
     }
 }
 
-static bool is1DPooling(llvm::ArrayRef<int64_t> kernels, llvm::ArrayRef<int64_t> strides) {
-    return (kernels[0] == 1 && strides[0] == 1) || (kernels[1] == 1 && strides[1] == 1);
-}
-
 /// Look for a downstream linalg.generic that performs an elementwise mulf or divf
 /// by a constant. If found, return the constant scale value and the generic op.
 /// For divf, the scale is the reciprocal of the divisor.
@@ -162,18 +158,17 @@ struct PoolingMaxOpConversionBase : public OpRewritePattern<PoolingOpType> {
             );
         }
 
-        // Check stride constraints after determining if 1D pooling
-        bool is1D = is1DPooling(kernelsShape, attrStrides);
-        if (!is1D) {
-            // For 2D pooling, enforce stride limits
-            constexpr int64_t maxStride = IsNCHW ? 4 : 2;
-            if (attrStrides[0] > maxStride || attrStrides[1] > maxStride) {
-                return rewriter.notifyMatchFailure(
-                    srcOp, "Stride exceeds maximum supported for 2D pooling"
-                );
-            }
+        // Leave the maxpools the NSS can't run in linalg so that they run on CSS or Host.
+        // The padding isn't folded yet (it must be decided the same way when marking fuse groups):
+        // an unknown padding is refused by the lowerings that depend on it.
+        auto inputShape = mlir::cast<RankedTensorType>(input.getType()).getShape();
+        int64_t inputH = inputShape[IsNCHW ? 2 : 1];
+        int64_t inputW = inputShape[IsNCHW ? 3 : 2];
+        SmallVector<int64_t> pad = getMaxPoolInputPadding(input, IsNCHW ? 2 : 1, IsNCHW ? 3 : 2);
+        if (getMaxPoolLowering(kernelsShape, attrStrides, pad, inputH, inputW) ==
+            MaxPoolLowering::None) {
+            return rewriter.notifyMatchFailure(srcOp, "Maxpool not supported on the NSS");
         }
-        // For 1D pooling, allow larger strides in the pooling dimension
 
         if (_markFuseGroups) {
             if (!markFuseGroupBackward(

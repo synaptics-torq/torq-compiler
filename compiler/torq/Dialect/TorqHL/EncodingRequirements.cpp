@@ -378,12 +378,7 @@ template <typename OpT> static KernelEncoding withDenseHWPlane(OpT op, KernelEnc
 }
 
 KernelEncoding MaxPool2dOp::getKernelEncoding() {
-    if (torq::hasEkLoweringMaxPool(*this)) {
-        return withDenseHWPlane(*this, getDefault1InputEncoding(*this));
-    }
-
-    auto resultType = cast<RankedTensorType>(this->getResult(0).getType());
-    return withDenseHWPlane(*this, {{}, defaultEncoding(resultType, 4)});
+    return withDenseHWPlane(*this, getDefault1InputEncoding(*this));
 }
 
 KernelEncoding SegmentationOp::getKernelEncoding() { return getNoEncoding(); }

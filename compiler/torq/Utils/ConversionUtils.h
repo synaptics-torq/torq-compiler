@@ -482,6 +482,26 @@ bool hasEkLoweringConv(mlir::syna::torq_hl::Conv2DOp op);
 bool hasEkLoweringConv(mlir::syna::torq_hl::DepthwiseConv2DOp op);
 bool hasEkLoweringMaxPool(mlir::syna::torq_hl::MaxPool2dOp op);
 
+// How a maxpool is lowered to the NSS (see MaxPool2dPattern.cpp)
+enum class MaxPoolLowering {
+    None,         // Not supported on the NSS
+    Vertical1D,   // kw == 1, stride == kernel along H, no padding, H multiple of kh
+    Horizontal1D, // kh == 1, stride == kernel along W, no padding, W multiple of kw
+    Generic       // Equal strides of 1 or 2, kernel within the HW limits
+};
+
+// Get the NSS lowering of a maxpool from its kernel [kh, kw], stride [sh, sw], padding
+// [left, right, top, bottom] (-1 if unknown) and unpadded input height and width
+MaxPoolLowering getMaxPoolLowering(
+    ArrayRef<int64_t> kernel, ArrayRef<int64_t> stride, ArrayRef<int64_t> pad, int64_t inputH,
+    int64_t inputW
+);
+
+// Get the [left, right, top, bottom] padding of the input of a linalg max pooling without folding
+// it: the static padding of a tensor.pad, 0 if not padded, -1 if it can't be known (padding with a
+// fill + insert_slice, or behind a reshape)
+SmallVector<int64_t> getMaxPoolInputPadding(Value input, int hDim, int wDim);
+
 struct FusionPlan {
     Operation *anchor;
     llvm::SmallVector<Operation *> neededOps;

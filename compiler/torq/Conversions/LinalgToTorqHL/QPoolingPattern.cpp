@@ -515,6 +515,16 @@ struct QMaxPoolConvert : public OpRewritePattern<PoolingOpType> {
                 poolOp, "zero-point must equal output min for maxpool padding"
             );
 
+        // Leave the maxpools the NSS can't run in linalg so that they run on CSS or Host
+        auto strides = attrValuesAsVec(poolOp.getStrides());
+        auto kernelShape = cast<RankedTensorType>(poolOp.getInputs()[1].getType()).getShape();
+        auto inputShape = dequantInputType.getShape();
+        int64_t inputH = inputShape[IsNCHW ? 2 : 1];
+        int64_t inputW = inputShape[IsNCHW ? 3 : 2];
+        if (getMaxPoolLowering(kernelShape, strides, padInfo.lrtbPad, inputH, inputW) ==
+            MaxPoolLowering::None)
+            return rewriter.notifyMatchFailure(poolOp, "maxpool not supported on the NSS");
+
         return success();
     }
 
