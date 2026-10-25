@@ -22,11 +22,13 @@ using namespace mlir::syna::torq_hw;
 namespace mlir::syna::torq {
 
 // Non-dense Input 1 is loaded from the data path, and Input 2, which is a scalar constant,
-// is loaded once as bias/scale. The ALU operates in bypass mode.
+// is loaded once as bias/scale. The ALU multiplies Input 1 by the scalar weight (-1 for
+// `c - x`).
 FailureOr<SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
 
 // Dense Input 1 is loaded from the data path, and Input 2, which is a scalar constant,
-// is loaded once as bias/scale. The ALU operates in bypass mode.
+// is loaded once as bias/scale. The ALU multiplies Input 1 by the scalar weight (-1 for
+// `c - x`).
 FailureOr<SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
 
 // ALU is working with MUL and ACC operations on 32 input pixels at a time.
@@ -162,6 +164,16 @@ FailureOr<SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &pa
     return sliceTaskOp;
 }
 
+// The largest block size not above `maxBlock` that divides `size`.
+static int largestDivisorAtMost(int size, int maxBlock) {
+    for (int block = std::min(size, maxBlock); block > 1; --block) {
+        if (size % block == 0) {
+            return block;
+        }
+    }
+    return 1;
+}
+
 FailureOr<SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
     Slice slice("add");
     DType elementType = getDType(params.inputElementType);
@@ -176,15 +188,21 @@ FailureOr<SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> 
         inputShape.push_back({params.input1Shape[i], params.input1Strides[i]});
     }
     int lastDimSize = params.input1Shape.back();
+    // The input is multiplied by the scalar weight, as in buildScalarDenseTaskOp: it is
+    // -1 for `c - x`, which a plain ALU load would turn into `x + c`.
+    DType weightType = params.inputElementType.isInteger(32) ? DType::int8 : elementType;
 
-    if (lastDimSize <= slice.act.width(elementType)) {
+    // A last dimension larger than the act width is split into equal blocks: a
+    // partial last block would make the NDLs read and write past the end of the row.
+    // The width depends on the weight type: one activation pass holds 4 int16 x int16
+    // or int32 x int8 products, but 8 bf16 or 16 int8 ones.
+    int blockSize = largestDivisorAtMost(lastDimSize, slice.act.width(elementType, weightType));
+    if (blockSize == lastDimSize) {
         inputShape.push_back({lastDimSize, 1});
     }
     else {
-        // If the last dimension is larger than act width, we need to split it into blocks
-        int blocks = div_ceil(lastDimSize, slice.act.width(elementType));
-        inputShape.push_back({blocks, slice.act.width(elementType)});
-        inputShape.push_back({slice.act.width(elementType), 1});
+        inputShape.push_back({lastDimSize / blockSize, blockSize});
+        inputShape.push_back({blockSize, 1});
     }
 
     // The output is a dense version of the input
@@ -199,20 +217,24 @@ FailureOr<SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> 
     LData biasScale({biasNum}, getDType(params.op.getScaleBias().getType().getElementType()));
     LData input(inputShape, elementType, params.inputOffsetBytes);
     LData output(outputShape, elementType);
+    LData weights({1}, weightType);
+    WData wdata = slice.wram.load(weights);
     BData bdata = slice.bram.load(biasScale);
 
     For(auto ii = slice.iterate(input.dims(0, -1))) {
         IData idata = slice.iram.load(input[ii]);
-        PData pdata = slice.alu.load(idata);
-        QData res = slice.act.rescaleClamp(pdata, bdata, shift, zp, min, max);
-        slice.store(output[ii], res);
+        PData pdata = slice.alu.scalarProductAccumulate(idata, wdata);
+        For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
+            QData res = slice.act.rescaleClamp(pdata[av], bdata, shift, zp, min, max);
+            slice.append(output[ii], res);
+        }
     }
 
     auto sliceTaskOp = SliceTaskOp::create(
         params.rewriter, params.loc,
         params.op.getName(),                            // Operation to replace
         ValueRange{params.op.getInput1()},              // Input tensor
-        ValueRange{},                                   // Weights
+        ValueRange{params.op.getWeights()},             // Weights
         ValueRange{params.op.getScaleBias()},           // BiasScale tensor,
         ValueRange{params.op.getInit()},                // Output tensor initializer
         ValueRange{},                                   // Symbols
