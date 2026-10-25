@@ -210,7 +210,7 @@ static llvm::cl::opt<unsigned> clProbeRelocationMaxTileGrowth(
     "torq-probe-relocation-max-tile-growth",
     llvm::cl::desc("Most additional tiles, in percent, worth a tile whose LRAM plan does not "
                    "relocate buffers"),
-    llvm::cl::init(25)
+    llvm::cl::init(50)
 );
 
 static llvm::cl::opt<bool> clDisableAvoidProducerRecompute(
@@ -1567,7 +1567,7 @@ static int64_t countTiles(
 // back, so a few more tiles with their halo and weight reads cost less. Many more
 // tiles do not. 7 -> 8 tiles in the MobileNetV2 block 1 group on SR200 is worth it.
 // 14 -> 64 tiles in google_proxy_modelA on SR200 is not. The result rounds down, so
-// with the default 25% a tiling of 1 to 3 tiles keeps its relocation.
+// with the default 50% a tiling of 1 tile keeps its relocation.
 static int64_t maxRelocationFreeTiles(int64_t count) {
     return count * (100 + clProbeRelocationMaxTileGrowth) / 100;
 }

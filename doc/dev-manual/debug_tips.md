@@ -189,9 +189,9 @@
   - ``--torq-probe-relocation-min-bytes=<N>`` (default 32768): the least bytes a tile must
     relocate before that search runs. A smaller relocation costs less than an extra tile.
 
-  - ``--torq-probe-relocation-max-tile-growth=<P>`` (default 25): the most additional tiles, in
-    percent, accepted for a tile without relocation. The limit rounds down, so a tiling of 1 to
-    3 tiles keeps its relocation.
+  - ``--torq-probe-relocation-max-tile-growth=<P>`` (default 50): the most additional tiles, in
+    percent, accepted for a tile without relocation. The limit rounds down, so a tiling of 1
+    tile keeps its relocation.
 
   - ``--torq-disable-tnf-avoid-producer-recompute`` (default off): by default, tile-and-fuse does
     not fuse a producer whose slice is the same on every iteration of a tiled loop, e.g. the LHS
