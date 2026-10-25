@@ -135,7 +135,7 @@ bool orderPlacesInLram(FunctionOpInterface funcOp, int64_t poolSize) {
 
     bool fits = false;
     if (succeeded(pm.run(clone))) {
-        int reservedBytes = HwInfo::nss_max_program_size * 2;
+        int reservedBytes = HwInfo::lram_reserved_size;
         int64_t usable = (poolSize / 8) * 8 - reservedBytes;
         int64_t peak = peakLramBytes(clone);
         bool withinCapacity = peak <= usable;

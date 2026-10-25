@@ -993,20 +993,30 @@ LData &LData::padReshapeDim(int dimIndex, const std::vector<int> &newDims, int p
     dimIndex = normalizeIndex(dimIndex);
     assert(_d.unpaddedDimCount == -1 && "padReshapeDim can only be applied once");
 
-    // Mark this dimension as Main: HW uses this tag to control the padding
-    if (int rank = shape().size(); rank >= 2 && shape()[rank - 2].tag == ShapeItem::Tag::Main) {
-        // Remove the Main tag from the vectorized dimension, we are not doing padding there
-        getShape()[rank - 2].tag = ShapeItem::Tag::None;
-    }
-    getShape()[dimIndex].tag = ShapeItem::Tag::Main;
-
+    int rank = shape().size();
     int originalDimCount = dim(dimIndex);
     int originalItemCount = elementCount(shape());
     torq::reshapeDim(*this, dimIndex, newDims, true);
-    if (elementCount(shape()) != originalItemCount) {
-        // Remember the original dimension count before padding
-        _d.unpaddedDimCount = originalDimCount;
-        _d.padValue = padValue;
+    if (elementCount(shape()) == originalItemCount) {
+        // No padding needed, keep the tags of a plain reshape
+        return *this;
+    }
+
+    // Remember the original dimension count before padding
+    _d.unpaddedDimCount = originalDimCount;
+    _d.padValue = padValue;
+
+    // Mark the reshaped dimensions as Main: HW uses this tag to control the padding
+    auto &newShape = getShape();
+    if (int vectorsDim = rank - 2; vectorsDim > dimIndex) {
+        vectorsDim += newDims.size() - 1;
+        if (newShape[vectorsDim].tag == ShapeItem::Tag::Main) {
+            // Remove the Main tag from the vectorized dimension, we are not doing padding there
+            newShape[vectorsDim].tag = ShapeItem::Tag::None;
+        }
+    }
+    for (int i = dimIndex; i < dimIndex + (int)newDims.size(); i++) {
+        newShape[i].tag = ShapeItem::Tag::Main;
     }
     return *this;
 }
@@ -1268,6 +1278,7 @@ struct SlicePrivate {
     void setKernel(const LRTBDim &lrtb);
     void setOutputChannelShape(int height, int width);
     void setPadding(const LRTBDim &lrtb, int padValue);
+    void setLoadPadding(int unpaddedVectorCount, int vectorSize, int padValue);
 
     void ref(const LData &data);
 
@@ -1305,6 +1316,10 @@ struct SlicePrivate {
     // Height and width of an input channel (used for convolutions)
     int _outputChannelHeight{};
     int _outputChannelWidth{};
+
+    // True if an IRAM load configured the kernel, padding and output channel shape (see
+    // setLoadPadding)
+    bool _hasLoadPadding{};
 
     // Use hybrid mode: ALU in NumberFormat::BF and ACT in NumberFormat::I
     bool _useHybridMode{};
@@ -2408,9 +2423,13 @@ void SlicePrivate::deqw(const LData &output, int appendBlockSize) {
     _ndls.add(memNdl(NdlType::DEQW, output, true, NdlSyncMode::NONE, appendBlockSize));
 }
 
-void SlicePrivate::setKernel(const LRTBDim &lrtb) { _cfg.kernel = lrtb; }
+void SlicePrivate::setKernel(const LRTBDim &lrtb) {
+    assert(!_hasLoadPadding && "Kernel already configured by a padded IRAM load");
+    _cfg.kernel = lrtb;
+}
 
 void SlicePrivate::setOutputChannelShape(int height, int width) {
+    assert(!_hasLoadPadding && "Output channel shape already configured by a padded IRAM load");
     auto refNdl = _ndls.getMemNdl(NdlType::REF);
     assert(!refNdl && "Must be called before storing the output");
     _outputChannelHeight = height;
@@ -2418,11 +2437,31 @@ void SlicePrivate::setOutputChannelShape(int height, int width) {
 }
 
 void SlicePrivate::setPadding(const LRTBDim &lrtb, int padValue) {
+    assert(!_hasLoadPadding && "Padding already configured by a padded IRAM load");
     _cfg.pad.left = lrtb.left > 0;
     _cfg.pad.right = lrtb.right > 0;
     _cfg.pad.top = lrtb.top;
     _cfg.pad.bottom = lrtb.bottom;
     _cfg.pad_value = padValue;
+}
+
+static bool isZero(const LRTBDim &lrtb) {
+    return lrtb.left == 0 && lrtb.right == 0 && lrtb.top == 0 && lrtb.bottom == 0;
+}
+
+// The padding of an IRAM load uses the slice-wide kernel, padding and output channel shape,
+// so these must not be configured by the kernel or by another padded load
+void SlicePrivate::setLoadPadding(int unpaddedVectorCount, int vectorSize, int padValue) {
+    assert(!_hasLoadPadding && "Only one padded IRAM load per slice is supported");
+    assert(
+        isZero(_cfg.kernel) && isZero(_cfg.pad) && !_outputChannelHeight && !_outputChannelWidth &&
+        "Padded IRAM load in a slice that sets kernel or padding"
+    );
+    LRTBDim border(std::vector<int64_t>{0, 0, 0, 1});
+    setOutputChannelShape(unpaddedVectorCount, vectorSize);
+    setKernel(border);
+    setPadding(border, padValue);
+    _hasLoadPadding = true;
 }
 
 void SlicePrivate::ref(const LData &data) {
@@ -2599,6 +2638,7 @@ PData SlicePrivate::aluWAccumulate(const WData &wdata) {
 
     // The HW has auto-generated (implicit) input that we need to load to the ALU.
     // The implicit value is taken from the padding value and must be 1
+    assert(!_hasLoadPadding && "Pad value already configured by a padded IRAM load");
     _cfg.pad_value = isFloat(weightType) ? llvm::bit_cast<int32_t>(1.0f) : 1;
     aluSetNumberFormat(weightType);
     IData idata = IData({}, _iram.elementType);
@@ -3041,6 +3081,7 @@ void Slice::append(const LData &output, int value) {
     d->aluSetMode(torq_hw::ALUOp0Mode::DBYP, torq_hw::ALUOp1Mode::BXOR);
 
     // Configure the value to be stored as pad value
+    assert(!d->_hasLoadPadding && "Pad value already configured by a padded IRAM load");
     d->_cfg.pad_value = extendPadValue(value, output.elementType());
     d->deqw(output, act.width(output.elementType()));
     d->ref(output);
@@ -3073,6 +3114,7 @@ void Slice::store(const LData &output, int value) {
     d->aluSetMode(torq_hw::ALUOp0Mode::DBYP, torq_hw::ALUOp1Mode::BXOR);
 
     // Configure the value to be stored as pad value
+    assert(!d->_hasLoadPadding && "Pad value already configured by a padded IRAM load");
     d->_cfg.pad_value = extendPadValue(value, output.elementType());
     d->deqw(output);
     d->ref(output);
@@ -3277,10 +3319,7 @@ static IData iramLoadImpl(
         // channel shape to (unpaddedDim, vectorSize). Any additional vector read
         // after this will be automatically filled with padding values by the hardware.
         // For this to work we have to set both the kernel and padding bottom size to 1.
-        int vectorSize = data.dim(Vectorized::Elements);
-        d->setOutputChannelShape(unpaddedDim, vectorSize);
-        d->setKernel(LRTBDim(std::vector<int64_t>{0, 0, 0, 1}));
-        d->setPadding(LRTBDim(std::vector<int64_t>{0, 0, 0, 1}), data.padValue());
+        d->setLoadPadding(unpaddedDim, data.dim(Vectorized::Elements), data.padValue());
     }
 
     return idata;

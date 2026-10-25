@@ -513,7 +513,7 @@ static int64_t lramSizeFor(Operation *op, int64_t lramSize) {
     for (Operation *parent = op->getParentOp(); parent; parent = parent->getParentOp()) {
         if (auto budget = parent->getAttrOfType<IntegerAttr>(kPrefetchTileBudgetAttr)) {
             return static_cast<int64_t>(TorqHw::get().getLramSize()) * budget.getInt() / 100 -
-                   HwInfo::nss_max_program_size * 2;
+                   HwInfo::lram_reserved_size;
         }
     }
     return lramSize;

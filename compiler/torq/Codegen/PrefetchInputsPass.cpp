@@ -909,7 +909,7 @@ void PrefetchInputsPass::runOnOperation() {
         }
         return *inputBar;
     };
-    const int64_t usable = poolSize - HwInfo::nss_max_program_size * 2;
+    const int64_t usable = poolSize - HwInfo::lram_reserved_size;
     const int64_t capPercents[] = {
         clListCapPercent, clListCapPercent * 85 / 100, clListCapPercent * 70 / 100
     };

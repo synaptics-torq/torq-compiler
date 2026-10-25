@@ -64,6 +64,12 @@ struct HwInfo {
         css_reserved_dtcm_size =
             css_stack_size + css_debug_buffer_size, // size of the DTCM reserved for CSS in bytes
         nss_max_program_size = 0x280,               // maximum size of a NSS program in bytes
+        // Unused bytes at the end of LRAM: a kernel can read a few elements past the end of a
+        // buffer (e.g. the last chunk of a row in the fast matmul), this keeps the read in LRAM
+        lram_end_guard_size = 64,
+        // LRAM bytes not available for buffers: two NSS program blocks at the beginning (the
+        // running program and the next one) and the guard at the end
+        lram_reserved_size = nss_max_program_size * 2 + lram_end_guard_size,
         xram_nss_programs_size =
             0x800000, // size of the XRAM segment reserved for NSS programs in bytes
 

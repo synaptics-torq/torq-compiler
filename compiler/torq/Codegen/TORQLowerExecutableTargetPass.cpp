@@ -152,9 +152,7 @@ namespace {
 // probe that TileAndFuse builds for a smaller tile budget gets less than 100.
 int64_t getLramSizeBasedOnBudget(int budgetPercent) {
     int64_t lramSize = TorqHw::get().getLramSize() * budgetPercent / 100;
-    int nssProgramPoolSize = HwInfo::nss_max_program_size * 2;
-    lramSize -= nssProgramPoolSize;
-    return lramSize;
+    return lramSize - HwInfo::lram_reserved_size;
 }
 
 // CompileTimeConst handling depends on whether the tile-and-fuse memory-fit
@@ -340,10 +338,9 @@ void addNssUpToAssignLramAddresses(
         }
     }
 
-    // The total LRAM pool for the allocator, NSS program slots included. It is the whole
-    // LRAM, except in a tile-fit probe built for a smaller tile budget.
-    int64_t lramPoolSize =
-        getLramSizeBasedOnBudget(budgetPercent) + HwInfo::nss_max_program_size * 2;
+    // The total LRAM pool for the allocator, NSS program slots and end guard included. It is
+    // the whole LRAM, except in a tile-fit probe built for a smaller tile budget.
+    int64_t lramPoolSize = getLramSizeBasedOnBudget(budgetPercent) + HwInfo::lram_reserved_size;
 
     // Reorder the NSS stream so that loads overlap slice compute. PrefetchInputs places
     // with the same pool size AssignLramAddresses uses.
