@@ -844,6 +844,163 @@ class EliminateRedundantConvPaddingPattern : public OpRewritePattern<TorqConvPoo
     }
 };
 
+// The stride-2 kernels compute the windows of output o from input [2o - B, 2o - B + k - 1] with
+// B = (k - 1) / 2, i.e. with a leading padding of B: for an even kernel the leading padding (B + 1)
+// of the other "same" variant, or no padding, gives wrong results
+// (synaptics-torq/torq-compiler-dev#2717, e.g. a 4x4 stride-2 depthwise conv with padding 2 then 1
+// or 0 then 1), and the other patterns of this pass would rewrite it to the (B, B + 1) variant
+// without moving the data. Output o of the op covers [2o - p, 2o - p + k - 1] with p its leading
+// padding: prepend e = (B - p) mod 2 padding elements to the input explicitly, compute the op
+// with the padding (B, k - 1 - B) on an even input, and drop its first c = (B + e - p) / 2
+// outputs, whose output o + c covers [2(o + c) - B - e, ...] = [2o - p, ...] of the original input.
+template <class TorqConvPoolOp>
+class AlignEvenKernelStride2PaddingPattern : public OpRewritePattern<TorqConvPoolOp> {
+  public:
+    using OpRewritePattern<TorqConvPoolOp>::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(TorqConvPoolOp op, PatternRewriter &rewriter) const override {
+        auto inputType = llvm::dyn_cast<RankedTensorType>(op.getInput().getType());
+        auto outputType = llvm::dyn_cast<RankedTensorType>(op.getResult(0).getType());
+        if (!inputType || inputType.getRank() != 4 || !inputType.hasStaticShape() || !outputType ||
+            !outputType.hasStaticShape()) {
+            return failure();
+        }
+        auto strides = op.getStride();
+        auto pads = op.getPad();
+        if (strides.size() != 2 || pads.size() != 4) {
+            return failure();
+        }
+        int64_t kh, kw;
+        if (failed(getConvPoolKernelSize(op, kh, kw))) {
+            return failure();
+        }
+        auto inShape = inputType.getShape();
+        auto outShape = outputType.getShape();
+
+        // Per axis (H, W): input size, padding, prepended and appended elements, dropped outputs
+        struct Axis {
+            int dim;
+            int64_t k, stride, lead, trail;
+            int64_t inSize, outSize;
+            int64_t prepend = 0, append = 0, drop = 0;
+            bool fix = false;
+        };
+        Axis axes[2] = {
+            {NCHW::H, kh, strides[0], pads[LRTBDim::Top], pads[LRTBDim::Bottom], inShape[NCHW::H],
+             outShape[NCHW::H]},
+            {NCHW::W, kw, strides[1], pads[LRTBDim::Left], pads[LRTBDim::Right], inShape[NCHW::W],
+             outShape[NCHW::W]},
+        };
+        bool anyFix = false;
+        for (Axis &a : axes) {
+            const int64_t border = (a.k - 1) / 2;
+            if (a.stride != 2 || a.k % 2 != 0 || a.lead == border) {
+                continue;
+            }
+            a.prepend = (((border - a.lead) % 2) + 2) % 2;
+            a.drop = (border + a.prepend - a.lead) / 2;
+            if (border + a.prepend - a.lead < 0) {
+                return rewriter.notifyMatchFailure(op, "leading padding larger than k / 2");
+            }
+            // Even input, with enough elements for the outputs to keep after the dropped ones
+            // (with the padding (B, k - 1 - B), an even input of n elements gives n / 2 outputs)
+            int64_t size = std::max(a.inSize + a.prepend, 2 * (a.outSize + a.drop));
+            size += size % 2;
+            a.append = size - a.inSize - a.prepend;
+            a.fix = true;
+            anyFix = true;
+        }
+        if (!anyFix) {
+            return failure();
+        }
+
+        Location loc = op.getLoc();
+        Type elemType = inputType.getElementType();
+        SmallVector<int64_t, 4> paddedShape(inShape.begin(), inShape.end());
+        SmallVector<int64_t, 4> newPads(pads.begin(), pads.end());
+        SmallVector<int64_t, 4> newOutShape(outShape.begin(), outShape.end());
+        SmallVector<int64_t, 4> dropOffsets(4, 0);
+        SmallVector<OpFoldResult> insertOffsets(4, rewriter.getIndexAttr(0));
+        for (Axis &a : axes) {
+            if (!a.fix) {
+                continue;
+            }
+            const int64_t border = (a.k - 1) / 2;
+            paddedShape[a.dim] = a.inSize + a.prepend + a.append;
+            newOutShape[a.dim] = paddedShape[a.dim] / 2;
+            dropOffsets[a.dim] = a.drop;
+            insertOffsets[a.dim] = rewriter.getIndexAttr(a.prepend);
+            if (a.dim == NCHW::H) {
+                newPads[LRTBDim::Top] = border;
+                newPads[LRTBDim::Bottom] = a.k - 1 - border;
+            }
+            else {
+                newPads[LRTBDim::Left] = border;
+                newPads[LRTBDim::Right] = a.k - 1 - border;
+            }
+        }
+
+        // Input padded explicitly with the padding value of the op. A maxpool without padding has
+        // no padding value (input_zp is then 0): pad it with the lowest value of its type
+        int32_t padValue = op.getInputZp();
+        if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
+            if (llvm::all_of(pads, [](int64_t p) { return p == 0; })) {
+                if (auto intType = dyn_cast<IntegerType>(elemType)) {
+                    padValue = static_cast<int32_t>(
+                        APInt::getSignedMinValue(intType.getWidth()).getSExtValue()
+                    );
+                }
+                else {
+                    padValue = llvm::bit_cast<int32_t>(-std::numeric_limits<float>::infinity());
+                }
+            }
+        }
+        TypedAttr fillAttr = makePadFillAttr(rewriter, elemType, padValue);
+        if (!fillAttr) {
+            return rewriter.notifyMatchFailure(op, "unsupported padding value");
+        }
+        Value padded = tensor::EmptyOp::create(rewriter, loc, paddedShape, elemType);
+        Value fillValue = arith::ConstantOp::create(rewriter, loc, fillAttr);
+        padded = linalg::FillOp::create(rewriter, loc, ValueRange{fillValue}, ValueRange{padded})
+                     .getResult(0);
+        SmallVector<OpFoldResult> sizes;
+        for (int64_t dim : inShape) {
+            sizes.push_back(rewriter.getIndexAttr(dim));
+        }
+        Value newInput = tensor::InsertSliceOp::create(
+            rewriter, loc, op.getInput(), padded, insertOffsets, sizes,
+            SmallVector<OpFoldResult>(4, rewriter.getIndexAttr(1))
+        );
+
+        Type outElemType = outputType.getElementType();
+        auto newOutputType = RankedTensorType::get(newOutShape, outElemType);
+        Value newInit = tensor::EmptyOp::create(rewriter, loc, newOutShape, outElemType);
+        auto newPadsAttr = rewriter.getDenseI64ArrayAttr(newPads);
+        TorqConvPoolOp newOp;
+        if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
+            newOp = TorqConvPoolOp::create(
+                rewriter, loc, newOutputType, newInit, padValue, op.getOutputMin(),
+                op.getOutputMax(), op.getStride(), newPadsAttr, op.getKernel(), op.getWeights(),
+                op.getScaleBias(), newInput
+            );
+        }
+        else {
+            newOp = TorqConvPoolOp::create(
+                rewriter, loc, newOutputType, newInit, op.getInputZp(), op.getWeightZp(),
+                op.getOutputZp(), op.getOutputMin(), op.getOutputMax(), op.getShiftFactor(),
+                op.getGroups(), newPadsAttr, op.getStride(), op.getDilation(),
+                op.getVectorizationMode(), op.getWeights(), op.getScaleBias(), newInput
+            );
+        }
+        rewriter.replaceOpWithNewOp<tensor::ExtractSliceOp>(
+            op, newOp.getOutput(), createVector(dropOffsets, rewriter),
+            createVector({outShape[0], outShape[1], outShape[2], outShape[3]}, rewriter),
+            createVector({1, 1, 1, 1}, rewriter)
+        );
+        return success();
+    }
+};
+
 // Fix stride-2 convolutions with odd dimensions by adding explicit padding.
 // NPU segmentation for stride-2 requires even H/W dimensions.
 template <class TorqConvPoolOp>
@@ -1173,6 +1330,19 @@ class ValidToSamePadPass : public impl::ValidToSamePadPassBase<ValidToSamePadPas
 
 void ValidToSamePadPass::runOnOperation() {
     MLIRContext *ctx = getOperation().getContext();
+
+    // Phase 0: give the stride-2 ops with an even kernel the leading padding the kernels support
+    {
+        RewritePatternSet patterns(ctx);
+        patterns.add<AlignEvenKernelStride2PaddingPattern<torq_hl::Conv2DOp>>(ctx);
+        patterns.add<AlignEvenKernelStride2PaddingPattern<torq_hl::DepthwiseConv2DOp>>(ctx);
+        patterns.add<AlignEvenKernelStride2PaddingPattern<torq_hl::MaxPool2dOp>>(ctx);
+        GreedyRewriteConfig cfg;
+        cfg.setStrictness(GreedyRewriteStrictness::ExistingOps);
+        if (failed(applyPatternsGreedily(getOperation(), std::move(patterns), cfg))) {
+            return signalPassFailure();
+        }
+    }
 
     // Phase 1: Apply odd-dimension stride fixing first (highest priority)
     // This ensures explicit padding is added for odd dimensions before other patterns run
