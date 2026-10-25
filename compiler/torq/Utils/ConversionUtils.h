@@ -402,13 +402,20 @@ struct Permutation : SmallVector<int64_t> {
 bool isGroupSwapTranspose(ArrayRef<int64_t> perm, int &batchDims, int &rowDims);
 
 // Whether a transpose of an input of the given shape and element size is lowered with the block
-// transpose (TransposePattern.cpp, which uses the generalized transpose for the rows and cols that
-// don't fill a block): for group-swap permutations of 8 and 16-bit elements with at least 32 rows
-// and cols.
+// transpose (TransposePattern.cpp): for group-swap permutations of 8 and 16-bit elements with at
+// least 32 rows and cols.
 bool useBlockTranspose(
     ArrayRef<int64_t> perm, ArrayRef<int64_t> inputShape, int elementSize, int &batchDims,
     int &rowDims
 );
+
+// Whether a block transpose (see useBlockTranspose()) writes whole blocks into a padded output.
+// This is the case for a swap of the last two dims, as before other group swaps were supported:
+// transposing the rows and cols that don't fill a block with the generalized transpose is much
+// slower there. Other group swaps do that instead, so that their output isn't padded: the padding
+// can make tile-and-fuse pick smaller tiles of the surrounding ops (e.g. NCHW <-> NHWC around
+// convs).
+bool usePaddedBlockTranspose(int batchDims, int rank);
 
 struct ShapeStrideTuple {
     int64_t size;

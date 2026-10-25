@@ -239,12 +239,47 @@ template <typename ConvT> static KernelEncoding getConvLikeKernelEncoding(ConvT 
 }
 
 KernelEncoding TransposeOp::getKernelEncoding() {
-    // The block transpose only reads and writes inside its input and output (TransposePattern.cpp
-    // transposes the rows and cols that don't fill a block with the generalized transpose), so the
-    // transposes only need the minimal output alignment
+    KernelTensorEncoding inEncodingAttr;
     KernelTensorEncoding outEncodingAttr;
     outEncodingAttr.paddingAlign = 64;
-    return {{}, outEncodingAttr};
+
+    // Without padding, the block transpose only reads and writes inside its input and output
+    // (TransposePattern.cpp transposes the rows and cols that don't fill a block with the
+    // generalized transpose), so the transposes only need the minimal output alignment
+    auto inputType = cast<RankedTensorType>(getInput().getType());
+    ArrayRef<int64_t> perm = getPerm();
+    int rank = perm.size();
+    int elementSize = getScalarSizeBytes(inputType.getElementType());
+    int batchDims = 0;
+    int rowDims = 0;
+    if (!torq::useBlockTranspose(perm, inputType.getShape(), elementSize, batchDims, rowDims) ||
+        !torq::usePaddedBlockTranspose(batchDims, rank)) {
+        return {{}, outEncodingAttr};
+    }
+
+    // A swap of the last two dims writes whole blocks of R output rows of S elements, so the
+    // output must have room for its rows and row count rounded up to these sizes
+    constexpr int transposeBlockSize = 32;
+    const int R = transposeBlockSize / elementSize; // 32 for i8, 16 for bf16
+    const int S = transposeBlockSize;
+    int64_t paddedH = torq::align_ceil(inputType.getDimSize(rank - 1), R);
+    int64_t paddedW = torq::align_ceil(inputType.getDimSize(rank - 2), S);
+
+    // Align the output row stride to paddedW so that the vectorized writes don't spill into the
+    // next row on HW (the simulator doesn't model the spill), and make room for paddedH rows: with
+    // batch dims by aligning the stride of the last batch dim, otherwise with the buffer padding
+    outEncodingAttr.stridesAlign.resize(rank, 0);
+    outEncodingAttr.stridesAlign[rank - 2] = paddedW;
+    if (batchDims > 0) {
+        outEncodingAttr.stridesAlign[batchDims - 1] = paddedH * paddedW;
+    }
+    else {
+        outEncodingAttr.paddingAlign = paddedH * paddedW;
+    }
+
+    // The input vectors are read in blocks of 64 bytes
+    inEncodingAttr.paddingAlign = 64;
+    return {{{getInputMutable().getOperandNumber(), inEncodingAttr}}, outEncodingAttr};
 }
 
 static KernelEncoding getDenseEncoding() { return {{}, {{}, 64, true}}; }

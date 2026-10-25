@@ -325,7 +325,12 @@ TransposePattern::transform(torq_hl::TransposeOp op, PatternRewriter &rewriter) 
         output.denseDims() >= 1;
 
     SmallVector<Slice> slices;
-    if (useBlockTranspose) {
+    if (useBlockTranspose && usePaddedBlockTranspose(batchDims, perm.size())) {
+        // Swap of the last two dims: the output is padded to whole blocks (see
+        // TransposeOp::getKernelEncoding()), so the block kernel transposes it all
+        slices.push_back(convertBlock(input, output));
+    }
+    else if (useBlockTranspose) {
         // The block kernel transposes groups of 32 input rows into 32 elements of the output rows,
         // and vectors of 32 bytes of the input cols into as many output rows. To keep its writes
         // inside the output without padding it, it only transposes input rows [0, rows32) and

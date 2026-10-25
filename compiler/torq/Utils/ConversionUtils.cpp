@@ -491,6 +491,8 @@ bool useBlockTranspose(
     return inRows >= 32 && inCols >= 32;
 }
 
+bool usePaddedBlockTranspose(int batchDims, int rank) { return batchDims == rank - 2; }
+
 // Groups the given dimensions that are continuous
 // Eg: Size(2, 3, 4, 5) Stride(192, 64, 5, 1) -> Size(6, 20) Stride (3, 5)
 llvm::SmallVector<ShapeStrideTuple>
