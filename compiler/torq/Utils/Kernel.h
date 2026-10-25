@@ -305,14 +305,12 @@ class LData : public DataT<LData> {
 
     LData operator[](IterVar index) const {
         LData subData = DataT<LData>::operator[](index);
-        subData._value = _value;
-        subData._symbols = _symbols;
+        subData._d = _d;
         return subData;
     }
     LData operator[](const Indexes &ixs) const {
         LData subData = DataT<LData>::operator[](ixs);
-        subData._value = _value;
-        subData._symbols = _symbols;
+        subData._d = _d;
         return subData;
     }
 
@@ -361,6 +359,13 @@ class LData : public DataT<LData> {
     // Should never be applied to output tensors as their size might go beyond the allocated memory
     LData &forceReshapeDim(int dimIndex, const std::vector<int> &newDims);
 
+    // Same as forceReshapeDim() but if the resulting shape is larger than the original one
+    // the additional data will be read as padValue by IRam::load().
+    // For example in a tensor of shape [17, 64] reshaped to [5, 4, 64] the last 3 vectors will be
+    // loaded as padValue.
+    // Can only be applied once and only to input tensors.
+    LData &padReshapeDim(int dimIndex, const std::vector<int> &newDims, int padValue);
+
     // Insert a new dimension at the specified index (negative is intended relative to the end)
     LData &insertDim(int dimIndex, const ShapeItem &item);
 
@@ -397,10 +402,16 @@ class LData : public DataT<LData> {
     LData &partitionByIndexParity2D();
 
     // Get the MLIR Value associated to this data (if any)
-    Value value() const { return _value; }
+    Value value() const { return _d.value; }
 
     // Get the symbols used in the strides of this data (if any)
-    mlir::ValueRange symbols() const { return _symbols; }
+    mlir::ValueRange symbols() const { return _d.symbols; }
+
+    // Get unpadded dim count
+    int unpaddedDimCount() const { return _d.unpaddedDimCount; }
+
+    // Get the padding value used for this data (if any)
+    int padValue() const { return _d.padValue; }
 
     // Join two data tensors along a new axis. Same as numpy.stack
     // The axis parameter specifies the index of the new axis in the dimensions of the result.
@@ -410,11 +421,19 @@ class LData : public DataT<LData> {
     static LData stack(OpBuilder &, const LData &first, const LData &second, int axis = 0);
 
   private:
-    // MLIR Value (if any) associated to this data
-    Value _value{};
+    struct {
+        // MLIR Value (if any) associated to this data
+        Value value{};
 
-    // MLIR Values used in expressions associated to this data (if any)
-    std::vector<Value> _symbols;
+        // MLIR Values used in expressions associated to this data (if any)
+        std::vector<Value> symbols;
+
+        // Number of items in the original dimension before padReshapeDim
+        int unpaddedDimCount{-1};
+
+        // Padding value used for this data (if any)
+        int padValue{0};
+    } _d;
 };
 
 // A GLData provides a more generalized data representation than a standard LData can support.
@@ -612,12 +631,19 @@ class WRam : public SliceRam {
     // Optimally efficient only for data[0] == 1 and data[0] == transposeHeight()
     WData transpose(const LData &data, DType type = DType::none);
 
+    // The maximum height (number of rows) supported by transpose operation
+    int transposeHeight() const;
+
     // The maximum width (number of columns) supported by transpose operation for the given type
     // If type not specified it will be assumed to be the type inferred by iWidth()
     int transposeWidth(DType type = DType::none) const;
 
-    // The maximum height (number of rows) supported by transpose operation
-    int transposeHeight() const;
+    // The optimal transpose width for the given row size and type
+    // If type not specified it will be assumed to be the type inferred by iWidth()
+    // The returned width is the value that allows to cover rowSize in the minimum number of steps
+    // If exactFit is true the returned width will exactly cover rowSize, otherwise the chunks
+    // may cover more than rowSize
+    int optimalTransposeWidth(int rowSize, bool exactFit, DType type = DType::none) const;
 
     const char *name() const override;
     int size() const override;

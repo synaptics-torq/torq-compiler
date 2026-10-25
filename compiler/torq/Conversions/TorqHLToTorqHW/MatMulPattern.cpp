@@ -97,6 +97,26 @@ static torq_hw::SliceTaskOp lowerToMatmul(
     return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
+// True if the rows of matA are contiguous in memory, so reading past the end of a row
+// reads the beginning of the next row
+static bool hasDenseRows(torq_hl::MatMulOp op) {
+    LData matA(op.getInput1());
+    return matA.denseDims() >= std::min<int>(matA.shape().size(), 2);
+}
+
+// Size of the chunks the rows of matA are split into by the fast matmul kernel.
+// If it doesn't divide K the last chunk of each row reads past the end of the row
+// (the corresponding matB rows are padded with 0). For floats this is only allowed if
+// the rows are dense, otherwise the data read could be junk that gives NaN when multiplied by 0.
+static int fastMatmulRowChunkSize(torq_hl::MatMulOp op) {
+    LData matA(op.getInput1());
+    LData matB(op.getInput2());
+    Slice slice;
+    slice.alu.iWidth(matB.elementType(), matA.elementType()); // Infers the WRAM type
+    bool exactFit = isFloat(matA.elementType()) && !hasDenseRows(op);
+    return slice.wram.optimalTransposeWidth(matA.dims().back(), exactFit);
+}
+
 static torq_hw::SliceTaskOp lowerToFastMatmul(
     torq_hl::MatMulOp op, PatternRewriter &rewriter, Value init, int rowOffset, int rowCount
 ) {
@@ -152,12 +172,11 @@ static torq_hw::SliceTaskOp lowerToFastMatmul(
 
     int outRowVectSize = std::min(slice.wram.transposeHeight(), output.dim(MatC::M));
     int vectSize = slice.alu.iWidth(matB.elementType(), matA.elementType(), outRowVectSize);
-    int rowChunkSize = maxDivisor(matA.dim(MatA::K), slice.wram.transposeWidth());
-
-    matA.reshapeDim(MatA::K, {-1, rowChunkSize});   // Split each row in chunks
+    int rowChunkSize = fastMatmulRowChunkSize(op);
+    matA.vectorize(rowChunkSize);                   // Split each row in chunks
     matA.reshapeDim(MatA::M, {-1, outRowVectSize}); // Split rows in groups of outRowVectSize
     matB.vectorize(vectSize);
-    matB.reshapeDim(MatB::K, {-1, rowChunkSize}); // Split rows in chunks
+    matB.padReshapeDim(MatB::K, {-1, rowChunkSize}, 0); // Split rows in chunks, padding if needed
     output.reshapeDim(MatC::M, {-1, outRowVectSize});
 
     BData bdata = slice.bram.load(biasScale);
@@ -193,14 +212,26 @@ static torq_hw::SliceTaskOp lowerToFastMatmul(
 template <>
 LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &rewriter) const {
     Value initValue = op.getInit();
-    auto wDims = LData(op.getInput1()).dims();
+    LData wdata(op.getInput1());
+    auto wDims = wdata.dims();
     int outRowVectSize = Slice().wram.transposeHeight();
     int outRowCount = wDims.size() == 1 ? 1 : wDims.size() == 2 ? wDims[0] : wDims[1];
     torq_hw::SliceTaskOp hwOp;
 
+    if (isFloat(wdata.elementType()) && outRowCount > 1 &&
+        wDims.back() % fastMatmulRowChunkSize(op) != 0) {
+        // The fast matmul reads past the end of each row of matA. For dense rows this reads
+        // the beginning of the next row: real data, multiplied by the 0 padding of matB.
+        // This is safe as long as that data is finite (inf * 0 gives NaN).
+        // The exception is the last row: reading the junk beyond the last row
+        // may collect NaNs in the accumulation, so this line has to be handled separately
+        hwOp = lowerToMatmul(op, rewriter, initValue, --outRowCount, 1);
+        initValue = hwOp.getQ()[0];
+    }
+
     if (int peeledRows = outRowCount % outRowVectSize) {
         // For one single output row (M == 1) fast matmul works but has no advantage at all,
-        // so use normal matmul which may be marginally more efficient loading one weight at a time.
+        // so use normal matmul which has less constraints.
         hwOp =
             peeledRows == 1
                 ? lowerToMatmul(op, rewriter, initValue, outRowCount - peeledRows, peeledRows)
@@ -216,7 +247,7 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
             return failure();
         }
     }
-    rewriter.replaceOp(op, hwOp.getOperation()->getResults());
+    rewriter.replaceOp(op, hwOp);
     return success();
 }
 

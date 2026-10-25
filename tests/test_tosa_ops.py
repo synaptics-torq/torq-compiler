@@ -39,9 +39,9 @@ def case_config(request, runtime_hw_type, chip_config):
     if any(s in request.param.data.name for s in no_slicing_tc):
         extra_args["torq_compiler_options"].append("--torq-disable-slicing=true")
 
-    if "matmul-in-int16" in request.param.name:
+    if any(s in request.param.name for s in ["matmul-in-int16", "matmul-notile-m3-k113-n80-i16"]):
         # Full-range int16 products overflow the 33-bit ACT input over the
-        # 128-long reduction; keep K * max^2 below 2^31.
+        # 113/128-long reduction; keep K * max^2 below 2^31.
         extra_args["tweaked_input_data_range"]  = (-4096, 4096)
 
     if any(s in request.param.data.name for s in need_input_type_tc):

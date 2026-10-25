@@ -15,6 +15,7 @@
 #include "llvm/Support/Debug.h"
 
 #include <numeric>
+#include <tuple>
 
 #define DEBUG_TYPE "torq-easy-kernel"
 
@@ -873,7 +874,7 @@ llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Data &shape) {
     return os;
 }
 
-LData::LData(Value value) : LData(cast<MemRefType>(value.getType())) { _value = value; }
+LData::LData(Value value) : LData(cast<MemRefType>(value.getType())) { _d.value = value; }
 
 LData::LData(const MemRefType &type) : DataT(Shape{}, DType::none, 0) {
     const DType elementType = getDType(type.getElementType());
@@ -988,6 +989,28 @@ LData &LData::forceReshapeDim(int dimIndex, const std::vector<int> &newDims) {
     return *this;
 }
 
+LData &LData::padReshapeDim(int dimIndex, const std::vector<int> &newDims, int padValue) {
+    dimIndex = normalizeIndex(dimIndex);
+    assert(_d.unpaddedDimCount == -1 && "padReshapeDim can only be applied once");
+
+    // Mark this dimension as Main: HW uses this tag to control the padding
+    if (int rank = shape().size(); rank >= 2 && shape()[rank - 2].tag == ShapeItem::Tag::Main) {
+        // Remove the Main tag from the vectorized dimension, we are not doing padding there
+        getShape()[rank - 2].tag = ShapeItem::Tag::None;
+    }
+    getShape()[dimIndex].tag = ShapeItem::Tag::Main;
+
+    int originalDimCount = dim(dimIndex);
+    int originalItemCount = elementCount(shape());
+    torq::reshapeDim(*this, dimIndex, newDims, true);
+    if (elementCount(shape()) != originalItemCount) {
+        // Remember the original dimension count before padding
+        _d.unpaddedDimCount = originalDimCount;
+        _d.padValue = padValue;
+    }
+    return *this;
+}
+
 LData &LData::broadcastAs(const LData &other, int numDims) {
     if (shape().empty() || (shape().size() == 1 && shape()[0].count == 1)) {
         // Broadcasting from scalar or single-element vector
@@ -1085,6 +1108,8 @@ LData LData::stack(OpBuilder &builder, const LData &first, const LData &second, 
     assert(first.elementType() == second.elementType() && "Data must have the same element type");
     assert(first.shape() == second.shape() && "Data must have the same shape");
     assert(first.offset() == second.offset() && "Data must have the same offset`");
+    assert(first.unpaddedDimCount() < 0 && "Padded data not yet supported");
+    assert(second.unpaddedDimCount() < 0 && "Padded data not yet supported");
 
     auto ctx = builder.getContext();
     auto loc = builder.getUnknownLoc();
@@ -1095,8 +1120,8 @@ LData LData::stack(OpBuilder &builder, const LData &first, const LData &second, 
     // The difference between the two input addresses is used as offset to fetch the data
     stacked.insertDim(axis, {2, Stride(inputDiff)});
 
-    stacked._symbols.push_back(GetAddressOp::create(builder, loc, first.value()).getAddress());
-    stacked._symbols.push_back(GetAddressOp::create(builder, loc, second.value()).getAddress());
+    stacked._d.symbols.push_back(GetAddressOp::create(builder, loc, first.value()).getAddress());
+    stacked._d.symbols.push_back(GetAddressOp::create(builder, loc, second.value()).getAddress());
     return stacked;
 }
 
@@ -1107,6 +1132,8 @@ GLData::GLData(const LData &first) : DataT(Shape(first.shape()), first.elementTy
 GLData GLData::stack(const LData &first, const LData &second, int index) {
     assert(first.elementType() == second.elementType() && "Data must have the same element type");
     assert(first.dims() == second.dims() && "Data must have the same dimensions");
+    assert(first.unpaddedDimCount() < 0 && "Padded data not yet supported");
+    assert(second.unpaddedDimCount() < 0 && "Padded data not yet supported");
     GLData data(first);
     data._ldata.push_back(second);
     data._dimIx = index;
@@ -1237,6 +1264,10 @@ struct SlicePrivate {
     void dewr(const LData &data, bool fuse);
     void debr(const LData &data);
     void deqw(const LData &output, int appendBlockSize = -1);
+
+    void setKernel(const LRTBDim &lrtb);
+    void setOutputChannelShape(int height, int width);
+    void setPadding(const LRTBDim &lrtb, int padValue);
 
     void ref(const LData &data);
 
@@ -2377,6 +2408,23 @@ void SlicePrivate::deqw(const LData &output, int appendBlockSize) {
     _ndls.add(memNdl(NdlType::DEQW, output, true, NdlSyncMode::NONE, appendBlockSize));
 }
 
+void SlicePrivate::setKernel(const LRTBDim &lrtb) { _cfg.kernel = lrtb; }
+
+void SlicePrivate::setOutputChannelShape(int height, int width) {
+    auto refNdl = _ndls.getMemNdl(NdlType::REF);
+    assert(!refNdl && "Must be called before storing the output");
+    _outputChannelHeight = height;
+    _outputChannelWidth = width;
+}
+
+void SlicePrivate::setPadding(const LRTBDim &lrtb, int padValue) {
+    _cfg.pad.left = lrtb.left > 0;
+    _cfg.pad.right = lrtb.right > 0;
+    _cfg.pad.top = lrtb.top;
+    _cfg.pad.bottom = lrtb.bottom;
+    _cfg.pad_value = padValue;
+}
+
 void SlicePrivate::ref(const LData &data) {
     if (_ndls.getMemNdl(NdlType::REF)) {
         // REF NDL must be generated only once
@@ -3033,7 +3081,7 @@ void Slice::store(const LData &output, int value) {
 
 int Slice::scatter() const { return getBusScatterGather(NdlType::DEQW); }
 
-void Slice::setKernel(const LRTBDim &lrtb) { d->_cfg.kernel = lrtb; }
+void Slice::setKernel(const LRTBDim &lrtb) { d->setKernel(lrtb); }
 
 void Slice::setStride(int stride) {
     assert(stride <= 2 && "stride value not supported by HW, must be <= 2");
@@ -3042,19 +3090,10 @@ void Slice::setStride(int stride) {
 
 void Slice::setStrideOffset(int stride_offset) { d->_cfg.stride_offset = stride_offset; }
 
-void Slice::setPadding(const LRTBDim &lrtb, int padValue) {
-    d->_cfg.pad.left = lrtb.left > 0;
-    d->_cfg.pad.right = lrtb.right > 0;
-    d->_cfg.pad.top = lrtb.top;
-    d->_cfg.pad.bottom = lrtb.bottom;
-    d->_cfg.pad_value = padValue;
-}
+void Slice::setPadding(const LRTBDim &lrtb, int padValue) { d->setPadding(lrtb, padValue); }
 
 void Slice::setOutputChannelShape(int height, int width) {
-    auto refNdl = d->_ndls.getMemNdl(NdlType::REF);
-    assert(!refNdl && "Must be called before storing the output");
-    d->_outputChannelHeight = height;
-    d->_outputChannelWidth = width;
+    d->setOutputChannelShape(height, width);
 }
 
 torq_hw::SliceCFGAttr Slice::getCfgAttr(MLIRContext *ctx) const {
@@ -3230,6 +3269,20 @@ static IData iramLoadImpl(
     idata.setShape(iramShape);
 
     checkLoadSize(iRam, idata);
+
+    if (int unpaddedDim = data.unpaddedDimCount(); unpaddedDim >= 0) {
+        // Apply data padding.
+        // The idea is to take advantage of the HW padding support used in convolutions:
+        // unpaddedDim contains the number of valid data vectors to read, so we set the
+        // channel shape to (unpaddedDim, vectorSize). Any additional vector read
+        // after this will be automatically filled with padding values by the hardware.
+        // For this to work we have to set both the kernel and padding bottom size to 1.
+        int vectorSize = data.dim(Vectorized::Elements);
+        d->setOutputChannelShape(unpaddedDim, vectorSize);
+        d->setKernel(LRTBDim(std::vector<int64_t>{0, 0, 0, 1}));
+        d->setPadding(LRTBDim(std::vector<int64_t>{0, 0, 0, 1}), data.padValue());
+    }
+
     return idata;
 }
 
@@ -3286,9 +3339,34 @@ int WRam::size() const {
     return HwInfo::wram_seg_width + 4;
 }
 
+int WRam::transposeHeight() const { return d->wramTransposeHeight(); }
+
 int WRam::transposeWidth(DType type) const { return d->wramTransposeWidth(type); }
 
-int WRam::transposeHeight() const { return d->wramTransposeHeight(); }
+int WRam::optimalTransposeWidth(int rowSize, bool exactFit, DType type) const {
+    int rowChunkSizeMax = transposeWidth(type);
+    if (exactFit) {
+        // Get the largest value that divides rowSize exactly without exceeding the max width
+        return maxDivisor(rowSize, rowChunkSizeMax);
+    }
+
+    // Transposing a chunk takes transposeHeight() cycles (CEWW reads one row per cycle), which
+    // overlaps with the computation on the previous chunk, so a chunk of width w costs about
+    // max(w, transposeHeight()) steps. Pick the width with the lowest total cost.
+    // In case of tie prefer the width with less padding (fewer data values read from LRAM and
+    // no row overflow when it divides rowSize), then the largest one (fewer chunks).
+    auto cost = [&](int w) {
+        int chunks = div_ceil(rowSize, w);
+        return std::make_tuple(chunks * std::max(w, transposeHeight()), chunks * w - rowSize, -w);
+    };
+    int rowChunkSize = 1;
+    for (int w = 2; w <= rowChunkSizeMax; w++) {
+        if (cost(w) < cost(rowChunkSize)) {
+            rowChunkSize = w;
+        }
+    }
+    return rowChunkSize;
+}
 
 // Determine the weight memory format
 // Asserts if in-memory weight type not compatible with the destination (wbus) weight type
@@ -3336,6 +3414,7 @@ static WeightFormat getWeightMemoryFormat(DType memType, DType dstType) {
 
 WData WRam::load(const LData &data, DType dstType, bool transpose) {
     debugTensor("WTensor", data);
+    assert(data.unpaddedDimCount() < 0 && "Padded data not supported");
     DType inMemWType = data.elementType();
     if (dstType == DType::none) {
         // Use deduced weight type if any, or use default deduction from the in-memory type
@@ -3416,6 +3495,7 @@ int BRam::width() const {
 
 BData BRam::load(const LData &data) {
     debugTensor("BTensor", data);
+    assert(data.unpaddedDimCount() < 0 && "Padded data not supported");
     DType elType = data.elementType();
     assert(elType == DType::fp32 || elType == DType::int32 || elType == DType::uint32);
 
@@ -3817,13 +3897,16 @@ static void vectorize(LData &data, int vectorSize, int vectorStride) {
 
     // Append new vectorized dimensions.
     // Use the 'Main' tag for the count dimension to indicate it's the main vectorized dimension.
+    // The exception is if this tensor has been padded, in which case the Main tag is already used
+    // on that dimension to control the padding.
     // If itemCount <= vectorSize create one single vector of that size (this optimization is not
     // done if the vectorSize != vectorStride, this is needed for convolution with frame size
     // exactly equal to vectorSize because in that case we have to respect the vectorStride to
     // take into account padding).
     // If the dimension is broadcasted, we keep stride 0 for both the vector and the item dimensions
     int vectCount = div_ceil(itemCount, vectorStride);
-    shape.push_back(ShapeItem{vectCount, isBroadcast ? 0 : vectorStride, ShapeItem::Tag::Main});
+    auto tag = data.unpaddedDimCount() < 0 ? ShapeItem::Tag::Main : ShapeItem::Tag::None;
+    shape.push_back(ShapeItem{vectCount, isBroadcast ? 0 : vectorStride, tag});
     shape.push_back(ShapeItem{
         vectCount > 1 || vectorSize != vectorStride ? vectorSize : itemCount, isBroadcast ? 0 : 1
     });
