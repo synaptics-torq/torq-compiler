@@ -118,6 +118,45 @@ static std::pair<double, linalg::GenericOp> tryExtractFusedScale(Value output) {
     return {value, genericOp};
 }
 
+// The integer clamp (minsi and/or maxsi of the data with constants) that is the only user of the
+// result of a max pooling, if any: e.g. the clamp of a quantize folded in an int8 max pooling (see
+// FoldMaxPoolQuantization), whose maxsi with -128 is removed by the canonicalization. The max
+// pooling applies it to its output.
+static linalg::GenericOp getMaxPoolOutputClamp(Value output, int32_t &clampMin, int32_t &clampMax) {
+    if (!output.hasOneUse() || !isa<IntegerType>(getElementTypeOrSelf(output.getType()))) {
+        return {};
+    }
+    auto clampOp = dyn_cast<linalg::GenericOp>(*output.getUsers().begin());
+    if (!clampOp || !linalg::isElementwise(clampOp) || clampOp.getNumDpsInputs() != 1 ||
+        clampOp.getResult(0).getType() != output.getType()) {
+        return {};
+    }
+    clampMin = std::numeric_limits<int32_t>::min();
+    clampMax = std::numeric_limits<int32_t>::max();
+    Value v = clampOp.getBody()->getTerminator()->getOperand(0);
+    while (!isa<BlockArgument>(v)) {
+        Operation *op = v.getDefiningOp();
+        if (!isa<arith::MinSIOp, arith::MaxSIOp>(op)) {
+            return {};
+        }
+        std::optional<int64_t> bound = getConstantIntValue(op->getOperand(1));
+        if (!bound) {
+            return {};
+        }
+        if (isa<arith::MinSIOp>(op)) {
+            clampMax = std::min<int64_t>(clampMax, *bound);
+        }
+        else {
+            clampMin = std::max<int64_t>(clampMin, *bound);
+        }
+        v = op->getOperand(0);
+    }
+    if (v != clampOp.getBody()->getArgument(0)) {
+        return {};
+    }
+    return clampOp;
+}
+
 template <typename PoolingOpType, bool IsNCHW>
 struct PoolingMaxOpConversionBase : public OpRewritePattern<PoolingOpType> {
   private:
@@ -178,6 +217,10 @@ struct PoolingMaxOpConversionBase : public OpRewritePattern<PoolingOpType> {
             if (output.hasOneUse() && isa<PoolingOpType>(*output.getUsers().begin())) {
                 return rewriter.notifyMatchFailure(srcOp, "Marked with its consumer max pooling");
             }
+            int32_t clampMin, clampMax;
+            if (auto clampOp = getMaxPoolOutputClamp(output, clampMin, clampMax)) {
+                output = clampOp.getResult(0);
+            }
             Value source = peelPadAndReshapeSource(input);
             while (auto producer = source.getDefiningOp<PoolingOpType>()) {
                 if (!producer->getResult(0).hasOneUse()) {
@@ -235,6 +278,13 @@ struct PoolingMaxOpConversionBase : public OpRewritePattern<PoolingOpType> {
                 createI8Const(rewriter, srcOp, weight, llvm::ArrayRef<int64_t>{1, 1, 1, 1});
         }
 
+        int32_t clampMin, clampMax;
+        linalg::GenericOp clampOp = getMaxPoolOutputClamp(output, clampMin, clampMax);
+        if (clampOp) {
+            outputMin = std::max(outputMin, clampMin);
+            outputMax = std::min(outputMax, clampMax);
+        }
+
         auto maxpoolOp = torq_hl::MaxPool2dOp::create(
             rewriter, loc, srcResultType, createInitTensor(srcOp, rewriter, srcResultType),
             padInfo.padValue, outputMin, outputMax, attrStrides, padInfo.lrtbPad, kernelsShape,
@@ -245,7 +295,13 @@ struct PoolingMaxOpConversionBase : public OpRewritePattern<PoolingOpType> {
         Value result =
             applyOutputTranspose<IsNCHW>(maxpoolOp.getOutput(), srcResultType, loc, rewriter);
 
-        rewriter.replaceOp(output.getDefiningOp(), result);
+        if (clampOp) {
+            rewriter.replaceOp(clampOp, result);
+            rewriter.eraseOp(srcOp);
+        }
+        else {
+            rewriter.replaceOp(output.getDefiningOp(), result);
+        }
 
         return success();
     }

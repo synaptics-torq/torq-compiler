@@ -128,6 +128,16 @@ class OptimizeLinalgForTorqPass
             return signalPassFailure();
         }
 
+        // Quantized maxpools must be in int8 before sharing their stages: a maxpool computed from
+        // another one no longer reads the dequantize
+        RewritePatternSet maxPoolPatterns(ctx);
+        populateFoldMaxPoolQuantizationPatterns(ctx, maxPoolPatterns);
+        auto frozenMaxPoolPatterns =
+            FrozenRewritePatternSet(std::move(maxPoolPatterns), disabledPatterns, enabledPatterns);
+        if (failed(applyPatternsGreedily(getOperation(), frozenMaxPoolPatterns))) {
+            return signalPassFailure();
+        }
+
         shareMaxPoolStages(funcOp, rewriter);
 
         // Split the maxpools with kernels larger than the HW limits in chains of smaller maxpools,

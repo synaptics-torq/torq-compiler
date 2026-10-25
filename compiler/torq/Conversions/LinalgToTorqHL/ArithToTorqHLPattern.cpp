@@ -116,6 +116,66 @@ broadcastConstantToMatch(Value constantValue, Value referenceValue, PatternRewri
         .getResult();
 }
 
+// The value of the constant operand v of the binary op in the body of srcOp, with the element type
+// of the first input, if v is a constant
+static Attribute getBinaryOperandConstant(linalg::GenericOp srcOp, Value v) {
+    auto referenceType = dyn_cast<RankedTensorType>(srcOp.getInputs()[0].getType());
+    if (!referenceType || !referenceType.hasStaticShape()) {
+        return {};
+    }
+    Type elementType = referenceType.getElementType();
+    Attribute scalarAttr;
+    if (isa<IntegerType>(elementType)) {
+        if (auto value = traceToConstInt(srcOp, v, SplatPolicy::SingleElement)) {
+            scalarAttr = IntegerAttr::get(elementType, *value);
+        }
+    }
+    else if (auto floatType = dyn_cast<FloatType>(elementType)) {
+        if (auto value = traceToConstFloat(srcOp, v, SplatPolicy::SingleElement)) {
+            bool losesInfo;
+            value->convert(
+                floatType.getFloatSemantics(), llvm::APFloat::rmNearestTiesToEven, &losesInfo
+            );
+            scalarAttr = FloatAttr::get(elementType, *value);
+        }
+    }
+    return scalarAttr;
+}
+
+static Value peelExtSI(Value v) {
+    if (auto extsi = v.getDefiningOp<arith::ExtSIOp>()) {
+        return extsi.getIn();
+    }
+    return v;
+}
+
+// Whether operand v of the binary op in the body of srcOp is an input or a constant
+static bool isBinaryOperandSupported(linalg::GenericOp srcOp, Value v) {
+    v = peelExtSI(v);
+    if (auto arg = dyn_cast<BlockArgument>(v)) {
+        return arg.getOwner() == srcOp.getBody() && arg.getArgNumber() < srcOp.getNumDpsInputs();
+    }
+    return static_cast<bool>(getBinaryOperandConstant(srcOp, v));
+}
+
+// The tensor holding operand v of the binary op in the body of srcOp: the input bound to the block
+// argument, or a splat with the type of the first input for a constant. A constant may be defined
+// in the body when the generic is built after the constants were hoisted to inputs (e.g. by a
+// pattern in a dispatch): using the other input instead would compute min(x, x).
+static Value getBinaryOperandTensor(linalg::GenericOp srcOp, Value v, PatternRewriter &rewriter) {
+    v = peelExtSI(v);
+    if (auto arg = dyn_cast<BlockArgument>(v)) {
+        return srcOp.getInputs()[arg.getArgNumber()];
+    }
+    auto referenceType = cast<RankedTensorType>(srcOp.getInputs()[0].getType());
+    Attribute scalarAttr = getBinaryOperandConstant(srcOp, v);
+    return arith::ConstantOp::create(
+               rewriter, srcOp.getLoc(), referenceType,
+               SplatElementsAttr::get(referenceType, scalarAttr)
+    )
+        .getResult();
+}
+
 class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
@@ -157,8 +217,6 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
         torq_hl::ElementwiseOpEnum opType;
         bool isNegated = false;
         bool isUnsigned = false;
-        auto input0 = srcOp.getInputs()[0];
-        auto input1 = srcOp.getInputs()[srcOp.getInputs().size() > 1 ? 1 : 0];
         bool swapInputs = false;
         if (isa<arith::AndIOp>(op)) {
             if (resultType.getElementType().isInteger(1)) {
@@ -286,6 +344,14 @@ class ElementwiseBinaryArithOpPattern : public OpRewritePattern<linalg::GenericO
             );
         }
 
+        // Checked before creating any constant tensor (the pattern can't fail once it has created
+        // ops)
+        if (!isBinaryOperandSupported(srcOp, op->getOperand(0)) ||
+            !isBinaryOperandSupported(srcOp, op->getOperand(1))) {
+            return rewriter.notifyMatchFailure(srcOp, "Unsupported operand");
+        }
+        Value input0 = getBinaryOperandTensor(srcOp, op->getOperand(0), rewriter);
+        Value input1 = getBinaryOperandTensor(srcOp, op->getOperand(1), rewriter);
         if (swapInputs) {
             std::swap(input0, input1);
         }
