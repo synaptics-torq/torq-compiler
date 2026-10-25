@@ -171,8 +171,22 @@ struct PoolingMaxOpConversionBase : public OpRewritePattern<PoolingOpType> {
         }
 
         if (_markFuseGroups) {
+            // A max pooling whose result only feeds another max pooling (e.g. the stages of a max
+            // pooling split in a chain) is marked in the group of that consumer, so that
+            // tile-and-fuse fuses both in the same tiles instead of writing the intermediate
+            // result to XRAM
+            if (output.hasOneUse() && isa<PoolingOpType>(*output.getUsers().begin())) {
+                return rewriter.notifyMatchFailure(srcOp, "Marked with its consumer max pooling");
+            }
+            Value source = peelPadAndReshapeSource(input);
+            while (auto producer = source.getDefiningOp<PoolingOpType>()) {
+                if (!producer->getResult(0).hasOneUse()) {
+                    break;
+                }
+                source = peelPadAndReshapeSource(producer.getInputs()[0]);
+            }
             if (!markFuseGroupBackward(
-                    output, {peelPadAndReshapeSource(input), kernel}, rewriter,
+                    output, {source, kernel}, rewriter,
                     srcOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
                 ))
                 return failure();

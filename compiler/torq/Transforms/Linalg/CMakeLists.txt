@@ -44,6 +44,8 @@ iree_cc_library(
     OptimizeConv1DPattern.cpp
     OptimizeArithElementwiseBinaryOpPattern.cpp
     CastI32MulPattern.cpp
+    ShareMaxPoolStages.cpp
+    DecomposeLargeMaxPoolPattern.cpp
     OptimizeSwishActivationPattern.cpp
     AbsorbDecomposedWzpCorrectionPattern.cpp
     FuseReluClampWithTruncfPattern.cpp

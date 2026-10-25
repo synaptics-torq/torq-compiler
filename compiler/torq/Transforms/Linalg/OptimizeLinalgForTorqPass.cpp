@@ -127,6 +127,19 @@ class OptimizeLinalgForTorqPass
         if (failed(applyPatternsGreedily(getOperation(), frozenSwishPatterns))) {
             return signalPassFailure();
         }
+
+        shareMaxPoolStages(funcOp, rewriter);
+
+        // Split the maxpools with kernels larger than the HW limits in chains of smaller maxpools,
+        // after the stage sharing which may already reduce them
+        RewritePatternSet splitMaxPoolPatterns(ctx);
+        populateDecomposeLargeMaxPoolPatterns(ctx, splitMaxPoolPatterns);
+        auto frozenSplitMaxPoolPatterns = FrozenRewritePatternSet(
+            std::move(splitMaxPoolPatterns), disabledPatterns, enabledPatterns
+        );
+        if (failed(applyPatternsGreedily(getOperation(), frozenSplitMaxPoolPatterns))) {
+            return signalPassFailure();
+        }
     }
 };
 

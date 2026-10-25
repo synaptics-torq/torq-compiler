@@ -46,6 +46,13 @@ void populateOptimizePowPatterns(MLIRContext *context, RewritePatternSet &patter
 
 void populateCastI32MulPatterns(FunctionOpInterface funcOp, IRRewriter &rewriter);
 
+// Split max poolings with kernels larger than the HW limits in chains of smaller max poolings
+void populateDecomposeLargeMaxPoolPatterns(MLIRContext *context, RewritePatternSet &patterns);
+
+// Compute max poolings from the result of another max pooling of the same input when their windows
+// are nested, e.g. the 9x9 and 13x13 pools of a YOLO SPP block from its 5x5 pool
+void shareMaxPoolStages(FunctionOpInterface funcOp, IRRewriter &rewriter);
+
 void populateSwishActivationPatterns(MLIRContext *context, RewritePatternSet &patterns);
 void populatePreCalcI8TablePatterns(MLIRContext *context, RewritePatternSet &patterns);
 
