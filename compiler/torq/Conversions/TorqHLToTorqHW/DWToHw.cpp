@@ -173,7 +173,8 @@ static torq_hw::SliceTaskOp lowerDwStride2ToHw(
     // For 2x2 (and generally when pad == (kw-1)/2), stride_offset should be 0
     // because the kernel tiles evenly without needing an offset. For other kernels
     // (e.g. 3x3 with same padding), stride_offset=1 is required (same as maxpool stride2).
-    int strideOffset = (pad.left == pad.top && pad.left == (kernelDim.w - 1) / stride) ? 0 : 1;
+    int strideOffset =
+        (pad.left == (kernelDim.w - 1) / stride && pad.top == (kernelDim.h - 1) / stride) ? 0 : 1;
     // FIXME: not sure if needed (from dw sride2 NDL kernel)
     // if (stride == 2 && (ksize_x == 1 && ksize_y == 1)) {
     //     stride = 1;

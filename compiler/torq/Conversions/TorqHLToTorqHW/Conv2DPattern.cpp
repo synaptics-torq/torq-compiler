@@ -189,7 +189,8 @@ LogicalResult Conv2DPattern::transform(torq_hl::Conv2DOp op, PatternRewriter &re
     int32_t pad_bottom = op.getPad()[3];
     int32_t stride_offset = (stride == 2) ? 1 : 0;
 
-    if (stride == 2 && pad_left == pad_top && pad_left == (weight_shape[3] - 1) / 2) {
+    if (stride == 2 && pad_left == (weight_shape[3] - 1) / 2 &&
+        pad_top == (weight_shape[2] - 1) / 2) {
         stride_offset = 0;
     }
 

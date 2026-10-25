@@ -265,7 +265,7 @@ static torq_hw::SliceTaskOp lowerMaxPool2DStride2ToHw(
     // For 2x2 (and generally when pad == (kw-1)/2), stride_offset should be 0
     // because the kernel tiles evenly without needing an offset. For other kernels
     // (e.g. 3x3 with same padding), stride_offset=1 is required.
-    int strideOffset = (pad.left == pad.top && pad.left == (kw - 1) / 2) ? 0 : 1;
+    int strideOffset = (pad.left == (kw - 1) / 2 && pad.top == (kh - 1) / 2) ? 0 : 1;
     slice.setStrideOffset(strideOffset);
     slice.setPadding(pad, op.getInputZp());
 

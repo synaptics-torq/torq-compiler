@@ -489,7 +489,8 @@ LogicalResult DWPattern::transform(torq_hl::DepthwiseConv2DOp op, PatternRewrite
     assert(stride <= 2 && "stride must be less than or equal to 2");
     int32_t stride_offset = (stride == 2) ? 1 : 0;
 
-    if (stride == 2 && pad_left == pad_top && pad_left == (weight_shape[3] - 1) / 2) {
+    if (stride == 2 && pad_left == (int32_t(ksize_x) - 1) / 2 &&
+        pad_top == (int32_t(ksize_y) - 1) / 2) {
         stride_offset = 0;
     }
 

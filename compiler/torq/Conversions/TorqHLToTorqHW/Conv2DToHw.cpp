@@ -133,7 +133,8 @@ static torq_hw::SliceTaskOp lowerConvStride2ToHw(
     // For kernels where pad == (kw-1)/2 the kernel tiles evenly (e.g. 2x2), so stride_offset=0.
     // For other kernels (e.g. 3x3 with same padding) stride_offset=1 is required to align the
     // kernel centre to the correct quadrant (same logic as maxpool stride-2).
-    int strideOffset = (pad.left == pad.top && pad.left == (kernelDim.w - 1) / stride) ? 0 : 1;
+    int strideOffset =
+        (pad.left == (kernelDim.w - 1) / stride && pad.top == (kernelDim.h - 1) / stride) ? 0 : 1;
 
     slice.setStrideOffset(strideOffset);
     slice.setStride(stride);

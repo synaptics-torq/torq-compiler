@@ -109,7 +109,8 @@ MaxPool2dPattern::transform(torq_hl::MaxPool2dOp op, PatternRewriter &rewriter) 
 
     int32_t stride_offset = (stride == 2) ? 1 : 0;
 
-    if (stride == 2 && pad_left == pad_top && pad_left == (weight_shape[1] - 1) / 2) {
+    if (stride == 2 && pad_left == (weight_shape[1] - 1) / 2 &&
+        pad_top == (weight_shape[0] - 1) / 2) {
         stride_offset = 0;
     }
     if (stride == 2) {
