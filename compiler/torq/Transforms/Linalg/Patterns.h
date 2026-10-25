@@ -53,9 +53,11 @@ void populateFoldMaxPoolQuantizationPatterns(MLIRContext *context, RewritePatter
 // Split max poolings with kernels larger than the HW limits in chains of smaller max poolings
 void populateDecomposeLargeMaxPoolPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
-// Compute max poolings from the result of another max pooling of the same input when their windows
-// are nested, e.g. the 9x9 and 13x13 pools of a YOLO SPP block from its 5x5 pool
-void shareMaxPoolStages(FunctionOpInterface funcOp, IRRewriter &rewriter);
+// Split stride-4 max poolings in a stride-2 max pooling and a 1x1 stride-2 max pooling
+void populateSplitStride4MaxPoolPatterns(MLIRContext *context, RewritePatternSet &patterns);
+
+// Lower horizontal 1D max poolings with the vertical kernel between two transposes swapping H and W
+void populateSwapHorizontalMaxPoolPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
 // Compute max poolings from the result of another max pooling of the same input when their windows
 // are nested, e.g. the 9x9 and 13x13 pools of a YOLO SPP block from its 5x5 pool

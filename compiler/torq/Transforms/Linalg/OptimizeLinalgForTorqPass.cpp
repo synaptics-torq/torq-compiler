@@ -140,9 +140,15 @@ class OptimizeLinalgForTorqPass
 
         shareMaxPoolStages(funcOp, rewriter);
 
-        // Split the maxpools with kernels larger than the HW limits in chains of smaller maxpools,
-        // after the stage sharing which may already reduce them
+        // After the quantization folding (a split quantized maxpool would no longer match it) and
+        // the stage sharing (a stride-4 maxpool can read a stride-1 one)
         RewritePatternSet splitMaxPoolPatterns(ctx);
+        populateSplitStride4MaxPoolPatterns(ctx, splitMaxPoolPatterns);
+        // Horizontal 1D maxpools, before the NHWC to NCHW conversion so that the transposes
+        // compose with the layout ones
+        populateSwapHorizontalMaxPoolPatterns(ctx, splitMaxPoolPatterns);
+        // Then kernels larger than the HW limits (including the stride-2 stage of a stride-4
+        // maxpool), after the stage sharing which may already reduce them
         populateDecomposeLargeMaxPoolPatterns(ctx, splitMaxPoolPatterns);
         auto frozenSplitMaxPoolPatterns = FrozenRewritePatternSet(
             std::move(splitMaxPoolPatterns), disabledPatterns, enabledPatterns

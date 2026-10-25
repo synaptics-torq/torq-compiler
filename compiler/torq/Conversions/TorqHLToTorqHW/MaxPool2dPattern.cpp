@@ -60,7 +60,15 @@ static torq_hw::SliceTaskOp lowerMaxPool1DToHw(
 
     Slice slice("MaxPool1D");
 
+    // Each output row is appended separately, and the ACT part of the last (partial) vector of a
+    // row beyond the first ACT width gives wrong results (e.g. bf16, whose ALU vectors of 32 are
+    // read in 2 ACT vectors of 16, with rows of 18 or 24 elements): use vectors of the ACT width
+    // in that case
     int vectSize = slice.alu.iWidth(input.elementType());
+    int actWidth = slice.act.width(input.elementType());
+    if (input.dim(Dim::W) % vectSize > actWidth) {
+        vectSize = actWidth;
+    }
     input.vectorize(vectSize);
 
     auto stride = op.getStride();
