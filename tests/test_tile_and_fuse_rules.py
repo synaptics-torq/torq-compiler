@@ -16,9 +16,9 @@ COMMON_FLAGS = [
 ]
 
 
-def dispatch_dump_after(torq_compiler, tmp_path, mlir, pass_arg):
+def dispatch_dump_after(torq_compiler, tmp_path, mlir, pass_arg, timeout=None):
     """Compile `mlir` and return the last IR dump of the dispatch function after
-    `pass_arg`."""
+    `pass_arg`. `timeout` (seconds) stops a compile that hangs."""
     model = tmp_path / "model.mlir"
     model.write_text(mlir)
     cmd = [
@@ -30,7 +30,7 @@ def dispatch_dump_after(torq_compiler, tmp_path, mlir, pass_arg):
         *COMMON_FLAGS,
     ]
     print("Compiling with:", " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     assert proc.returncode == 0, f"compile failed:\n{proc.stderr}"
 
     dumps = [d for d in proc.stderr.split("// -----// IR Dump After") if "func.func @main_dispatch" in d]
@@ -241,4 +241,47 @@ def test_depthwise_on_tiled_input_is_sliced(torq_compiler, tmp_path):
     assert "scf.for " in dump, f"the depthwise conv was not tiled, so this test proves nothing:\n{dump}"
     assert any(in_forall(dump, "linalg.depthwise_conv_2d_nchw_chw")), (
         f"the depthwise conv was not sliced:\n{dump}"
+    )
+
+
+# 1x1 conv and rescale, then the two H halves swap with slice + concat. The
+# trailing NHWC transpose reads the rescale output only through the fixed
+# halves, which feed tensor.insert_slice outside its tile loop (issue #2673).
+CONV_SLICE_CONCAT = """
+module {
+  func.func @main(%x: tensor<1x120x160x16xi8>) -> tensor<1x120x160x64xi8> {
+    %w = "tosa.const"() <{values = dense<1> : tensor<64x1x1x16xi8>}> : () -> tensor<64x1x1x16xi8>
+    %b = "tosa.const"() <{values = dense<0> : tensor<64xi32>}> : () -> tensor<64xi32>
+    %z = "tosa.const"() <{values = dense<0> : tensor<1xi8>}> : () -> tensor<1xi8>
+    %z32 = "tosa.const"() <{values = dense<0> : tensor<1xi32>}> : () -> tensor<1xi32>
+    %m = "tosa.const"() <{values = dense<1073741824> : tensor<1xi32>}> : () -> tensor<1xi32>
+    %sh = "tosa.const"() <{values = dense<36> : tensor<1xi8>}> : () -> tensor<1xi8>
+    %c = tosa.conv2d %x, %w, %b, %z, %z {acc_type = i32, dilation = array<i64: 1, 1>, pad = array<i64: 0, 0, 0, 0>, stride = array<i64: 1, 1>} : (tensor<1x120x160x16xi8>, tensor<64x1x1x16xi8>, tensor<64xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x120x160x64xi32>
+    %r = tosa.rescale %c, %m, %sh, %z32, %z {input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<1x120x160x64xi32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x120x160x64xi8>
+    %s0 = tosa.const_shape {values = dense<[0, 0, 0, 0]> : tensor<4xindex>} : () -> !tosa.shape<4>
+    %s1 = tosa.const_shape {values = dense<[0, 60, 0, 0]> : tensor<4xindex>} : () -> !tosa.shape<4>
+    %sz = tosa.const_shape {values = dense<[1, 60, 160, 64]> : tensor<4xindex>} : () -> !tosa.shape<4>
+    %lo = tosa.slice %r, %s0, %sz : (tensor<1x120x160x64xi8>, !tosa.shape<4>, !tosa.shape<4>) -> tensor<1x60x160x64xi8>
+    %hi = tosa.slice %r, %s1, %sz : (tensor<1x120x160x64xi8>, !tosa.shape<4>, !tosa.shape<4>) -> tensor<1x60x160x64xi8>
+    %cat = tosa.concat %hi, %lo {axis = 1 : i32} : (tensor<1x60x160x64xi8>, tensor<1x60x160x64xi8>) -> tensor<1x120x160x64xi8>
+    return %cat : tensor<1x120x160x64xi8>
+  }
+}
+"""
+
+
+@pytest.mark.ci
+def test_fixed_slices_outside_tile_loop_are_not_charged(torq_compiler, tmp_path):
+    """The LRAM fit probe charged the fixed concat halves at every tile size, so
+    no tile fit and the transpose got a 1x1x1x1 tile. The compile then hung in
+    UnrollLoop."""
+    dump = dispatch_dump_after(
+        torq_compiler, tmp_path, CONV_SLICE_CONCAT, "torq-tile-and-fuse", timeout=300
+    )
+    transpose_loop = (
+        r"scf\.for %\w+ = %\w+ to %c120(_\d+)? step %c24(_\d+)? "
+        r"iter_args\([^)]*\) -> \(tensor<1x120x160x64xi8>\)"
+    )
+    assert re.search(transpose_loop, dump), (
+        f"the transpose is not tiled in rows of 24:\n{dump}"
     )

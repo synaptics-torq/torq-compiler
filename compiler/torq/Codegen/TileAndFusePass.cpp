@@ -1292,13 +1292,62 @@ static void chargeSliceInLram(OpBuilder &builder, tensor::ExtractSliceOp extract
     extract.erase();
 }
 
+// True if `value` can change from one iteration of `loop` to the next: it is the loop's
+// induction variable or one of its iter_args, or it is computed from one. A value defined
+// inside the loop does not necessarily vary with it: in an interchanged nest
+// for(n) { for(m) { ... } }, the inner m index is defined inside the n loop but does not
+// depend on n. Values from ops with regions are conservatively assumed to vary.
+static bool variesWithLoop(Value value, scf::ForOp loop, DenseSet<Value> &visited) {
+    if (loop.isDefinedOutsideOfLoop(value) || !visited.insert(value).second)
+        return false;
+    if (auto arg = dyn_cast<BlockArgument>(value)) {
+        Operation *owner = arg.getOwner()->getParentOp();
+        if (owner == loop.getOperation())
+            return true;
+        // A nested loop's induction variable varies with `loop` only if its bounds or step do.
+        // Its iter_args carry values from its body, so they are assumed to vary.
+        auto nested = dyn_cast<scf::ForOp>(owner);
+        if (!nested || value != nested.getInductionVar())
+            return true;
+        return llvm::any_of(
+            ValueRange{nested.getLowerBound(), nested.getUpperBound(), nested.getStep()},
+            [&](Value bound) { return variesWithLoop(bound, loop, visited); }
+        );
+    }
+    Operation *def = value.getDefiningOp();
+    if (def->getNumRegions() > 0)
+        return true;
+    return llvm::any_of(def->getOperands(), [&](Value operand) {
+        return variesWithLoop(operand, loop, visited);
+    });
+}
+
+// True if the offsets or sizes of `extract` vary with an enclosing scf.for, so
+// each tile reads a different slice.
+static bool isPerTileSlice(tensor::ExtractSliceOp extract) {
+    for (auto loop = extract->getParentOfType<scf::ForOp>(); loop;
+         loop = loop->getParentOfType<scf::ForOp>()) {
+        DenseSet<Value> visited;
+        if (llvm::any_of(extract->getOperands(), [&](Value operand) {
+                return operand != extract.getSource() && variesWithLoop(operand, loop, visited);
+            }))
+            return true;
+    }
+    return false;
+}
+
 // Charge the live activation slices of the probe module in LRAM: each tile
 // reads only its slice of a payload arg, and the real pipeline keeps that slice
-// live in LRAM, so the probe must count it too.
+// live in LRAM, so the probe must count it too. A fixed slice is not a per-tile
+// read (for example the halves of a slice + concat that feed
+// tensor.insert_slice), inside or outside the tile loop; its size does not
+// change with the tile, so charging it can make every tile fail the probe.
 static void chargeLiveActivationSlices(func::FuncOp funcOp) {
     OpBuilder builder(funcOp.getContext());
-    for (tensor::ExtractSliceOp extract : keepInnermostSlices(findPayloadSlices(funcOp)))
-        chargeSliceInLram(builder, extract);
+    for (tensor::ExtractSliceOp extract : keepInnermostSlices(findPayloadSlices(funcOp))) {
+        if (isPerTileSlice(extract))
+            chargeSliceInLram(builder, extract);
+    }
 }
 
 // Return true iff the tile fits in memory
@@ -2179,36 +2228,6 @@ static bool pointwiseChainNeedsSpatialTile(Operation *op) {
             return true;
     }
     return false;
-}
-
-// True if `value` can change from one iteration of `loop` to the next: it is the loop's
-// induction variable or one of its iter_args, or it is computed from one. A value defined
-// inside the loop does not necessarily vary with it: in an interchanged nest
-// for(n) { for(m) { ... } }, the inner m index is defined inside the n loop but does not
-// depend on n. Values from ops with regions are conservatively assumed to vary.
-static bool variesWithLoop(Value value, scf::ForOp loop, DenseSet<Value> &visited) {
-    if (loop.isDefinedOutsideOfLoop(value) || !visited.insert(value).second)
-        return false;
-    if (auto arg = dyn_cast<BlockArgument>(value)) {
-        Operation *owner = arg.getOwner()->getParentOp();
-        if (owner == loop.getOperation())
-            return true;
-        // A nested loop's induction variable varies with `loop` only if its bounds or step do.
-        // Its iter_args carry values from its body, so they are assumed to vary.
-        auto nested = dyn_cast<scf::ForOp>(owner);
-        if (!nested || value != nested.getInductionVar())
-            return true;
-        return llvm::any_of(
-            ValueRange{nested.getLowerBound(), nested.getUpperBound(), nested.getStep()},
-            [&](Value bound) { return variesWithLoop(bound, loop, visited); }
-        );
-    }
-    Operation *def = value.getDefiningOp();
-    if (def->getNumRegions() > 0)
-        return true;
-    return llvm::any_of(def->getOperands(), [&](Value operand) {
-        return variesWithLoop(operand, loop, visited);
-    });
 }
 
 // A fused producer is recomputed on every iteration of an enclosing tiled loop
