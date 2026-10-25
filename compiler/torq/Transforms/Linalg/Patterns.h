@@ -56,6 +56,10 @@ void populateDecomposeLargeMaxPoolPatterns(MLIRContext *context, RewritePatternS
 // Split stride-4 max poolings in a stride-2 max pooling and a 1x1 stride-2 max pooling
 void populateSplitStride4MaxPoolPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
+// Split max poolings with other strides (e.g. 3, or different along H and W) in a stride-1 max
+// pooling and exact 1D max poolings
+void populateSplitStridedMaxPoolPatterns(MLIRContext *context, RewritePatternSet &patterns);
+
 // Lower horizontal 1D max poolings with the vertical kernel between two transposes swapping H and W
 void populateSwapHorizontalMaxPoolPatterns(MLIRContext *context, RewritePatternSet &patterns);
 

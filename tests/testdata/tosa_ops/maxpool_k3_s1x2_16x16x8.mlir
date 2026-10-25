@@ -1,4 +1,4 @@
-// Not supported on the NSS: runs on CSS
+// 3x3 with strides [1, 2]: split in a 3x2 stride-1 maxpool and a 1x2 stride-[1, 2] maxpool
 module {
   func.func @main(%arg0: tensor<1x16x16x8xi8>) -> tensor<1x16x8x8xi8> {
     %0 = tosa.max_pool2d %arg0 {kernel = array<i64: 3, 3>, pad = array<i64: 1, 1, 1, 0>, stride = array<i64: 1, 2>} : (tensor<1x16x16x8xi8>) -> tensor<1x16x8x8xi8>

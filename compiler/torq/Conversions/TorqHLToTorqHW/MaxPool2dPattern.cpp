@@ -204,7 +204,18 @@ static torq_hw::SliceTaskOp lowerMaxPool2DToHw(
 
     HWDim kernelDim(kh, kw);
     LRTBDim pad(op.getPad());
+    // The window of output i covers the input [i - pad.top, i - pad.top + kh - 1], and the HW
+    // requires the leading padding to be 0 or the leading kernel border. The symmetric border of an
+    // even kernel has the larger half after the center ((k - 1) / 2 before, k / 2 after): swap the
+    // halves when the leading padding is k / 2 (e.g. 2x2 with padding 1 then 0, a SAME_LOWER
+    // padding)
     LRTBDim kernelBorder = LRTBDim::symmetric(kernelDim);
+    if (pad.top > kernelBorder.top) {
+        std::swap(kernelBorder.top, kernelBorder.bottom);
+    }
+    if (pad.left > kernelBorder.left) {
+        std::swap(kernelBorder.left, kernelBorder.right);
+    }
     slice.setKernel(kernelBorder);
     slice.setPadding(pad, op.getInputZp());
     slice.setOutputChannelShape(inputHeight, inputWidth);

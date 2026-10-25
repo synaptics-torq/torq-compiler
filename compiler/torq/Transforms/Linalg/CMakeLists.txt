@@ -47,6 +47,7 @@ iree_cc_library(
     ShareMaxPoolStages.cpp
     FoldMaxPoolQuantizationPattern.cpp
     SplitStride4MaxPoolPattern.cpp
+    SplitStridedMaxPoolPattern.cpp
     SwapHorizontalMaxPoolPattern.cpp
     DecomposeLargeMaxPoolPattern.cpp
     OptimizeSwishActivationPattern.cpp

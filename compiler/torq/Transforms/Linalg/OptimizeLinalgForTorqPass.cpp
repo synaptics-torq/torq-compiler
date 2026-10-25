@@ -144,8 +144,10 @@ class OptimizeLinalgForTorqPass
         // the stage sharing (a stride-4 maxpool can read a stride-1 one)
         RewritePatternSet splitMaxPoolPatterns(ctx);
         populateSplitStride4MaxPoolPatterns(ctx, splitMaxPoolPatterns);
-        // Horizontal 1D maxpools, before the NHWC to NCHW conversion so that the transposes
-        // compose with the layout ones
+        // Other strides, e.g. 3 or different along H and W
+        populateSplitStridedMaxPoolPatterns(ctx, splitMaxPoolPatterns);
+        // Horizontal 1D maxpools, including the 1D stages of the strided split, before the NHWC to
+        // NCHW conversion so that the transposes compose with the layout ones
         populateSwapHorizontalMaxPoolPatterns(ctx, splitMaxPoolPatterns);
         // Then kernels larger than the HW limits (including the stride-2 stage of a stride-4
         // maxpool), after the stage sharing which may already reduce them
