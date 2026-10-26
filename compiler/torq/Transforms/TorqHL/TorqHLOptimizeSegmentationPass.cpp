@@ -94,8 +94,9 @@ class DeduplicateSegmentationPattern : public OpRewritePattern<torq_hl::Segmenta
 // LinalgSlicing slices a producer on channels into an scf.forall. Each
 // iteration inserts whole H x W planes of a channel range. Segmentation
 // reorders each plane on its own, so the producer can write segmented output
-// into its channel range. Returns that producer, or nullptr.
-static Operation *getChannelSlicedProducer(scf::ForallOp forallOp, OpResult result) {
+// into its channel range. Returns the insert of that producer, or nullptr.
+static tensor::ParallelInsertSliceOp
+getChannelSlicedInsert(scf::ForallOp forallOp, OpResult result) {
     if (!forallOp.getOutputs()[result.getResultNumber()].getDefiningOp<tensor::EmptyOp>()) {
         return nullptr;
     }
@@ -117,7 +118,34 @@ static Operation *getChannelSlicedProducer(scf::ForallOp forallOp, OpResult resu
             return nullptr;
         }
     }
-    return insertOp.getSource().getDefiningOp();
+    return insertOp;
+}
+
+// Gives the forall result `result` the segmented type `outputType`, which may have one more row
+// than the result when its row count is odd. Returns the type of the segmented channel range that
+// `insertOp` inserts.
+static RankedTensorType padForallResult(
+    scf::ForallOp forallOp, OpResult result, tensor::ParallelInsertSliceOp insertOp,
+    RankedTensorType outputType, PatternRewriter &rewriter
+) {
+    auto sourceType = insertOp.getSourceType();
+    SmallVector<int64_t> sourceShape(sourceType.getShape());
+    sourceShape[2] = outputType.getShape()[2];
+    SmallVector<int64_t> staticSizes(insertOp.getStaticSizes());
+    staticSizes[2] = sourceShape[2];
+
+    PatternRewriter::InsertionGuard g(rewriter);
+    rewriter.setInsertionPoint(forallOp);
+    auto newInit = tensor::EmptyOp::create(
+        rewriter, forallOp.getLoc(), outputType.getShape(), outputType.getElementType()
+    );
+    rewriter.modifyOpInPlace(forallOp, [&]() {
+        forallOp.getOutputsMutable()[result.getResultNumber()].set(newInit.getResult());
+        forallOp.getRegionIterArgs()[result.getResultNumber()].setType(outputType);
+        result.setType(outputType);
+    });
+    rewriter.modifyOpInPlace(insertOp, [&]() { insertOp.setStaticSizes(staticSizes); });
+    return RankedTensorType::get(sourceShape, sourceType.getElementType());
 }
 
 class SegmentOptimizePattern : public OpRewritePattern<torq_hl::SegmentationOp> {
@@ -159,29 +187,37 @@ class SegmentOptimizePattern : public OpRewritePattern<torq_hl::SegmentationOp> 
         }
 
         auto outputType = llvm::cast<RankedTensorType>(segOp.getOutput().getType());
-        if (auto forallOp = dyn_cast<scf::ForallOp>(op)) {
-            op = getChannelSlicedProducer(forallOp, cast<OpResult>(input));
-            if (!op || outputType != inputType) {
+        auto forallOp = dyn_cast<scf::ForallOp>(op);
+        tensor::ParallelInsertSliceOp insertOp;
+        if (forallOp) {
+            insertOp = getChannelSlicedInsert(forallOp, cast<OpResult>(input));
+            if (!insertOp) {
                 return failure();
             }
-            outputType = llvm::cast<RankedTensorType>(op->getResult(0).getType());
+            op = insertOp.getSource().getDefiningOp();
+            if (!op) {
+                return failure();
+            }
         }
 
-        bool segment_output =
-            TypeSwitch<Operation *, bool>(op)
-                .Case<torq_hl::Conv2DOp, torq_hl::DepthwiseConv2DOp, torq_hl::AddOp>([&](auto op) {
-                    modifyForSegmentedOutput(op, outputType, rewriter);
-                    return true;
-                })
-                .Default([&](Operation *op) { return false; });
-
-        if (segment_output) {
-            segOp.getOutput().replaceAllUsesWith(segOp.getInput());
-            rewriter.eraseOp(segOp);
-            return success();
+        if (!isa<torq_hl::Conv2DOp, torq_hl::DepthwiseConv2DOp, torq_hl::AddOp>(op)) {
+            return failure();
         }
 
-        return failure();
+        // The producer in a forall writes its segmented channel range, with the rows of the
+        // segmentation output.
+        if (forallOp) {
+            outputType =
+                padForallResult(forallOp, cast<OpResult>(input), insertOp, outputType, rewriter);
+        }
+
+        TypeSwitch<Operation *>(op)
+            .Case<torq_hl::Conv2DOp, torq_hl::DepthwiseConv2DOp, torq_hl::AddOp>([&](auto op) {
+                modifyForSegmentedOutput(op, outputType, rewriter);
+            });
+
+        rewriter.replaceOp(segOp, segOp.getInput());
+        return success();
     }
 };
 

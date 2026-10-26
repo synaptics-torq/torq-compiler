@@ -29,7 +29,9 @@ def _segmented_producers(torq_compiler, tmp_path, name, hw):
         "--mlir-print-ir-after=torq-torqhl-optimize-segmentation",
         "--mlir-disable-threading",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        pytest.fail(f"torq-compile failed for {name} on {hw}:\n{result.stderr}")
     strides = []
     for line in result.stderr.splitlines():
         m = CONV_RE.search(line)
@@ -46,6 +48,8 @@ def _segmented_producers(torq_compiler, tmp_path, name, hw):
         ("conv2d_bf16_8x8x3x3_s2_into_s2_segment_output_8x8x40", (2, 2)),
         ("depthwise_conv2d_bf16_8x3x3_s2_into_s2_segment_output_8x8x40", (2, 2)),
         ("conv2d_bf16_8x8x3x3_s1_into_s2_segment_output_8x8x40", (1, 1)),
+        # Odd H: the segmentation pads the 7 rows to 8, and the producer writes the padded rows.
+        ("conv2d_bf16_8x8x3x3_s1_into_dw_s2_segment_output_8x7x40", (1, 1)),
     ],
 )
 def test_producer_writes_segmented_output(torq_compiler, tmp_path, name, stride, hw):
