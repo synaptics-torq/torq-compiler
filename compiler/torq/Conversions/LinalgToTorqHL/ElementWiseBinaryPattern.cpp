@@ -639,6 +639,14 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
                foldBackwardRescale(input1, scaleInput1)) {
         }
 
+        // The fused op multiplies each input by an i16 weight. The ALU cannot multiply an i32
+        // input by an i16 weight. Keep the i32 add and the requantization separate.
+        if (isInt && (!isQuantizedOperand(input0) || !isQuantizedOperand(input1))) {
+            return rewriter.notifyMatchFailure(
+                eltOp, "i32 operand: keep i32 op and requantization separate"
+            );
+        }
+
         // Fusing approximates both input scales with i16 weights and materializes any
         // broadcast operand at the full output shape (broadcastProcessing below), which for a
         // per-channel bias repeats per op and dominates runtime. Hand those to the unfused
