@@ -260,6 +260,32 @@ def test_fold_scalar_matmul_skips_matvec(torq_compiler, tmp_path):
         assert_not_fired(on, matmul_substr, map_substr)
 
 
+def pow_model(exponent, shape=(1, 196, 24)):
+    """Pow(x, exponent) with a constant scalar exponent."""
+    vi = lambda n: helper.make_tensor_value_info(n, TensorProto.FLOAT, list(shape))
+    node = helper.make_node("Pow", ["x", "e"], ["y"])
+    graph = helper.make_graph(
+        [node], "pow", [vi("x")], [vi("y")],
+        [numpy_helper.from_array(np.array(exponent, np.float32), "e")])
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+
+
+POW_OP = re.compile(r"math\.(fpowi|powf)\b")
+
+
+@pytest.mark.ci
+def test_pow3_to_mul_fires(torq_compiler, tmp_path):
+    # bf16 x^3: PowToMulPattern expands it into mul(mul(x, x), x), so no pow op
+    # is left for the host.
+    pass_arg = "torq-optimize-linalg-for-torq"
+    text = dump_after(torq_compiler, tmp_path, pow_model(3.0), pass_arg, *CONVERT_DTYPES,
+                      f"--mlir-print-ir-before={pass_arg}")
+    before, after = ir_dumps(text, "Before")[0], ir_dumps(text, "After")[0]
+    assert POW_OP.search(before) and "bf16" in before, f"control: no bf16 pow to expand:\n{before}"
+    assert not POW_OP.search(after), f"the pow op was not expanded:\n{after}"
+    assert after.count("arith.mulf") == 2, f"x^3 is not two multiplications:\n{after}"
+
+
 # Dispatch-shaped functions at the pass's per-dispatch point: the named
 # unit-reduction matmuls (rank-3 and rank-2) over their zero-fill inits, exactly
 # as the pipeline emits them. Drives OptimizeLinalgForTorq standalone (via
