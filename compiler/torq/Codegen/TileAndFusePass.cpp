@@ -1568,8 +1568,17 @@ static int64_t countTiles(
 // tiles do not. 7 -> 8 tiles in the MobileNetV2 block 1 group on SR200 is worth it.
 // 14 -> 64 tiles in google_proxy_modelA on SR200 is not. The result rounds down, so
 // with the default 50% a tiling of 1 tile keeps its relocation.
-static int64_t maxRelocationFreeTiles(int64_t count) {
-    return count * (100 + clProbeRelocationMaxTileGrowth) / 100;
+//
+// A tile that relocates more than half of the LRAM (`relocatedBytes`) is worth twice the
+// tiles, unless --torq-probe-relocation-max-tile-growth allows more, or is 0 (no additional
+// tile is worth it). For example a 3x3 stride-4 maxpool on 113x113x64 int8 on SL2610 fits
+// 4 tiles of 16 channels by relocating 308 KB per tile, and 8 tiles of 8 channels without
+// relocation.
+static int64_t maxRelocationFreeTiles(int64_t count, int64_t relocatedBytes) {
+    unsigned growth = clProbeRelocationMaxTileGrowth;
+    if (growth > 0 && relocatedBytes * 2 > static_cast<int64_t>(TorqHw::get().getLramSize()))
+        growth = std::max(growth, 100u);
+    return count * (100 + growth) / 100;
 }
 
 // The size of `domain` that splits it into `factor` tiles, or 0 when none does.
@@ -1775,7 +1784,7 @@ TileFit TileAndFusePass::fitTileToMemory(
     SmallVector<OpFoldResult> strictSizes(sizes.begin(), sizes.end());
     FailureOr<std::optional<int64_t>> strictCount = findRelocationFreeTile(
         consumerOp, producerOps, tilingInfo, iterDomainSizes, offsets, strictSizes,
-        maxRelocationFreeTiles(count)
+        maxRelocationFreeTiles(count, lastFitRelocatedBytes_)
     );
     // The relocating tile is valid, so a broken strict probe keeps it.
     if (failed(strictCount)) {
