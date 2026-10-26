@@ -389,6 +389,17 @@ struct PlacementFailure {
     OpIdx opIdx = -1;
     // the buffers pinned there, the only ones left resident
     SmallVector<BufferIdx> pinned;
+    // the op at `opIdx`, for the diagnostic (null if out of range)
+    Operation *op = nullptr;
+    // the size of the buffer that could not be placed, the bytes resident (all pinned) then,
+    // and the usable LRAM
+    int64_t bytes = 0;
+    int64_t residentBytes = 0;
+    int64_t usableBytes = 0;
+
+    StringRef causeName() const {
+        return cause == Cause::Fragmentation ? "fragmentation" : "byte pressure";
+    }
 };
 
 // A placement of every buffer: its offset from the LRAM base at its birth, and the swaps
@@ -416,16 +427,16 @@ class PlacementSimulation {
     };
 
     ArrayRef<LramBuffer> buffers_;
-    // The function body the buffers were collected from, so a failure can name
-    // the op at a given index and its source line.
-    Block *body_;
+    // The ops of the function body the buffers were collected from, by index, so a
+    // failure can name the op at a given index.
+    ArrayRef<Operation *> ops_;
     std::priority_queue<Event, std::vector<Event>, EventLater> events_;
     Occupancy occupancy_;
     SwapSchedule schedule_;
     PlacementFailure failure_;
 
-    PlacementSimulation(ArrayRef<LramBuffer> buffers, int64_t usable, Block *body)
-        : buffers_(buffers), body_(body), occupancy_(buffers, usable) {
+    PlacementSimulation(ArrayRef<LramBuffer> buffers, int64_t usable, ArrayRef<Operation *> ops)
+        : buffers_(buffers), ops_(ops), occupancy_(buffers, usable) {
         for (auto [i, buffer] : llvm::enumerate(buffers_)) {
             events_.push({buffer.birth, EventKind::Birth, (BufferIdx)i});
             events_.push({buffer.death, EventKind::Death, (BufferIdx)i});
@@ -464,8 +475,8 @@ class PlacementSimulation {
     // placement exists.
     static std::optional<Placement>
     run(ArrayRef<LramBuffer> buffers, int64_t usable, ArrayRef<ForcedCompaction> forcedCompactions,
-        PlacementFailure &failure, Block *body) {
-        PlacementSimulation simulation(buffers, usable, body);
+        PlacementFailure &failure, ArrayRef<Operation *> ops) {
+        PlacementSimulation simulation(buffers, usable, ops);
         if (!simulation.sweep(forcedCompactions)) {
             failure = simulation.failure_;
             return std::nullopt;
@@ -538,24 +549,29 @@ void PlacementSimulation::recordFailure(BufferIdx idx, OpIdx opIdx, PlacementFai
     failure_.opIdx = opIdx;
     auto residents = occupancy_.residents();
     failure_.pinned.assign(residents.begin(), residents.end());
+    failure_.op = opIdx >= 0 && opIdx < (OpIdx)ops_.size() ? ops_[opIdx] : nullptr;
+    failure_.bytes = buffers_[idx].size;
+    failure_.residentBytes = occupancy_.bytes();
+    failure_.usableBytes = occupancy_.usable();
     LLVM_DEBUG({
-        // Name the op at `opIdx` and its source line so the failure can be
-        // located in the IR, not just by its index in the function body.
+        // Name the op at `opIdx` and its location so the failure can be found
+        // in the IR, not just by its index in the function body. Print the
+        // location itself (not just FileLineColLoc): imported models (TFLite,
+        // ONNX, torch-mlir) carry FusedLoc/NameLoc locations. After fusion and
+        // tiling a FusedLoc can hold dozens of locations, so cut it short.
+        constexpr size_t maxLocChars = 200;
         std::string opDesc;
-        if (body_ && opIdx >= 0 && opIdx < (int)body_->getOperations().size()) {
-            Operation &op = *std::next(body_->getOperations().begin(), opIdx);
-            opDesc = " (op " + op.getName().getStringRef().str();
-            if (auto loc = dyn_cast<FileLineColLoc>(op.getLoc()))
-                opDesc += " at " + loc.getFilename().getValue().str() + ":" +
-                          std::to_string(loc.getLine());
-            opDesc += ")";
+        if (Operation *op = failure_.op) {
+            std::string loc;
+            llvm::raw_string_ostream(loc) << op->getLoc();
+            if (loc.size() > maxLocChars)
+                loc = loc.substr(0, maxLocChars) + "...";
+            opDesc = " (op " + op->getName().getStringRef().str() + " at " + loc + ")";
         }
-        llvm::dbgs() << "LRAM plan infeasible ("
-                     << (cause == PlacementFailure::Cause::Fragmentation ? "fragmentation"
-                                                                         : "byte pressure")
-                     << ") at op " << opIdx << opDesc << ": cannot place buffer " << idx << " ("
-                     << buffers_[idx].size << " bytes, " << buffers_[idx].value << "), resident "
-                     << occupancy_.bytes() << " of " << occupancy_.usable() << " bytes\n";
+        llvm::dbgs() << "LRAM plan infeasible (" << failure_.causeName() << ") at op " << opIdx
+                     << opDesc << ": cannot place buffer " << idx << " (" << buffers_[idx].size
+                     << " bytes, " << buffers_[idx].value << "), resident " << occupancy_.bytes()
+                     << " of " << occupancy_.usable() << " bytes\n";
         for (BufferIdx pinned : residents) {
             llvm::dbgs() << "  pinned buffer " << pinned << " size " << buffers_[pinned].size
                          << " offset " << occupancy_.offset(pinned) << " ("
@@ -748,25 +764,29 @@ static std::optional<OpIdx> lastMovablePosition(
 
 // The offsets and swaps that place `buffers` in [0, usable), or nullopt when none exist.
 // With `replan`, a fragmentation failure forces a compaction where lastMovablePosition says
-// and the placement is planned again, once per attempt.
-static std::optional<Placement>
-planPlacement(ArrayRef<LramBuffer> buffers, int64_t usable, bool replan, Block *body) {
+// and the placement is planned again, once per attempt. On failure, `lastFailure` (if
+// given) describes the last attempt's.
+static std::optional<Placement> planPlacement(
+    ArrayRef<LramBuffer> buffers, int64_t usable, bool replan, Block *body,
+    PlacementFailure *lastFailure = nullptr
+) {
     // each attempt adds one forced compaction; a stack of repeated layers needs a few per layer
     constexpr int maxReplans = 256;
+    SmallVector<Operation *> ops(llvm::make_pointer_range(*body));
     SmallVector<ForcedCompaction> forcedCompactions;
+    PlacementFailure failure;
     for (int attempt = 0; attempt <= maxReplans; attempt++) {
-        PlacementFailure failure;
-        auto placement =
-            PlacementSimulation::run(buffers, usable, forcedCompactions, failure, body);
+        failure = PlacementFailure();
+        auto placement = PlacementSimulation::run(buffers, usable, forcedCompactions, failure, ops);
         if (placement) {
             return placement;
         }
         if (!replan || failure.cause != PlacementFailure::Cause::Fragmentation) {
-            return std::nullopt;
+            break;
         }
         auto compactAt = lastMovablePosition(buffers, failure, forcedCompactions);
         if (!compactAt) {
-            return std::nullopt;
+            break;
         }
         LLVM_DEBUG(
             llvm::dbgs() << "re-planning with a forced compaction before op " << *compactAt
@@ -782,6 +802,9 @@ planPlacement(ArrayRef<LramBuffer> buffers, int64_t usable, bool replan, Block *
             ),
             compaction
         );
+    }
+    if (lastFailure) {
+        *lastFailure = std::move(failure);
     }
     return std::nullopt;
 }
@@ -827,9 +850,11 @@ bool lramPlacementFitsWithoutSwaps(FunctionOpInterface funcOp, int64_t usableByt
 // swaps in where the plan put them. Infeasibility (the buffers pinned at some op cannot
 // coexist) fails without a diagnostic, so runOnOperation emits the OUT_OF_MEMORY_MESSAGE
 // tile-and-fuse's probe shrinks the tile on; any other diagnostic aborts the compile.
-// Without `allowRelocation`, a plan that relocates buffers fails the same way.
+// Without `allowRelocation`, a plan that relocates buffers fails the same way. When no
+// plan exists, `placementFailure` describes why, for the diagnostic.
 static LogicalResult allocateLramAddresses(
-    FunctionOpInterface funcOp, bool replan, bool allowRelocation, int64_t lramSize = 0
+    FunctionOpInterface funcOp, bool replan, bool allowRelocation,
+    PlacementFailure &placementFailure, int64_t lramSize = 0
 ) {
 
     // we reserve space for two NSS programs at the begininng of LRAM
@@ -841,8 +866,9 @@ static LogicalResult allocateLramAddresses(
     const int64_t usable = poolSize - HwInfo::lram_reserved_size;
 
     SmallVector<LramBuffer> buffers = collectLramBuffers(funcOp);
-    std::optional<Placement> placement =
-        planPlacement(buffers, usable, replan, &funcOp.getFunctionBody().front());
+    std::optional<Placement> placement = planPlacement(
+        buffers, usable, replan, &funcOp.getFunctionBody().front(), &placementFailure
+    );
     if (!placement) {
         return failure();
     }
@@ -1513,6 +1539,8 @@ class AssignLramAddressesPass : public impl::AssignLramAddressesBase<AssignLramA
         auto funcOp = getOperation();
 
         LogicalResult result = llvm::failure();
+        // why no LRAM placement exists, when that is why the allocation failed
+        PlacementFailure placementFailure;
 
         // When tile and fuse runs the pipeline it expects to see
         // OUT_OF_MEMORY_MESSAGE as the first error, if the tile does not fit in
@@ -1549,12 +1577,21 @@ class AssignLramAddressesPass : public impl::AssignLramAddressesBase<AssignLramA
             // only a strict tile-fit probe rejects relocations; it never re-plans
             BoolAttr probe = getTileFitProbeAttr(funcOp);
             bool allowRelocation = replan || !probe || !probe.getValue();
-            result = allocateLramAddresses(funcOp, replan, allowRelocation, lramSize);
+            result =
+                allocateLramAddresses(funcOp, replan, allowRelocation, placementFailure, lramSize);
         } // destruct diagHandler;
 
         if (failed(result)) {
-            // TileAndFusePass relies on this message to identify memory overflow
-            emitError(funcOp->getLoc()) << OUT_OF_MEMORY_MESSAGE;
+            // TileAndFusePass relies on this message to identify memory overflow; it
+            // compares only the message, so the note does not change that
+            InFlightDiagnostic diag = emitError(funcOp->getLoc()) << OUT_OF_MEMORY_MESSAGE;
+            if (Operation *op = placementFailure.op) {
+                diag.attachNote(op->getLoc())
+                    << "no LRAM placement exists at this '" << op->getName() << "': cannot place a "
+                    << placementFailure.bytes << "-byte buffer in " << placementFailure.usableBytes
+                    << " usable bytes, of which " << placementFailure.residentBytes
+                    << " are pinned here (" << placementFailure.causeName() << ")";
+            }
             signalPassFailure();
         }
 

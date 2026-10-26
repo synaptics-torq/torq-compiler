@@ -63,6 +63,36 @@ def test_no_probe_tile_fits_uses_minimum_tile(model_name, torq_compiler, tmp_pat
     )
 
 
+# Even the minimum tile of this maxpool needs more than 4KB of LRAM.
+NO_PLACEMENT_HW = "0:4:2:coral_v1:nss_v1"
+NO_PLACEMENT_MODEL = MODELS_DIR / "tosa_ops" / "maxpool2d-stride1-k3x3-32x32x4.mlir"
+
+
+@pytest.mark.ci
+def test_lram_failure_names_the_op(torq_compiler, tmp_path):
+    """When no LRAM placement exists, the error must say at which op, in every build."""
+    cmd = [
+        str(torq_compiler.file_path),
+        str(NO_PLACEMENT_MODEL),
+        "-o",
+        str(tmp_path / "model.vmfb"),
+        f"--torq-hw={NO_PLACEMENT_HW}",
+        "--torq-target-host-triple=native",
+        "--torq-disable-host",
+        "--torq-disable-css",
+    ]
+    print("Compiling with:", " ".join(cmd))
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+
+    assert proc.returncode != 0, "the model now fits, so this test proves nothing"
+    assert "error: failed to allocate LRAM addresses" in proc.stderr, proc.stderr
+    # The error is at the function (line 2); the note points at the maxpool (line 3).
+    assert re.search(
+        r"\.mlir:3:\d+: note: no LRAM placement exists at this '[\w.]+': cannot place a \d+-byte",
+        proc.stderr,
+    ), f"no note at the op that cannot be placed:\n{proc.stderr}"
+
+
 # On SR200, the largest tile of the block 1 group of this model fits only if the LRAM
 # plan relocates buffers. A relocation stores them to XRAM and loads them straight back,
 # so each relocated buffer gets an XRAM copy.
