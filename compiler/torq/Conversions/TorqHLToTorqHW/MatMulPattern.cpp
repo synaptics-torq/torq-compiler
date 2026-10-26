@@ -173,8 +173,8 @@ static torq_hw::SliceTaskOp lowerToFastMatmul(
     int outRowVectSize = std::min(slice.wram.transposeHeight(), output.dim(MatC::M));
     int vectSize = slice.alu.iWidth(matB.elementType(), matA.elementType(), outRowVectSize);
     int rowChunkSize = fastMatmulRowChunkSize(op);
-    matA.forceReshapeDim(MatA::K, {-1, rowChunkSize}); // Split each row in chunks
-    matA.reshapeDim(MatA::M, {-1, outRowVectSize});    // Split rows in groups of outRowVectSize
+    matA.vectorize(rowChunkSize);                   // Split each row in chunks
+    matA.reshapeDim(MatA::M, {-1, outRowVectSize}); // Split rows in groups of outRowVectSize
     matB.vectorize(vectSize);
     matB.padReshapeDim(MatB::K, {-1, rowChunkSize}, 0); // Split rows in chunks, padding if needed
     output.reshapeDim(MatC::M, {-1, outRowVectSize});

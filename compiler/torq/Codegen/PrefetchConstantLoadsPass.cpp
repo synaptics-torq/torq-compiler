@@ -217,7 +217,7 @@ class PrefetchConstantLoadsPass
         if (loads.empty() || waitRuns.empty())
             return;
 
-        const int64_t usable = TorqHw::get().getLramSize() - HwInfo::lram_reserved_size;
+        const int64_t usable = TorqHw::get().getLramSize() - HwInfo::nss_max_program_size * 2;
         constexpr size_t kMaxDepth = 8;
         for (int percent : {100, 90, 75, 50}) {
             int64_t budget = usable * percent / 100;

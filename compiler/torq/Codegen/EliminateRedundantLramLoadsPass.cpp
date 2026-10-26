@@ -436,10 +436,10 @@ class EliminateRedundantLramLoadsPass
     EliminateRedundantLramLoadsPass(const EliminateRedundantLramLoadsPass &) {}
 
     void runOnOperation() override {
-        // lramSize (usable LRAM) = total LRAM minus the reserved NSS program pool and end guard,
+        // lramSize (usable LRAM) = total LRAM minus the reserved NSS program pool,
         // matching the address allocator (AssignLramAddresses / VirtualMemory).
         int64_t lramSize =
-            static_cast<int64_t>(TorqHw::get().getLramSize()) - HwInfo::lram_reserved_size;
+            static_cast<int64_t>(TorqHw::get().getLramSize()) - HwInfo::nss_max_program_size * 2;
 
         FunctionOpInterface funcOp = getOperation();
 
