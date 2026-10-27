@@ -2730,7 +2730,7 @@ struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
             SlicedTable t;
             if (auto arg = dyn_cast<BlockArgument>(tableOrScalar)) {
                 Value operand = srcOp.getMatchingOpOperand(arg)->get();
-                auto slice = dyn_cast<tensor::ExtractSliceOp>(operand.getDefiningOp());
+                auto slice = operand.getDefiningOp<tensor::ExtractSliceOp>();
                 if (!slice) {
                     // An unsliced table that is still not foldable (e.g. a runtime value):
                     // the same hard limitation as before; fullSize is filled from the fold
