@@ -1,4 +1,9 @@
 import copy
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 from dataclasses import dataclass
 from functools import wraps
 import pytest
@@ -6,6 +11,7 @@ import tensorflow as tf
 import numpy as np
 import json
 
+from . import keras_tflite_convert
 from .versioned_fixtures import versioned_generated_file_fixture, versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_unhashable_object_fixture
 
 """
@@ -65,57 +71,67 @@ def generate_layers_from_model(model: tf.keras.Model):
     return layer_configs
 
 
+def _convert_in_child_process():
+    """True if the TFLite converter must run in a child process (see keras_tflite_convert).
+
+    TORQ_KERAS_TFLITE_CONVERT_IN_CHILD=1 or 0 forces the choice.
+    """
+    forced = os.environ.get("TORQ_KERAS_TFLITE_CONVERT_IN_CHILD")
+    if forced is not None:
+        return forced == "1"
+    return sys.platform == "darwin" and "iree.compiler" in sys.modules
+
+
+def _input_shapes(model):
+    return [[1 if x is None else x for x in t.shape] for t in model.inputs]
+
+
+def _convert_in_child(model, quantize, quantize_to_int16):
+    with tempfile.TemporaryDirectory(prefix="keras_tflite_") as tmp:
+        tmp = Path(tmp)
+        # The shapes of the model inputs, as from_keras_model uses: without a signature, export
+        # makes the batch dim dynamic even for a model with batch 1. The spec names are the
+        # signature input names.
+        specs = [tf.TensorSpec(t.shape, t.dtype, name=t.name) for t in model.inputs]
+        model.export(
+            str(tmp / "saved_model"), verbose=False,
+            input_signature=[specs] if len(specs) > 1 else specs
+        )
+        config = {
+            "quantize": quantize,
+            "quantize_to_int16": quantize_to_int16,
+            "input_names": [t.name for t in model.inputs],
+            "input_shapes": _input_shapes(model),
+        }
+        (tmp / "config.json").write_text(json.dumps(config))
+        # -P: don't put the directory of the script on sys.path, its numpy.py would hide numpy
+        cmd = [sys.executable, "-P", keras_tflite_convert.__file__, str(tmp / "saved_model"),
+               str(tmp / "model.tflite"), str(tmp / "config.json")]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"TFLite conversion in a child process failed ({result.returncode}):\n"
+                f"{result.stderr[-4000:]}"
+            )
+        return (tmp / "model.tflite").read_bytes()
+
+
 def quantize_model(model, quantize=True, quantize_to_int16=False):
     """
-    Quantize a TensorFlow model using TFLite.    
-    
-    The model is quantized to 8-bit signed integers.
+    Convert a Keras model to TFLite, quantized to 8-bit signed integers unless quantize is False
+    (16-bit activations with quantize_to_int16).
 
-    :param model_function: A tf.function that represents the model
-    :return: The quantized TFLite model
+    :param model: the Keras model
+    :return: The TFLite model
     """
+    if _convert_in_child_process():
+        return _convert_in_child(model, quantize, quantize_to_int16)
 
-    # Function to create a representative dataset for quantization
-    def q_dataset(input_specs):
-
-        rng = np.random.default_rng(1234)
-
-        for _ in range(10):
-            # Generate random input data within the expected range [0, 1]
-            data = []
-
-            for ts in input_specs[0]:
-                shape = [1 if x is None else x for x in ts.shape]
-                data.append(rng.random(shape, dtype=np.float32))
-
-            yield data
-
-    # Convert the model to a TFLite model
     converter = tf.lite.TFLiteConverter.from_keras_model(model)
-    
-    # Quantize and convert the modely
-
-    if quantize:
-        # Set optimization to quantize the model
-        converter.optimizations = [tf.lite.Optimize.DEFAULT]
-
-        # Provide a representative dataset to calibrate the quantization
-        converter.representative_dataset = lambda: q_dataset([model.inputs])
-        converter.allow_custom_ops = True
-
-        if quantize_to_int16:
-            converter.target_spec.supported_ops = [
-                tf.lite.OpsSet.EXPERIMENTAL_TFLITE_BUILTINS_ACTIVATIONS_INT16_WEIGHTS_INT8
-            ]
-            converter.inference_input_type = tf.int16
-            converter.inference_output_type = tf.int16
-            converter._experimental_disable_per_channel = True
-            converter.experimental_new_quantizer = True
-        else:
-            converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
-            converter.inference_input_type = tf.int8
-            converter.inference_output_type = tf.int8
-
+    keras_tflite_convert.configure_converter(
+        converter, quantize, quantize_to_int16,
+        lambda: keras_tflite_convert.calibration_samples(_input_shapes(model))
+    )
     return converter.convert()
 
 
@@ -156,8 +172,7 @@ def quantized_tflite_model_file(request, versioned_file, keras_model, tflite_qua
 @versioned_generated_file_fixture("tflite")
 def float32_tflite_model_file(request, versioned_file, keras_model):
 
-    converter = tf.lite.TFLiteConverter.from_keras_model(keras_model.data)    
-    tflite_model = converter.convert()
+    tflite_model = quantize_model(keras_model.data, quantize=False)
 
     with open(versioned_file, "wb") as f:
         f.write(tflite_model)
