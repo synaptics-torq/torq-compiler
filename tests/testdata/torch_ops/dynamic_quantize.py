@@ -19,6 +19,7 @@ def _make_dynamic_quantize(input_shape):
 CASES = {
     "dynamicquantize": partial(_make_dynamic_quantize, [1, 1, 288]),
     "dynamicquantize_large": partial(_make_dynamic_quantize, [1, 1, 131072]),
+    "dynamicquantize_pow2_range": partial(_make_dynamic_quantize, [1, 1, 1024]),
 }
 
 # ONNX DynamicQuantizeLinear tensors are always f32, so DQL is only reachable in a bf16 pipeline
@@ -37,5 +38,13 @@ CONFIG = {
             "--torq-convert-io-dtype",
         ],
         "comparison": {"int_tol": 2.0},
+    },
+    "dynamicquantize_pow2_range": {
+        "compiler_options": [
+            "--torq-disable-host", "--torq-disable-css", "--torq-convert-dtypes",
+            "--torq-convert-io-dtype",
+        ],
+        "comparison": {"int_tol": 2.0},
+        "input_range": [-1, 1],
     },
 }
