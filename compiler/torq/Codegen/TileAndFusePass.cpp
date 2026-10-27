@@ -688,6 +688,35 @@ static bool isElementwiseOverFullTensor(Operation *op) {
            });
 }
 
+// How the probe module gets a value that it does not compute.
+enum class ProbeInputKind {
+    ConstantLike, // a tensor.empty, or a fill of one for a contraction's accumulator
+    Payload,      // an argument marked kLramPayloadArgAttr: its per-tile slices are charged in LRAM
+    Passthrough,  // an argument that stays in XRAM
+};
+
+// The kind of probe input of `input`, a value that the probe module of `consumerOp` does not
+// compute. Constant-like values stay tensor.empty so LinalgSlicing still sees a bias add, not
+// a residual. Live activations (that have a defining op) are payload args: still XRAM until
+// checkTileFitsInMemory replaces their slices with LRAM allocs. A full-size alloc_tensor here
+// cannot be shrunk by tiling the consumer. Model BlockArguments have no defining op and stay
+// XRAM, matching the real pipeline, so matmul tiles are not over-cut.
+static ProbeInputKind classifyProbeInput(Value input, Operation *consumerOp) {
+    auto ty = dyn_cast<RankedTensorType>(input.getType());
+    if (!ty || !ty.hasStaticShape())
+        return ProbeInputKind::Passthrough;
+    Operation *def = input.getDefiningOp();
+    if (isConstantLikeProducer(input) && !isElementwiseOverFullTensor(def))
+        return ProbeInputKind::ConstantLike;
+    if (!def)
+        return ProbeInputKind::Passthrough;
+    bool otherGroupOutput = isFuseGroupOutput(def) && !checkShareFuseGroup(consumerOp, def);
+    if (otherGroupOutput || peelToPointwiseNchwConv(def, consumerOp) ||
+        isElementwiseOverFullTensor(def))
+        return ProbeInputKind::Payload;
+    return ProbeInputKind::Passthrough;
+}
+
 // Construct a module with a single function, that includes tilingInterfaceOp
 // and producerOps, and any other producers needed to keep pattern-fuse-groups
 // intact. In addition, other ops that are not TilingInterface, that drive the
@@ -716,34 +745,23 @@ ModuleOp extractOpsForMemoryCheck(
     SmallVector<Value> inputs;
     collectOpsForMemoryCheck(consumerOp, producerOps, ops, inputs);
 
-    // Uncloned producers become function arguments. Constant-like stay
-    // tensor.empty so LinalgSlicing still sees a bias add, not a residual.
-    // Live activations (has a defining op) are payload args: still XRAM until
-    // checkTileFitsInMemory replaces their slices with LRAM allocs. A full-size
-    // alloc_tensor here cannot be shrunk by tiling the consumer. Model
-    // BlockArguments have no defining op and stay XRAM, matching the real
-    // pipeline, so matmul tiles are not over-cut.
+    // Uncloned producers become function arguments, see classifyProbeInput.
     SmallVector<Value> passthroughInputs;
     SmallVector<Value> payloadTensors;
     SmallVector<Value> constantLikeInputs;
     for (Value input : inputs) {
-        auto ty = dyn_cast<RankedTensorType>(input.getType());
-        if (ty && ty.hasStaticShape() && isConstantLikeProducer(input) &&
-            !isElementwiseOverFullTensor(input.getDefiningOp()))
+        switch (classifyProbeInput(input, consumerOp)) {
+        case ProbeInputKind::ConstantLike:
             constantLikeInputs.push_back(input);
-        else if (ty && ty.hasStaticShape() && input.getDefiningOp()) {
-            Operation *def = input.getDefiningOp();
-            bool otherGroupOutput = isFuseGroupOutput(def) && !checkShareFuseGroup(consumerOp, def);
-            if (otherGroupOutput || peelToPointwiseNchwConv(def, consumerOp) ||
-                isElementwiseOverFullTensor(def))
-                payloadTensors.push_back(input);
-            else
-                passthroughInputs.push_back(input);
-        }
-        else {
+            break;
+        case ProbeInputKind::Payload:
+            payloadTensors.push_back(input);
+            break;
+        case ProbeInputKind::Passthrough: {
             // Dynamic live activations stay XRAM here, so their tiles are never
             // charged to LRAM below. The fit check is unsound for them; warn so
             // a dynamic-shape model cannot pass silently.
+            auto ty = dyn_cast<RankedTensorType>(input.getType());
             if (ty && !ty.hasStaticShape() && input.getDefiningOp()) {
                 input.getDefiningOp()->emitWarning(
                     "tile-and-fuse memory probe: dynamic live activation left "
@@ -751,6 +769,8 @@ ModuleOp extractOpsForMemoryCheck(
                 );
             }
             passthroughInputs.push_back(input);
+            break;
+        }
         }
     }
 
@@ -831,9 +851,99 @@ ModuleOp extractOpsForMemoryCheck(
     return moduleOp;
 }
 
+// The probe input kind of each result of the TilingInterface ops in `funcOp`, the probe
+// function of `consumerOp`, as if extractOpsForMemoryCheck had not cloned the op.
+static DenseMap<Value, ProbeInputKind>
+classifyProducerResults(func::FuncOp funcOp, Operation *consumerOp) {
+    DenseMap<Value, ProbeInputKind> kinds;
+    for (Operation &op : funcOp.getFunctionBody().front()) {
+        if (!isa<TilingInterface>(op))
+            continue;
+        for (Value result : op.getResults())
+            kinds[result] = classifyProbeInput(result, consumerOp);
+    }
+    return kinds;
+}
+
+// The ops of the body of `funcOp` that its results depend on, also through the regions of
+// the tile loops. After tile-and-fuse, the originals of the fused producers stay in the body
+// unused, or used only by other such originals, until a canonicalization erases them.
+static DenseSet<Operation *> findLiveOps(func::FuncOp funcOp) {
+    Block &body = funcOp.getFunctionBody().front();
+    DenseSet<Operation *> live;
+    SmallVector<Operation *> worklist = {body.getTerminator()};
+    while (!worklist.empty()) {
+        Operation *op = worklist.pop_back_val();
+        op->walk([&](Operation *nested) {
+            for (Value operand : nested->getOperands()) {
+                Operation *def = operand.getDefiningOp();
+                if (def && def->getBlock() == &body && live.insert(def).second)
+                    worklist.push_back(def);
+            }
+        });
+    }
+    return live;
+}
+
+// Replace all the uses of `result` by a new last argument of `funcOp`, of kind `kind`.
+static LogicalResult replaceWithArg(func::FuncOp funcOp, Value result, ProbeInputKind kind) {
+    unsigned argIdx = funcOp.getNumArguments();
+    if (failed(funcOp.insertArgument(argIdx, result.getType(), {}, result.getLoc())))
+        return failure();
+    if (kind == ProbeInputKind::Payload)
+        funcOp.setArgAttr(argIdx, kLramPayloadArgAttr, UnitAttr::get(funcOp.getContext()));
+    result.replaceAllUsesWith(funcOp.getArgument(argIdx));
+    return success();
+}
+
+// Replace each producer that the tiling of `funcOp` left outside the tile loop by function
+// arguments of the kinds in `kinds` (see classifyProducerResults). The real tiling computes
+// such a producer in its own loop and writes its result to XRAM. Left in the probe, it is
+// computed whole, with its whole result in LRAM. Two kinds of producer stay:
+// - constant-like producers: a fill that initializes a contraction's accumulator must stay a
+//   fill for the conversion (see extractOpsForMemoryCheck);
+// - reshapes: they are views, so their result is not a buffer of its own.
+// The new arguments come after the others.
+static LogicalResult
+replaceUnfusedProducersWithArgs(func::FuncOp funcOp, const DenseMap<Value, ProbeInputKind> &kinds) {
+    Block &body = funcOp.getFunctionBody().front();
+    DenseSet<Operation *> live = findLiveOps(funcOp);
+    SmallVector<Operation *> unfused;
+    for (Operation &op : body) {
+        if (live.contains(&op) && isa<TilingInterface>(op) &&
+            !isa<tensor::ExpandShapeOp, tensor::CollapseShapeOp>(op))
+            unfused.push_back(&op);
+    }
+
+    // Users first: a producer that only fed a replaced producer then has no live user and
+    // gets no argument.
+    auto isLiveUse = [&](OpOperand &use) {
+        return live.contains(body.findAncestorOpInBlock(*use.getOwner()));
+    };
+    for (Operation *op : llvm::reverse(unfused)) {
+        for (Value result : op->getResults()) {
+            auto kind = kinds.find(result);
+            if (kind == kinds.end() || kind->second == ProbeInputKind::ConstantLike ||
+                llvm::none_of(result.getUses(), isLiveUse))
+                continue;
+            LLVM_DEBUG(llvm::dbgs() << "  probe: unfused " << op->getName() << " is an argument\n");
+            if (failed(replaceWithArg(funcOp, result, kind->second)))
+                return failure();
+        }
+        // Replaced, or left without a live user by the replacement of its users.
+        if (llvm::none_of(op->getUses(), isLiveUse)) {
+            live.erase(op);
+            if (op->use_empty())
+                op->erase();
+        }
+    }
+    return success();
+}
+
 // "symbolically" tile and fuse everything in the only function in `moduleOp`.
 // Tile sizes are non-constant (hence "symbolically"), and are the first
-// arguments of the only function in the module.
+// arguments of the only function in the module. The producers left outside the
+// tile loop then become arguments, see replaceUnfusedProducersWithArgs.
 llvm::LogicalResult
 tileModuleForMemoryCheck(ModuleOp moduleOp, const TilingInfo &tilingInfo, size_t tileSizesCount) {
     OpBuilder builder(moduleOp->getContext());
@@ -857,6 +967,10 @@ tileModuleForMemoryCheck(ModuleOp moduleOp, const TilingInfo &tilingInfo, size_t
     options.tilingOptions.setTileSizes(tileSizes);
     addTileAndFuseCleanupPatterns(moduleOp->getContext(), options);
 
+    // The kinds need the untiled consumer, which the tiling replaces.
+    DenseMap<Value, ProbeInputKind> producerKinds =
+        classifyProducerResults(funcOp, clonedConsumerOp);
+
     // Do the tile and fuse.
     IRRewriter rewriter(moduleOp->getContext());
     auto tiledResults = scf::tileConsumerAndFuseProducersUsingSCF(
@@ -868,7 +982,7 @@ tileModuleForMemoryCheck(ModuleOp moduleOp, const TilingInfo &tilingInfo, size_t
     }
     applyTiledResults(rewriter, clonedConsumerOp, *tiledResults);
 
-    return llvm::success();
+    return replaceUnfusedProducersWithArgs(funcOp, producerKinds);
 }
 
 class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
