@@ -9,6 +9,7 @@ iree_cc_library(
     "Utils.cpp"
   DEPS
     LLVMSupport
+    MLIRAffineDialect
     MLIRIR
     MLIRSupport
     MLIRTensorDialect

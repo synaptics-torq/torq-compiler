@@ -327,6 +327,38 @@ def DecomposeConvToSpaceToDepth :
     ];
 }
 
+def SplitSmallChannelTranspose :
+    InterfacePass<"torq-split-small-channel-transpose",
+                  "mlir::FunctionOpInterface"> {
+
+    let summary = "Split a small-channel layout transpose into two block transposes";
+
+    let description = [{
+        A transpose that swaps a group of rows (..., W) with a group of fewer than
+        32 channels C, such as the NHWC->NCHW transpose of a 3-channel input,
+        falls back to the element-by-element transpose kernel. It is rewritten
+        as two transposes that both use the block kernel, with W split in blocks
+        of b = 32 elements, or of a divisor b > 32 of W when W is not a multiple
+        of 32:
+
+          [B, R..., W, C] -expand-> [B, R..., W/b, b, C]
+            T1 -> [B, b, C, R..., W/b]       (rows R...*W/b, cols b*C)
+            T2 -> [B, C, R..., W/b, b]       (rows b, cols C*R...*W/b)
+          -collapse-> [B, C, R..., W]
+
+        T1 is emitted as a copy linalg.generic, so the canonicalizer does not
+        fold the two transposes back into one.
+    }];
+
+    let constructor =
+        "mlir::syna::torq::createSplitSmallChannelTransposePass()";
+
+    let dependentDialects = [
+        "linalg::LinalgDialect",
+        "tensor::TensorDialect"
+    ];
+}
+
 def RemoveIsNan :
     InterfacePass<"torq-remove-isnan",
                   "mlir::FunctionOpInterface"> {

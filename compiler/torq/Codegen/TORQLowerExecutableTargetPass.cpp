@@ -447,6 +447,9 @@ void addSlicePassesUpToTileAndFuse(OpPassManager &pm) {
         funcPm.addPass(createCanonicalizerPass());
     }
 
+    // After the last canonicalizer before tile-and-fuse: it would fold the two transposes
+    // back into one
+    funcPm.addPass(createSplitSmallChannelTransposePass());
     funcPm.addPass(createMarkPatternsForTileAndFusePass());
     funcPm.addPass(createReductionTilingPass(/*longReductionsOnly=*/true));
     funcPm.addPass(createTileAndFusePass(TorqHw::get().getSliceCount()));

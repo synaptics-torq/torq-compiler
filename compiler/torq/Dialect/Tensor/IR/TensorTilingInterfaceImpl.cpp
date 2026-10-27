@@ -4,6 +4,7 @@
 
 #include "iree/compiler/Codegen/Interfaces/PartitionableLoopsInterface.h"
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -39,6 +40,98 @@ Value makeTiledCollapsedSrcShape(
                                          sliceParams->sizes, sliceParams->strides
                                      )
                                    : valueToTile;
+}
+
+// True if the tile [offset, offset + size) of a collapsed dim is a box of its source dims: the
+// source dims inside the one the tile starts in are whole, and the tile doesn't wrap around that
+// dim. computeCollapseSliceParameters maps the tile ends through floordiv/mod, which only gives the
+// right slice for such tiles. For example a tile of columns [1, 113) of [7, 32] -> 224 is not one.
+static bool
+isBoxTileOfCollapsedDim(ArrayRef<int64_t> srcDims, OpFoldResult offset, OpFoldResult size) {
+    SmallVector<int64_t> dims;
+    for (int64_t dim : srcDims) {
+        if (dim != 1)
+            dims.push_back(dim);
+    }
+    if (dims.size() <= 1)
+        return true;
+    if (llvm::any_of(dims, ShapedType::isDynamic))
+        return false;
+    std::optional<int64_t> staticSize = getConstantIntValue(size);
+    if (!staticSize)
+        return false;
+    int64_t fullSize = 1;
+    for (int64_t dim : dims)
+        fullSize *= dim;
+    // A whole tile can only start at 0, even when the offset is not folded to a constant
+    if (*staticSize == fullSize)
+        return true;
+    std::optional<int64_t> staticOffset = getConstantIntValue(offset);
+    if (!staticOffset)
+        return false;
+    int64_t inner = 1;
+    for (int i = dims.size() - 1; i >= 0; --i) {
+        if (*staticSize <= inner * dims[i]) {
+            if (*staticSize % inner != 0 || *staticOffset % inner != 0)
+                return false;
+            return (*staticOffset / inner) % dims[i] + *staticSize / inner <= dims[i];
+        }
+        inner *= dims[i];
+    }
+    return false;
+}
+
+// Tile a collapse whose tile is not a box of its source dims (see isBoxTileOfCollapsedDim):
+// collapse the smallest box that covers the tile, which takes whole source dims inside the outer
+// dim of each group, then extract the tile from it
+static FailureOr<TilingResult> tileCollapseByCoveringBox(
+    OpBuilder &b, tensor::CollapseShapeOp op, ArrayRef<OpFoldResult> offsets,
+    ArrayRef<OpFoldResult> sizes
+) {
+    Location loc = op.getLoc();
+    ArrayRef<int64_t> srcShape = op.getSrcType().getShape();
+    int64_t srcRank = srcShape.size();
+    SmallVector<OpFoldResult> srcOffsets(srcRank), srcSizes(srcRank);
+    SmallVector<OpFoldResult> srcStrides(srcRank, b.getIndexAttr(1));
+    SmallVector<OpFoldResult> tileOffsets;
+    AffineExpr d0, d1;
+    bindDims(b.getContext(), d0, d1);
+    for (auto [i, group] : llvm::enumerate(op.getReassociationIndices())) {
+        int64_t inner = 1;
+        for (int64_t d : ArrayRef<int64_t>(group).drop_front()) {
+            if (ShapedType::isDynamic(srcShape[d]))
+                return failure();
+            inner *= srcShape[d];
+            srcOffsets[d] = b.getIndexAttr(0);
+            srcSizes[d] = b.getIndexAttr(srcShape[d]);
+        }
+        // Range [lo, hi) of the outer dim of the group that covers the tile
+        OpFoldResult lo =
+            affine::makeComposedFoldedAffineApply(b, loc, d0.floorDiv(inner), {offsets[i]});
+        OpFoldResult hi = affine::makeComposedFoldedAffineApply(
+            b, loc, (d0 + d1).ceilDiv(inner), {offsets[i], sizes[i]}
+        );
+        srcOffsets[group[0]] = lo;
+        srcSizes[group[0]] = affine::makeComposedFoldedAffineApply(b, loc, d1 - d0, {lo, hi});
+        tileOffsets.push_back(
+            affine::makeComposedFoldedAffineApply(b, loc, d0 - d1 * inner, {offsets[i], lo})
+        );
+    }
+
+    auto srcSlice =
+        tensor::ExtractSliceOp::create(b, loc, op.getSrc(), srcOffsets, srcSizes, srcStrides);
+    auto collapsed =
+        tensor::CollapseShapeOp::create(b, loc, srcSlice.getResult(), op.getReassociationIndices());
+    collapsed->setDiscardableAttrs(op->getDiscardableAttrDictionary());
+    SmallVector<OpFoldResult> tileStrides(sizes.size(), b.getIndexAttr(1));
+    auto tile = tensor::ExtractSliceOp::create(
+        b, loc, collapsed.getResult(), tileOffsets, sizes, tileStrides
+    );
+    return TilingResult{
+        /*tiledOps =*/{collapsed, tile},
+        /*tiledValues =*/{tile.getResult()},
+        /*generatedSlices =*/{srcSlice}
+    };
 }
 
 /// Implementation of the `TilingInterface` for `tensor::CollapseShapeOp`.
@@ -81,6 +174,15 @@ struct CollapseShapeOpTilingInterface
         Operation *op, OpBuilder &b, ArrayRef<OpFoldResult> offsets, ArrayRef<OpFoldResult> sizes
     ) const {
         tensor::CollapseShapeOp collapseOp = cast<tensor::CollapseShapeOp>(op);
+
+        ArrayRef<int64_t> srcShape = collapseOp.getSrcType().getShape();
+        for (auto [i, group] : llvm::enumerate(collapseOp.getReassociationIndices())) {
+            SmallVector<int64_t> groupDims;
+            for (int64_t d : group)
+                groupDims.push_back(srcShape[d]);
+            if (!isBoxTileOfCollapsedDim(groupDims, offsets[i], sizes[i]))
+                return tileCollapseByCoveringBox(b, collapseOp, offsets, sizes);
+        }
 
         Value tiledSrc = makeTiledCollapsedSrcShape(b, collapseOp, offsets, sizes, {}, true);
         RankedTensorType tiledSrcTensor = cast<RankedTensorType>(tiledSrc.getType());

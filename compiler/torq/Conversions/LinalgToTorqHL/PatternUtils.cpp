@@ -164,6 +164,25 @@ template <typename ReshapeOp> static bool isUnitDimReshape(ReshapeOp op) {
     });
 }
 
+// True if the collapse only merges dims into its innermost result dim
+static bool isInnermostDimsCollapse(tensor::CollapseShapeOp op) {
+    SmallVector<ReassociationIndices> reassoc = op.getReassociationIndices();
+    return llvm::all_of(ArrayRef(reassoc).drop_back(), [](const ReassociationIndices &group) {
+        return group.size() == 1;
+    });
+}
+
+// True for a copy linalg.generic whose input map is a permutation and output map the identity
+static bool isPermutationCopyGeneric(linalg::GenericOp op) {
+    if (!op.isAllParallelLoops() || !op.isSingleInputOutput() || !op.isSingleYieldOp())
+        return false;
+    SmallVector<AffineMap> maps = op.getIndexingMapsArray();
+    if (!maps[0].isPermutation() || !maps[1].isIdentity())
+        return false;
+    auto yieldOp = cast<linalg::YieldOp>(op.getBody()->getTerminator());
+    return yieldOp.getOperand(0) == op.getBody()->getArgument(0);
+}
+
 Value peelPadAndReshapeSource(Value value) {
     while (value) {
         if (auto padOp = value.getDefiningOp<tensor::PadOp>()) {
@@ -178,6 +197,20 @@ Value peelPadAndReshapeSource(Value value) {
         // overflows LRAM.
         if (auto transposeOp = value.getDefiningOp<linalg::TransposeOp>()) {
             value = transposeOp.getDpsInputs()[0];
+            continue;
+        }
+        // SplitSmallChannelTranspose leaves a collapse of the innermost dims after the transpose
+        // and emits its first transpose as a copy generic. The collapse keeps the outer dims, so
+        // the tiles of the consumer are tiles of the transposes.
+        if (auto collapseOp = value.getDefiningOp<tensor::CollapseShapeOp>();
+            collapseOp && collapseOp.getSrc().getDefiningOp<linalg::TransposeOp>() &&
+            isInnermostDimsCollapse(collapseOp)) {
+            value = collapseOp.getSrc();
+            continue;
+        }
+        if (auto genericOp = value.getDefiningOp<linalg::GenericOp>();
+            genericOp && isPermutationCopyGeneric(genericOp)) {
+            value = genericOp.getDpsInputs()[0];
             continue;
         }
         // A 1D conv/pool lifted to 2D puts a unit-dim expand between its pad and

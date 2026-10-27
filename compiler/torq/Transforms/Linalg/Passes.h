@@ -48,6 +48,8 @@ std::unique_ptr<OperationPass<ModuleOp>> createTorqAnnotateTorqResourcesPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createDecomposeConvToSpaceToDepthPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createSplitSmallChannelTransposePass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createRemoveIsNanPass();
 
 std::unique_ptr<Pass> createDecomposeConvsForHardwarePass();

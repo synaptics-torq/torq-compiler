@@ -298,6 +298,46 @@ class FoldConvertOfEmpty : public OpRewritePattern<torq_hl::ConvertOp> {
     }
 };
 
+// Collapse a dense LRAM tensor in place instead of moving it to XRAM for the collapse:
+//   collapse(convert(xram, x: lram)) -> convert(xram, collapse(x: lram))
+// When the user of the collapse converts it back to LRAM, FoldRoundTripConversion then removes
+// both conversions. SplitSmallChannelTranspose leaves such a collapse between two transposes
+// and their consumer, in each tile.
+class SwapCollapseAndConvert : public OpRewritePattern<tensor::CollapseShapeOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(tensor::CollapseShapeOp op, PatternRewriter &rewriter) const override {
+        auto convertOp = op.getSrc().getDefiningOp<torq_hl::ConvertOp>();
+        if (!convertOp || !convertOp.getOutput() || !convertOp->hasOneUse())
+            return failure();
+        auto src = dyn_cast<TypedValue<RankedTensorType>>(convertOp.getInput());
+        if (!src)
+            return failure();
+        // Only for an encoding without counts and strides: the buffer of the collapse keeps the
+        // encoding of its source, and counts or strides of the source rank don't describe it
+        auto srcEncoding = getEncoding(src.getType());
+        if (srcEncoding.getMemSpace() != torq_hl::MemorySpace::Lram ||
+            !srcEncoding.getCounts().empty() || !srcEncoding.getStrides().empty())
+            return failure();
+        RankedTensorType resultType = op.getResultType();
+        if (getEncoding(resultType).getMemSpace() == torq_hl::MemorySpace::Lram)
+            return failure();
+
+        // The backing buffer keeps its tail padding
+        auto lramType = createRankedTensorTypeWithEncoding(
+            resultType,
+            createDenseEncoding(resultType, torq_hl::MemorySpace::Lram, srcEncoding.getPadding())
+        );
+        auto collapsed = tensor::CollapseShapeOp::create(
+            rewriter, op.getLoc(), lramType, src, op.getReassociationIndices()
+        );
+        rewriter.replaceOp(op, convertTensorToType(rewriter, collapsed.getResult(), resultType));
+        return success();
+    }
+};
+
 // Fold a round trip conversion of the type
 //   convert(T1, convert(T2, ... convert(T0, x: T1))) = x
 // this pattern also simplifies the special case:
@@ -1213,6 +1253,7 @@ void FoldConvertPass::runOnOperation() {
     patterns.add<FoldConvertChainWithKernel>(ctx);
     patterns.add<FoldConvertOfEmpty>(ctx);
     patterns.add<FoldRoundTripConversion>(ctx);
+    patterns.add<SwapCollapseAndConvert>(ctx);
     patterns.add<FoldLramToLramConversionChain>(ctx);
     // KeepConcatInLram and SwapExtractAndConvert size each op against the tile budget of its
     // tile loop (see lramSizeFor), or the real pipeline would keep more data in LRAM than the
