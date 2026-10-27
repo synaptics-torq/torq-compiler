@@ -232,12 +232,17 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPool
             if (valid_out_h == output_shape[NCHW::H])
                 has_valid_pad_h = false;
         }
+        // On W the VALID output must also fill the input quadrant: the stride-2 kernels step
+        // through a quadrant (input W / stride wide) with the output row width. Fewer output
+        // rows than the quadrant are fine, fewer output columns are not (e.g. 8x40, k=3, s=2,
+        // pad 0: VALID W_out=19 but the quadrant is 20 wide).
         if (stride_w >= 2 && has_valid_pad_w) {
             int64_t valid_out_w =
                 (input_shape[NCHW::W] + pads[LRTBDim::Left] + pads[LRTBDim::Right] - ksize_w) /
                     stride_w +
                 1;
-            if (valid_out_w == output_shape[NCHW::W])
+            if (valid_out_w == output_shape[NCHW::W] &&
+                output_shape[NCHW::W] * stride_w == input_shape[NCHW::W])
                 has_valid_pad_w = false;
         }
         if (!(has_valid_pad_h || has_valid_pad_w))
