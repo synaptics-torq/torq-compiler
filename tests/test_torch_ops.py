@@ -157,6 +157,12 @@ def case_config(request, runtime_hw_type, chip_config):
             "--torq-disable-host", "--torq-disable-css",
         ])
 
+    # [-1, 1) inputs round to a bf16 range of exactly 2.0, the power-of-two range that
+    # the derive_quant_params reciprocal used to get 4x wrong (the default (-40, 40)
+    # gives a range of 80, which never hit it).
+    if 'dynamicquantize_pow2_range' in request.param.data.name:
+        extra_args["tweaked_input_data_range"] = (-1, 1)
+
     # The encoder conv1d runs through the host/CSS fallback: keep host/CSS enabled
     # (drop the default --torq-disable-host/--torq-disable-css) and compare loosely.
     if 'encoder.mlir.230.Conv_0_small.mlir' in request.param.data.name:

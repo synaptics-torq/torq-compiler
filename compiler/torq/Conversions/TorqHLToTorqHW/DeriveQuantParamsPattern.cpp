@@ -20,7 +20,7 @@
 //
 // Slot layout (bf16 element index unless noted). The results lead, scratch follows:
 //   [0] inv_scale (result)     [5] neg_min (= -min_x)
-//   [1] zp (result)            [6] expo   = 0x7E80 - x            (i16)
+//   [1] zp (result)            [6] expo   = 0x7E81 - x            (i16)
 //   [2] scale (result)         [7] lutVal16 = zext(lutVal8)       (i16, [6]+1)
 //   [3] neg_min_adj (result)   [8] lutVal8 = LUT[mant8]           (i8 @ byte 16)
 //   [4] max_adj                [9] recip = bitcast(expo+lutVal16) (bf16)
@@ -33,8 +33,8 @@
 //  [10] range_safe  = clamp([3] + [4], eps, +inf)         (2-elt accumulate)
 //   reciprocal (full-range exponent+mantissa, bit-identical to the linalg
 //   BfloatReciprocalPattern, DecomposeLinalgOpsPattern.cpp:446):
-//   [6] expo        = 0x7E80 - x   with x = i16 bits of range_safe   (ACT affine)
-//   [8] lutVal8     = mantissaLUT[x & 0xFF]                          (ACT LUT)
+//   [6] expo        = 0x7E81 - x   with x = i16 bits of range_safe   (ACT affine)
+//   [8] lutVal8     = mantissaLUT[x & 0xFF] - 1                      (ACT LUT)
 //   [7] lutVal16    = zext(lutVal8)
 //   [9] recip       = bitcast<bf16>(expo + lutVal16)                 (2-elt accumulate)
 //   [0] inv_scale   = recip * 255                                    (WRAM const mul_weight[0])
@@ -84,7 +84,9 @@ constexpr float kRangeEps = 1e-12f;
 
 // The reciprocal magic constant from BfloatReciprocalPattern: recip bits =
 // (0x7E80 - x) + mantissaLUT[x & 0xFF], computed on the i16 bit-pattern of x.
-constexpr int32_t kReciprocalExpConst = 0x7E80;
+// This kernel uses (0x7E81 - x) + (mantissaLUT[x & 0xFF] - 1), the same sum (see
+// buildReciprocalPackedLut).
+constexpr int32_t kReciprocalExpConst = 0x7E81;
 
 // Bit pattern of a float32, for the act clamp bounds.
 static int32_t f32Bits(float f) {
@@ -94,8 +96,14 @@ static int32_t f32Bits(float f) {
 }
 
 // 256-entry packed mantissa LUT: a 128-entry base, duplicated to 256, with the
-// per-index correction lut[i] += i%128 done in int8_t (wrapping), then sign-extended
-// and shifted left 8 into an i32 word.
+// per-index correction lut[i] += i%128 done in int8_t (wrapping), then read unsigned,
+// lowered by one and shifted left 8 into an i32 word.
+// The values are meant to be read unsigned (106..128), but on SL2619 the two 0x80 entries
+// (mantissa 0 and 127, i.e. a range at or just below a power of two) come back from the
+// lut/zext tasks as -128: recip 4x too small, so inv_scale, zp and y are 1/4 of the right
+// values while scale is correct. Every entry is stored one lower (105..127, high bit clear,
+// so sign- and zero-extension agree) and kReciprocalExpConst is one higher, which leaves
+// recip bit-identical to BfloatReciprocalPattern.
 static SmallVector<int32_t> buildReciprocalPackedLut() {
     static const int8_t base128[128] = {
         (int8_t)-0x80, 0x7E, 0x7C, 0x7A, 0x78, 0x76, 0x75, 0x73, 0x71, 0x6F, 0x6D, 0x6C, 0x6A,
@@ -112,7 +120,9 @@ static SmallVector<int32_t> buildReciprocalPackedLut() {
     SmallVector<int32_t> packed(256);
     for (int i = 0; i < 256; ++i) {
         int8_t v = static_cast<int8_t>(base128[i % 128] + static_cast<int8_t>(i % 128));
-        packed[i] = static_cast<int32_t>(v) << 8;
+        int32_t biased = static_cast<int32_t>(static_cast<uint8_t>(v)) - 1;
+        assert(biased >= 0 && biased <= 127 && "LUT entry must keep the high bit clear");
+        packed[i] = biased << 8;
     }
     return packed;
 }
@@ -238,8 +248,8 @@ LogicalResult DeriveQuantParamsPattern::transform(
     );
 
     // ---- reciprocal: recip = 1/range_safe, full-range exponent+mantissa ----
-    // [6] expo = 0x7E80 - x, with x = i16 bits of range_safe:
-    //     (x + (-0x7E80)) * (-1) via the scalar-affine ACT path.
+    // [6] expo = 0x7E81 - x, with x = i16 bits of range_safe:
+    //     (x + (-0x7E81)) * (-1) via the scalar-affine ACT path.
     emitScalarRescale(
         rewriter, loc, "dqp_recip_expo", blob, RANGE_SAFE, D::int16, op.getSubScaleBias(), blob,
         EXPO, D::int16, /*lut=*/{}

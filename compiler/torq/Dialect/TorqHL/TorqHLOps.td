@@ -339,9 +339,10 @@ def TorqHL_DeriveQuantParamsOp: TorqHL_LayerOp<"derive_quant_params"> {
     [compile-time constants]
       * `mul_weight`: <2xbf16> {255.0, 1/255}, the quantized range and its inverse as WRAM
         weights (for uint8 output).
-      * `sub_scale_bias`: <2xi32> {bias, scale} = {-0x7E80, -1}. The ACT affine pair that
+      * `sub_scale_bias`: <2xi32> {bias, scale} = {-0x7E81, -1}. The ACT affine pair that
         computes the exponent term of the bf16 reciprocal, `(bits16(v) + bias) * scale`,
-        i.e. `0x7E80 - bits16(v)`, where bits16(v) is the bf16 bit pattern read as i16.
+        i.e. `0x7E81 - bits16(v)`, where bits16(v) is the bf16 bit pattern read as i16
+        (one above BfloatReciprocalPattern's 0x7E80; the LUT entries are one lower).
       * `table_scale_bias`: <2xi32> {bias, scale} = {-128, 128}. The ACT affine pair that
         maps the low byte of bits16(v) to an index into the reciprocal's 256-entry mantissa
         LUT (the LUT itself is a constant of the lowering; entries are packed as int8 << 8).
