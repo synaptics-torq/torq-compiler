@@ -1315,6 +1315,10 @@ struct SlicePrivate {
     // Return true if HW supports ACPR with S:32 in non-MAC mode
     bool supportACPRs32() const { return false; }
 
+    // Return true if HW supports DEQW split writes (G dim in LDIMs) with a stride between the
+    // groups that is not a multiple of 8 bytes
+    bool supportDEQWMisalignedWrite() const { return false; }
+
     // Applying bias,scale per-item in ACT
     bool _biasScalePerItem{false};
 
@@ -1464,13 +1468,23 @@ int SlicePrivate::addMemNdlDims(
         assert(!useSDims && "SDIMs only supported for DEQW");
     }
 
+    // A split write whose group stride isn't a multiple of 8 bytes gives wrong values on HW that
+    // doesn't support it: write the same word through an XY view with one line per group instead
+    bool misalignedSplit = false;
+    if (type == NdlType::DEQW && block.sgGroups > 1 && block.size > 1 && !block.isEvenOddSplit &&
+        !supportDEQWMisalignedWrite() && !useSDims && block.outerGroups == 1 && elementSize <= 2) {
+        auto groupStride = block.stride.intVal;
+        misalignedSplit = groupStride && (*groupStride * elementSize) % 8 != 0;
+    }
+
     // Let's start with LDIMs.
     // We currently handle with LDIMs only the element size and the block.size.
     // Any other dimension will be handled with HDIMs.
+    // With the XY view, the word holds all the groups.
+    int wordItems = misalignedSplit ? block.size * block.sgGroups : block.size;
     ndlDims.push_back({DimType::L, MemDimTag::B, elementSize * packFactor, 1});
-    ndlDims.push_back({DimType::L, MemDimTag::D, block.size / packFactor, elementSize * packFactor}
-    );
-    if (block.sgGroups > 1) {
+    ndlDims.push_back({DimType::L, MemDimTag::D, wordItems / packFactor, elementSize * packFactor});
+    if (block.sgGroups > 1 && !misalignedSplit) {
         if (block.size > 1 && !block.isEvenOddSplit) {
             ndlDims.push_back(makeMemNdlDimData(
                 DimType::L, MemDimTag::G, block.sgGroups, block.stride, elementSize
@@ -1553,6 +1567,10 @@ int SlicePrivate::addMemNdlDims(
             // as required by the hardware.
             // Note: probably we don't really need to use tha A tag if strideVal == 0
             auto memDimTag = useSDims && !iv ? MemDimTag::A : tagToMemDimTag(tag, _forStack[i].tag);
+            if (misalignedSplit && memDimTag == MemDimTag::A) {
+                // An A dim would move the position in the XY view, each word must start at 0
+                memDimTag = _forStack[i].tag;
+            }
             ndlDims.push_back({DimType::H, memDimTag, loopIterCount, strideVal * elementSize});
         }
     }
@@ -1570,6 +1588,15 @@ int SlicePrivate::addMemNdlDims(
 
     // Compact HDIMs if needed
     compactHDims(type, ndlDims);
+
+    if (misalignedSplit) {
+        // XY view of one line per group: each word fills the whole view, line by line
+        ndlDims.push_back({DimType::S, MemDimTag::B, elementSize, 1});
+        ndlDims.push_back({DimType::S, MemDimTag::X, block.size, elementSize});
+        ndlDims.push_back(
+            {DimType::S, MemDimTag::Y, block.sgGroups, block.stride.intVal.value() * elementSize}
+        );
+    }
 
     if (useSDims) {
         assert(block.outerGroups == 1 && "SDIMs only supported for single block transfers");
