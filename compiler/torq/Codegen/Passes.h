@@ -144,6 +144,8 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createResolveInvocationArgum
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignObjectsIdentifiersPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createPairDmaChannelsPass();
+
 // Which buffers the slices of an scf.forall share (see FoldConvert). Real pipeline only.
 enum class SliceBufferSharing { None, Inputs, InputsAndOutputs };
 

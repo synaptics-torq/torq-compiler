@@ -758,6 +758,25 @@ def AssignObjectsIdentifiers :
         ];
 }
 
+def PairDmaChannels :
+    InterfacePass<"torq-pair-dma-channels", "mlir::FunctionOpInterface"> {
+        let summary = "Run the input and output DMA channels at the same time";
+        let description = [{
+            The NPU has one DMA channel per direction and the NSS starts them together. The
+            lowering gives every transfer its own task, so only one channel is ever busy. This
+            moves an input into the task of an earlier output when its LRAM and XRAM ranges do
+            not touch anything it moves over, including programs whose wait it crosses.
+        }];
+        let constructor = "mlir::syna::torq::createPairDmaChannelsPass()";
+        let options = [
+            Option<"lookahead", "lookahead", "unsigned", "16",
+                   "How many tasks to look ahead for an input to pair with">
+        ];
+        let dependentDialects = [
+            "syna::torq_hw::TorqHWDialect"
+        ];
+}
+
 def EliminateRedundantLramLoads :
     InterfacePass<"torq-eliminate-redundant-lram-loads", "mlir::FunctionOpInterface"> {
         let summary = "Reuse LRAM buffers for repeated read-only loads within a region";

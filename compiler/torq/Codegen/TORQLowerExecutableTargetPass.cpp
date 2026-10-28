@@ -55,6 +55,16 @@ static llvm::cl::opt<bool> clEnableTorqProfiling(
     "torq-enable-profiling", llvm::cl::desc("enable torq profiling"), llvm::cl::init(false)
 );
 
+// Off by default until the hardware gain is confirmed: the compile-time profile counts the overlap
+// as free (it does not model the shared bandwidth), and the prefetch list scheduler plans for one
+// DMA engine that runs loads and stores in turn.
+static llvm::cl::opt<bool> clEnableDmaChannelPairing(
+    "torq-enable-dma-channel-pairing",
+    llvm::cl::desc("Run the input and output DMA channels at the same time where the addresses "
+                   "allow it (experimental)"),
+    llvm::cl::init(false)
+);
+
 static llvm::cl::opt<std::string> clDebugInfo(
     "torq-debug-info", llvm::cl::desc("save debug information for a model"), llvm::cl::init("")
 );
@@ -396,6 +406,11 @@ void addNssPostAssignLramAddressesPasses(OpPassManager &pm) {
 
         // add all object identifiers used in serialization to the IR
         funcPm.addPass(createAssignObjectsIdentifiersPass());
+
+        // run the two DMA channels at the same time where the addresses allow it
+        if (clEnableDmaChannelPairing) {
+            funcPm.addPass(createPairDmaChannelsPass());
+        }
 
         if (clEnableTorqProfiling) {
             funcPm.addPass(createProfilingPass());

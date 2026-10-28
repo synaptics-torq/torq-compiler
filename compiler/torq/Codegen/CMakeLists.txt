@@ -50,6 +50,7 @@ set(sources
     OutlineNSSProgramsPass.cpp
     OutlineSliceProgramsPass.cpp
     OutlineUtils.cpp
+    PairDmaChannelsPass.cpp
     Passes.cpp
     PeelTileLoopsPass.cpp
     PrefetchInputsPass.cpp
