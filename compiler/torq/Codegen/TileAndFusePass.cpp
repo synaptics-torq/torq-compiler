@@ -1705,9 +1705,14 @@ static int64_t countTiles(
 // tile is worth it). For example a 3x3 stride-4 maxpool on 113x113x64 int8 on SL2610 fits
 // 4 tiles of 16 channels by relocating 308 KB per tile, and 8 tiles of 8 channels without
 // relocation.
-static int64_t maxRelocationFreeTiles(int64_t count, int64_t relocatedBytes) {
+//
+// An elementwise group (`elementwise`) is worth twice the tiles too: its tiles have no halo
+// or weights to read again. The tanh GELU on 1x4096x64 bf16 on SL2610 runs twice as fast
+// with 7 tiles that do not spill as with 4 that do.
+static int64_t maxRelocationFreeTiles(int64_t count, int64_t relocatedBytes, bool elementwise) {
     unsigned growth = clProbeRelocationMaxTileGrowth;
-    if (growth > 0 && relocatedBytes * 2 > static_cast<int64_t>(TorqHw::get().getLramSize()))
+    if (growth > 0 &&
+        (elementwise || relocatedBytes * 2 > static_cast<int64_t>(TorqHw::get().getLramSize())))
         growth = std::max(growth, 100u);
     return count * (100 + growth) / 100;
 }
@@ -1928,7 +1933,7 @@ TileFit TileAndFusePass::fitTileToMemory(
     SmallVector<OpFoldResult> strictSizes(sizes.begin(), sizes.end());
     FailureOr<std::optional<int64_t>> strictCount = findRelocationFreeTile(
         consumerOp, producerOps, tilingInfo, iterDomainSizes, offsets, strictSizes,
-        maxRelocationFreeTiles(count, lastFitRelocatedBytes_)
+        maxRelocationFreeTiles(count, lastFitRelocatedBytes_, probeCountsSpills_)
     );
     // The relocating tile is valid, so a broken strict probe keeps it.
     if (failed(strictCount)) {

@@ -131,6 +131,10 @@
     while materializing buffers (swap-outs, stores/loads skipped, bytes dropped/stored/loaded).
     Useful to see how much spill traffic a model generates. Debug aid; does not change codegen.
 
+  - ``--torq-reload-spilled-inputs`` (default on): when the LRAM plan spills a buffer that holds
+    a copy of a constant or of a dispatch input that nothing writes afterwards, skip storing it
+    to XRAM and load it again from its source. Turn it off to compare.
+
   - ``--torq-dump-compute-constants-ir=<DIR>``: dump the IR of every pass run to JIT-compute
     compile-time constants into a file tree under ``DIR``. Debug aid.
 
@@ -196,8 +200,9 @@
     relocate before that search runs. A smaller relocation costs less than an extra tile.
 
   - ``--torq-probe-relocation-max-tile-growth=<P>`` (default 50): the most additional tiles, in
-    percent, accepted for a tile without relocation. The limit rounds down, so a tiling of 1
-    tile keeps its relocation.
+    percent, accepted for a tile without relocation. It is at least 100 for an elementwise group
+    (see ``--torq-probe-avoid-spills``) and for a tile that relocates more than half of the LRAM.
+    The limit rounds down, so a tiling of 1 tile keeps its relocation.
 
   - ``--torq-disable-tnf-avoid-producer-recompute`` (default off): by default, tile-and-fuse does
     not fuse a producer whose slice is the same on every iteration of a tiled loop, e.g. the LHS

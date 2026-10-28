@@ -22,6 +22,16 @@ static llvm::cl::opt<bool> clPrintStatistics(
     llvm::cl::init(false)
 );
 
+// A buffer loaded from a constant or a dispatch binding that nothing writes afterwards holds a
+// copy of data that stays in XRAM: when the LRAM plan spills it, loading it again from there
+// avoids storing the copy.
+static llvm::cl::opt<bool> clReloadSpilledInputs(
+    "torq-reload-spilled-inputs",
+    llvm::cl::desc("Load a spilled LRAM copy of a constant or of a dispatch input again from its "
+                   "source, instead of storing it to XRAM"),
+    llvm::cl::init(true)
+);
+
 class VirtualAlias;
 class VirtualBuffer;
 class VirtualMemory;
@@ -82,6 +92,11 @@ class VirtualBuffer : public VirtualObject {
     // buffer is written: while it exists it is up to date, so a swap-out skips the store.
     Value swappedOutValue_;
 
+    // The load that filled the whole buffer from data the function no longer writes, reset
+    // when the buffer is written: while it is set, the buffer holds a copy of that data, so a
+    // swap-out skips the store and the swap-in repeats the load.
+    torq_hl::LoadOp sourceLoad_;
+
   public:
     VirtualBuffer(VirtualMemory &vm, Value value)
         : VirtualObject(vm, value, /*physical=*/value),
@@ -94,12 +109,17 @@ class VirtualBuffer : public VirtualObject {
     // Free the retained swap copy; called before the contents change.
     void freeSwappedOutValue(IRRewriter &rewriter, Location loc) {
         assert(!isSwappedOut() && "the swap copy holds the only contents");
+        sourceLoad_ = nullptr;
         if (!swappedOutValue_) {
             return;
         }
         memref::DeallocOp::create(rewriter, loc, swappedOutValue_);
         swappedOutValue_ = nullptr;
     }
+
+    // Record that `loadOp` just filled the whole buffer from data the function no longer
+    // writes.
+    void setSourceLoad(torq_hl::LoadOp loadOp) { sourceLoad_ = loadOp; }
 
     void swapIn(IRRewriter &rewriter, Location loc, int64_t address);
 
@@ -283,6 +303,12 @@ void VirtualBuffer::swapIn(IRRewriter &rewriter, Location loc, int64_t address) 
         );
         vm().stats.loadedBytes += size();
     }
+    else if (sourceLoad_) {
+        // load the data again from where the buffer was filled
+        auto loadOp = cast<torq_hl::LoadOp>(rewriter.clone(*sourceLoad_));
+        loadOp.getOutputMutable().assign(physicalAlloc);
+        vm().stats.loadedBytes += size();
+    }
     else {
         // the contents were dropped at swap-out: nothing to load
         vm().stats.loadsSkipped++;
@@ -314,6 +340,10 @@ void VirtualBuffer::swapOut(IRRewriter &rewriter, Location loc) {
     }
     else if (swappedOutValue_) {
         // the swap copy is still up to date
+        vm().stats.storesSkipped++;
+    }
+    else if (sourceLoad_) {
+        // the data the buffer was loaded from is still there: the swap-in loads it again
         vm().stats.storesSkipped++;
     }
     else {
@@ -350,6 +380,7 @@ void VirtualBuffer::deallocate(memref::DeallocOp deallocOp, IRRewriter &rewriter
         target = physical();
     }
     swappedOutValue_ = nullptr;
+    sourceLoad_ = nullptr;
     setPhysical(nullptr);
     if (target) {
         deallocOp.getMemrefMutable().set(target);
@@ -375,6 +406,32 @@ static void buildBufferAccessSchedule(
             schedule[root].emplace_back(index, access == torq_hl::ArgAccessBitfield::Write);
         }
     }
+}
+
+// `op` if it is a load that fills a whole buffer of `vm` from a constant or a dispatch binding
+// that nothing writes at or after `opIndex` (`lastSourceWrite`, by view base).
+static torq_hl::LoadOp getSourceLoad(
+    Operation *op, VirtualMemory &vm, const DenseMap<Value, unsigned> &lastSourceWrite,
+    unsigned opIndex
+) {
+    auto loadOp = dyn_cast<torq_hl::LoadOp>(op);
+    if (!loadOp || !clReloadSpilledInputs)
+        return nullptr;
+    auto outputType = cast<MemRefType>(loadOp.getOutput().getType());
+    auto inputType = cast<MemRefType>(loadOp.getInput().getType());
+    if (getEncodingMemorySpace(outputType) != vm.memorySpace ||
+        getEncodingMemorySpace(inputType) != vm.swapMemSpace ||
+        !loadOp.getOutput().getDefiningOp<memref::AllocOp>())
+        return nullptr;
+    // Only constants and dispatch bindings: other XRAM buffers, such as the code sections of
+    // programs, are rewritten after this pass
+    Value base = getViewBase(loadOp.getInput());
+    if (!isa_and_present<torq_hl::ConstOp, torq_hl::MapBindingOp>(base.getDefiningOp()))
+        return nullptr;
+    auto write = lastSourceWrite.find(base);
+    if (write != lastSourceWrite.end() && write->second >= opIndex)
+        return nullptr;
+    return loadOp;
 }
 
 struct OperationMemoryInfo {
@@ -546,6 +603,16 @@ LogicalResult convertVirtualToPhysicalMemRefs(
     // Future accesses determine whether an evicted buffer must be copied to swap memory.
     buildBufferAccessSchedule(ops, memorySpace, vm.bufferAccessSchedule);
 
+    // The last op that writes each buffer, by view base: a buffer loaded from one that is not
+    // written afterwards can be loaded again instead of stored.
+    DenseMap<Value, unsigned> lastSourceWrite;
+    for (auto [opIndex, op] : llvm::enumerate(ops)) {
+        for (const torq_hl::AsyncAccess &access : collectBufferAccesses(op)) {
+            if (bitEnumContainsAny(access.access, torq_hl::ArgAccessBitfield::Write))
+                lastSourceWrite[getViewBase(access.buffer)] = opIndex;
+        }
+    }
+
     // Keep StartProgramOp operands pinned until the corresponding WaitProgramOp.
     llvm::MapVector<Value, SmallVector<Value>> invocationToVirtual;
     for (auto [opIndex, op] : llvm::enumerate(ops)) {
@@ -569,6 +636,8 @@ LogicalResult convertVirtualToPhysicalMemRefs(
 
         // Inspect virtual operands and results before any operand is rewritten.
         OperationMemoryInfo memoryInfo = collectOperationMemoryInfo(op, memorySpace);
+        torq_hl::LoadOp sourceLoad = getSourceLoad(op, vm, lastSourceWrite, opIndex);
+        Value loadedBuffer = sourceLoad ? sourceLoad.getOutput() : Value();
 
         materializeOperandsAndAllocateResults(op, memoryInfo, vm, rewriter);
 
@@ -582,6 +651,8 @@ LogicalResult convertVirtualToPhysicalMemRefs(
                 vm.object(access.buffer).root().freeSwappedOutValue(rewriter, op->getLoc());
             }
         }
+        if (sourceLoad)
+            vm.buffer(loadedBuffer).setSourceLoad(sourceLoad);
 
         updateOperandPinLifetimes(op, pinnedOperands, memoryInfo.accesses, vm, invocationToVirtual);
     }

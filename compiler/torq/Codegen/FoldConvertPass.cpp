@@ -380,6 +380,50 @@ class SwapBitcastAndConvert : public OpRewritePattern<torq_hl::BitcastOp> {
     }
 };
 
+// Load the XRAM data of a bitcast and view it in LRAM, instead of loading the bitcast:
+//   convert(lram, extract_slice(bitcast(x)))  ->  bitcast(convert(lram, extract_slice(x)))
+// The loads of x and of its bitcast then read the same value, so EliminateRedundantLramLoads
+// can keep one of them. A lookup-table GELU reads its input tile as i16 for the tables and as
+// bf16 for the rest.
+class SwapInputBitcastAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(torq_hl::ConvertOp op, PatternRewriter &rewriter) const override {
+        auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+        if (!resultType || getEncoding(resultType).getMemSpace() != torq_hl::MemorySpace::Lram)
+            return failure();
+        auto slice = op.getInput().getDefiningOp<tensor::ExtractSliceOp>();
+        auto bitcast = slice ? slice.getSource().getDefiningOp<torq_hl::BitcastOp>()
+                             : op.getInput().getDefiningOp<torq_hl::BitcastOp>();
+        if (!bitcast)
+            return failure();
+        auto source = dyn_cast<TypedValue<RankedTensorType>>(bitcast.getSource());
+        if (!source || getEncoding(source.getType()).getMemSpace() == torq_hl::MemorySpace::Lram)
+            return failure();
+
+        TypedValue<RankedTensorType> data = source;
+        if (slice) {
+            auto sliceType = RankedTensorType::get(
+                slice.getType().getShape(), source.getType().getElementType(),
+                source.getType().getEncoding()
+            );
+            data = tensor::ExtractSliceOp::create(
+                       rewriter, op.getLoc(), sliceType, source, slice.getMixedOffsets(),
+                       slice.getMixedSizes(), slice.getMixedStrides()
+            )
+                       .getResult();
+        }
+        // Same shape and element width: the LRAM encoding of the load applies to the data
+        auto lramType = RankedTensorType::get(
+            resultType.getShape(), data.getType().getElementType(), resultType.getEncoding()
+        );
+        Value loaded = convertTensorToType(rewriter, data, lramType);
+        rewriter.replaceOpWithNewOp<torq_hl::BitcastOp>(op, resultType, loaded);
+        return success();
+    }
+};
+
 // Fold a round trip conversion of the type
 //   convert(T1, convert(T2, ... convert(T0, x: T1))) = x
 // this pattern also simplifies the special case:
@@ -1297,6 +1341,7 @@ void FoldConvertPass::runOnOperation() {
     patterns.add<FoldRoundTripConversion>(ctx);
     patterns.add<SwapCollapseAndConvert>(ctx);
     patterns.add<SwapBitcastAndConvert>(ctx);
+    patterns.add<SwapInputBitcastAndConvert>(ctx);
     patterns.add<FoldLramToLramConversionChain>(ctx);
     // KeepConcatInLram and SwapExtractAndConvert size each op against the tile budget of its
     // tile loop (see lramSizeFor), or the real pipeline would keep more data in LRAM than the

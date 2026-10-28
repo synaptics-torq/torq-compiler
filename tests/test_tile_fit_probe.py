@@ -231,10 +231,10 @@ def test_relocation_free_search_keeps_alignment(torq_compiler, tmp_path):
     assert default % 4 == 0, f"tile of {default} columns is not a multiple of 4"
 
 
-# The tanh GELU on SR200: 2 tiles of 512 rows fit only by spilling a 256 KB buffer computed in
-# the tile, which 3 tiles of 344 rows avoid. Only elementwise groups count spills: the probe of
-# encoder_bf16_layer_Conv_2 on SR200 also spills a computed buffer, and keeps its tile.
-SPILL_MODEL = MODELS_DIR / "torch_ops" / "gelu-gemma.mlir"
+# The tanh GELU on 1x4096x64 bf16 on SR200: the largest tile that fits, 456 rows, spills a buffer
+# computed in the tile, which 344-row tiles avoid. Only elementwise groups count spills: the
+# probe of encoder_bf16_layer_Conv_2 on SR200 also spills a computed buffer, and keeps its tile.
+SPILL_MODEL = MODELS_DIR / "tiling" / "gelu-tanh-1x4096x64-bf16.mlir"
 
 
 @pytest.mark.ci
@@ -247,9 +247,9 @@ def test_probe_avoids_spilling_computed_buffers(torq_compiler, tmp_path):
         SPILL_MODEL,
         SR200_HW,
         flags + ["--torq-probe-avoid-spills=false"],
-        1024,
+        4096,
     )
-    default = tile_loop_step(torq_compiler, tmp_path, SPILL_MODEL, SR200_HW, flags, 1024)
+    default = tile_loop_step(torq_compiler, tmp_path, SPILL_MODEL, SR200_HW, flags, 4096)
     # Without this, the test would pass even if the model stopped spilling.
     assert default != spilling, "the tile no longer spills, so this test proves nothing"
     assert default < spilling
@@ -268,6 +268,25 @@ def test_probe_keeps_spills_of_non_elementwise_groups(torq_compiler, tmp_path):
     )
     default = tile_loop_step(torq_compiler, tmp_path, ALIGNMENT_MODEL, SR200_HW, [], 1249)
     assert default == disabled
+
+
+# The same GELU on SL2610: the largest tile that fits, 1024 rows (4 tiles), spills, and the first
+# tiles that don't are 7 tiles of 584 rows, more than 50% more tiles.
+@pytest.mark.ci
+def test_elementwise_group_may_double_its_tiles_to_avoid_spills(torq_compiler, tmp_path):
+    """An elementwise group must accept up to twice the tiles to avoid a spill."""
+    flags = ["--torq-disable-host", "--torq-disable-css"]
+    spilling = tile_loop_step(
+        torq_compiler,
+        tmp_path,
+        SPILL_MODEL,
+        "SL2610",
+        flags + ["--torq-probe-avoid-spills=false"],
+        4096,
+    )
+    default = tile_loop_step(torq_compiler, tmp_path, SPILL_MODEL, "SL2610", flags, 4096)
+    # 50% more tiles than 4 would be 6 tiles of 683 rows
+    assert default < 683, f"tile of {default} rows (spilling tile: {spilling} rows)"
 
 
 # Tile-and-fuse must not fuse a producer that a tiled loop would recompute on every
