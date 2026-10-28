@@ -52,14 +52,19 @@ def ir_dumps(text, when):
     return [body for kind, body in zip(parts[1::2], parts[2::2]) if kind == when]
 
 
-def gqa_key_scores(heads=4, seq=8, head_dim=16, output_key_t=False):
+def float_initializer(name, values, dtype):
+    """A float initializer of the ONNX `dtype` (FLOAT or BFLOAT16)."""
+    return numpy_helper.from_array(np.asarray(values, helper.tensor_dtype_to_np_dtype(dtype)), name)
+
+
+def gqa_key_scores(heads=4, seq=8, head_dim=16, output_key_t=False, dtype=TensorProto.FLOAT):
     """q @ (scale * Expand(key)^T): the grouped-query attention score block
     whose key head broadcast the batch matmul pattern absorbs through the K^T
     transpose and scale. seq != head_dim, so a swapped K^T would not
     type-check. `output_key_t` also returns the transposed key, forking the
     chain."""
     def vi(name, shape):
-        return helper.make_tensor_value_info(name, TensorProto.FLOAT, shape)
+        return helper.make_tensor_value_info(name, dtype, shape)
 
     nodes = [
         helper.make_node("Expand", ["key", "heads_shape"], ["key_exp"]),
@@ -71,7 +76,7 @@ def gqa_key_scores(heads=4, seq=8, head_dim=16, output_key_t=False):
         nodes, "gqa_key_scores",
         [vi("q", [1, heads, 1, head_dim]), vi("key", [1, 1, seq, head_dim])],
         [vi("scores", [1, heads, 1, seq])] + ([vi("key_t", [1, heads, head_dim, seq])] if output_key_t else []),
-        [numpy_helper.from_array(np.array(head_dim ** -0.5, np.float32), "scale"),
+        [float_initializer("scale", head_dim ** -0.5, dtype),
          numpy_helper.from_array(np.array([1, heads, seq, head_dim], np.int64), "heads_shape")])
     return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)])
 
@@ -583,3 +588,51 @@ def test_tail_stops_at_width_converting_clamp(torq_compiler, tmp_path):
     # the width-converting clamp survived as its own act
     acts = op_lines(out, "torq_hl.act")
     assert any("name = \"clamp\"" in a and "-> tensor<1x4x1x4xf32>" in a for a in acts), out
+
+
+# Since IREE 3.12, torch-mlir accumulates a bf16 matmul in f32 and truncates the result in a
+# separate generic. FoldTruncfIntoFloatMatmulPattern folds the truncf into the matmul, so it
+# writes bf16. The control is the IR before the pass, which still has the f32 matmul and truncf.
+
+def bf16_const_weight_matmul(a_shape):
+    """A @ W with W a constant [8,16] bf16 initializer. A [1,H,W,8] input is the form of #2675."""
+    weight = np.random.default_rng(0).standard_normal((8, 16)) * 0.1
+    node = helper.make_node("MatMul", ["a", "W"], ["o"], name="m")
+    graph = helper.make_graph(
+        [node], "bf16_const_weight_matmul",
+        [helper.make_tensor_value_info("a", TensorProto.BFLOAT16, a_shape)],
+        [helper.make_tensor_value_info("o", TensorProto.BFLOAT16, a_shape[:-1] + [16])],
+        [float_initializer("W", weight, TensorProto.BFLOAT16)])
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 20)])
+
+
+def dispatch_dump(text, when):
+    """The dispatch dump printed `when` a pass, skipping the tile-fit probe's extracted copies."""
+    dumps = [d for d in ir_dumps(text, when) if "_dispatch_" in d and "extracted_ops" not in d]
+    assert dumps, f"no dispatch dump {when.lower()} the pass:\n{text}"
+    return dumps[0]
+
+
+@pytest.mark.ci
+@pytest.mark.parametrize("make_model, matmul_op, absorbs_broadcast", [
+    (lambda: bf16_const_weight_matmul([4, 8]), "linalg.matmul", False),
+    (lambda: bf16_const_weight_matmul([1, 4, 4, 8]), "linalg.batch_matmul", False),
+    # The batch matmul pattern also absorbs the key broadcast here, so the fold must not
+    # depend on which of the two patterns the greedy driver applies first.
+    (lambda: gqa_key_scores(dtype=TensorProto.BFLOAT16), "linalg.batch_matmul", True),
+], ids=["const_weight_2d", "const_weight_4d", "gqa_key_broadcast"])
+# runtime_hw_type is unused, but requesting it makes the plugin run the test for each chip.
+def test_fold_truncf_into_float_matmul(torq_compiler, tmp_path, runtime_hw_type, chip_config,
+                                       make_model, matmul_op, absorbs_broadcast):
+    pass_arg = "torq-optimize-linalg-for-torq"
+    # dump_after pins SL2610; the last --torq-hw wins.
+    text = dump_after(torq_compiler, tmp_path, make_model(), pass_arg,
+                      f"--mlir-print-ir-before={pass_arg}", f"--torq-hw={chip_config.data['target']}")
+    before, after = dispatch_dump(text, "Before"), dispatch_dump(text, "After")
+    f32_matmul = re.compile(rf"{re.escape(matmul_op)} .*-> tensor<[0-9x]+xf32>")
+    assert f32_matmul.search(before) and "arith.truncf" in before, \
+        f"control: no f32 {matmul_op} and truncf to fold:\n{before}"
+    assert "xf32>" not in after and "arith.truncf" not in after, \
+        f"the matmul still writes f32 or a separate truncf is left:\n{after}"
+    if absorbs_broadcast:
+        assert "torq-broadcast-matmul" in after, f"the key broadcast was not absorbed:\n{after}"
