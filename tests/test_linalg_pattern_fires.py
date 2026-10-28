@@ -636,3 +636,78 @@ def test_fold_truncf_into_float_matmul(torq_compiler, tmp_path, runtime_hw_type,
         f"the matmul still writes f32 or a separate truncf is left:\n{after}"
     if absorbs_broadcast:
         assert "torq-broadcast-matmul" in after, f"the key broadcast was not absorbed:\n{after}"
+
+
+# --- Decomposed tanh GELU -----------------------------------------------------
+#
+# FuseDecomposedGeluPattern replaces the chain of one elementwise generic per
+# ONNX node (Mul, Pow, Mul, Add, Mul, Tanh, Add, Mul) with the single GELU
+# generic that GeluOpPattern lowers.
+
+
+def decomposed_tanh_gelu(cube_as_pow, cube_coeff=0.044715, tanh_is_output=False):
+    """0.5 * x * (1 + tanh(0.7978 * (x + 0.044715 * x^3))) in bf16, one node per
+    step, as Redimnet2 exports it. x^3 is a Pow node, or Mul(Mul(x, x), x).
+    With tanh_is_output, the tanh result is a second output of the model."""
+    def scalar(name, value):
+        # The importer reads bf16 initializers from raw data only
+        raw = np.array(value, dtype=ml_dtypes.bfloat16).tobytes()
+        return helper.make_tensor(name, TensorProto.BFLOAT16, [], raw, raw=True)
+
+    if cube_as_pow:
+        cube_nodes = [helper.make_node("Pow", ["x", "three"], ["cube"])]
+    else:
+        cube_nodes = [helper.make_node("Mul", ["x", "x"], ["square"]),
+                      helper.make_node("Mul", ["square", "x"], ["cube"])]
+    nodes = [
+        helper.make_node("Mul", ["x", "half"], ["half_x"]),
+        *cube_nodes,
+        helper.make_node("Mul", ["cube", "coeff"], ["cube_term"]),
+        helper.make_node("Add", ["x", "cube_term"], ["sum"]),
+        helper.make_node("Mul", ["sum", "sqrt_2_over_pi"], ["tanh_in"]),
+        helper.make_node("Tanh", ["tanh_in"], ["tanh_out"]),
+        helper.make_node("Add", ["tanh_out", "one"], ["one_plus_tanh"]),
+        helper.make_node("Mul", ["half_x", "one_plus_tanh"], ["y"]),
+    ]
+    shape = [1, 196, 24]
+    graph = helper.make_graph(
+        nodes, "decomposed_tanh_gelu",
+        [helper.make_tensor_value_info("x", TensorProto.BFLOAT16, shape)],
+        [helper.make_tensor_value_info(name, TensorProto.BFLOAT16, shape)
+         for name in ["y"] + (["tanh_out"] if tanh_is_output else [])],
+        [scalar("half", 0.5), scalar("three", 3.0), scalar("coeff", cube_coeff),
+         scalar("sqrt_2_over_pi", 0.7978845608), scalar("one", 1.0)])
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+
+
+@pytest.mark.ci
+@pytest.mark.parametrize("cube_as_pow", [True, False])
+def test_decomposed_tanh_gelu_fuses_to_one_generic(torq_compiler, tmp_path, cube_as_pow):
+    pass_arg = "torq-optimize-linalg-for-torq"
+    text = dump_after(torq_compiler, tmp_path, decomposed_tanh_gelu(cube_as_pow), pass_arg,
+                      f"--mlir-print-ir-before={pass_arg}")
+    [before] = ir_dumps(text, "Before")
+    [after] = ir_dumps(text, "After")
+    # Control: the importer gives one generic per step
+    assert count_ops(before, "linalg.generic") >= 8, f"control: no decomposed GELU:\n{before}"
+    assert count_ops(after, "linalg.generic") == 1, f"the GELU chain was not fused:\n{after}"
+    assert count_ops(after, "math.tanh") == 1, after
+    assert count_ops(after, "math.fpowi") == 1, after
+
+
+@pytest.mark.ci
+@pytest.mark.parametrize("model_args", [
+    # 0.05 instead of 0.044715 is outside the pattern's 1% tolerance: not a GELU
+    dict(cube_coeff=0.05),
+    # The tanh step would stay alive for its other user and be computed twice
+    dict(tanh_is_output=True),
+], ids=["other_constant", "step_with_other_user"])
+def test_decomposed_tanh_gelu_is_not_fused(torq_compiler, tmp_path, model_args):
+    pass_arg = "torq-optimize-linalg-for-torq"
+    text = dump_after(torq_compiler, tmp_path, decomposed_tanh_gelu(True, **model_args), pass_arg,
+                      f"--mlir-print-ir-before={pass_arg}")
+    [before] = ir_dumps(text, "Before")
+    [after] = ir_dumps(text, "After")
+    assert count_ops(before, "linalg.generic") >= 8, f"control: no decomposed chain:\n{before}"
+    assert count_ops(after, "linalg.generic") > 1 and count_ops(after, "math.tanh") == 1, \
+        f"the chain was fused:\n{after}"

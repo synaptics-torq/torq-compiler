@@ -58,6 +58,7 @@ iree_cc_library(
     SplitSmallChannelTransposePass.cpp
     DecomposeConvsForHardwarePass.cpp
     OptimizePowOpPattern.cpp
+    FuseDecomposedGeluPattern.cpp
     RemoveIsNanPass.cpp
   DEPS
     ::PassesIncGen

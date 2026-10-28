@@ -44,6 +44,10 @@ void populateOptimizeArithElementwiseBinaryOpPatterns(
 
 void populateOptimizePowPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
+// Replace a tanh GELU decomposed into one elementwise generic per step with one generic that
+// GeluOpPattern lowers
+void populateFuseDecomposedGeluPatterns(MLIRContext *context, RewritePatternSet &patterns);
+
 void populateCastI32MulPatterns(FunctionOpInterface funcOp, IRRewriter &rewriter);
 
 // Replace quantize(maxpool(pad(dequantize(x)))) with an int8 maxpool on x when the quantize undoes

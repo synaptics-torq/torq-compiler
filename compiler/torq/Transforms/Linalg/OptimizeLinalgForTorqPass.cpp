@@ -49,6 +49,8 @@ class OptimizeLinalgForTorqPass
 
             populateOptimizePowPatterns(ctx, patterns);
 
+            populateFuseDecomposedGeluPatterns(ctx, patterns);
+
             populateRaiseSoftmaxOpPatterns(ctx, patterns);
 
             populateRaiseDynamicQuantizeOpPatterns(ctx, patterns);
