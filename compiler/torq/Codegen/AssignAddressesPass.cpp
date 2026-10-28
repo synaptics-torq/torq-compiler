@@ -822,12 +822,40 @@ static int64_t bytesSwappedOutAndIn(ArrayRef<Swap> swaps) {
     return bytes;
 }
 
-// Bytes that `schedule` stores to XRAM only to load them straight back, at the same
-// op. A spill reloads its buffer at a later op.
-static int64_t relocatedBytes(const SwapSchedule &schedule) {
+// True if a torq_hl.load fills `buffer`: it holds a copy of data in XRAM.
+static bool isLoadedBuffer(Value buffer) {
+    return llvm::any_of(buffer.getUsers(), [&](Operation *user) {
+        auto loadOp = dyn_cast<torq_hl::LoadOp>(user);
+        return loadOp && loadOp.getOutput() == buffer;
+    });
+}
+
+// Bytes of the computed buffers that `swaps`, scheduled at one op, swap out and load back
+// at a later op.
+static int64_t bytesSpilledComputed(ArrayRef<Swap> swaps) {
+    llvm::DenseSet<Value> swappedIn;
+    for (const Swap &swap : swaps)
+        if (swap.kind == Swap::Kind::In)
+            swappedIn.insert(swap.buffer);
     int64_t bytes = 0;
-    for (const auto &opSwaps : schedule)
+    for (const Swap &swap : swaps) {
+        if (swap.kind == Swap::Kind::Out && !swappedIn.contains(swap.buffer) &&
+            !isLoadedBuffer(swap.buffer))
+            bytes += getEncodedTotalSizeBytes(cast<MemRefType>(swap.buffer.getType()));
+    }
+    return bytes;
+}
+
+// Bytes that `schedule` stores to XRAM only to load them straight back, at the same
+// op. A spill reloads its buffer at a later op; with `countSpills`, the computed buffers
+// it spills count too.
+static int64_t relocatedBytes(const SwapSchedule &schedule, bool countSpills) {
+    int64_t bytes = 0;
+    for (const auto &opSwaps : schedule) {
         bytes += bytesSwappedOutAndIn(opSwaps.second);
+        if (countSpills)
+            bytes += bytesSpilledComputed(opSwaps.second);
+    }
     return bytes;
 }
 
@@ -874,7 +902,9 @@ static LogicalResult allocateLramAddresses(
     if (placement->schedule.empty()) {
         return commitLramLayout(funcOp, reservedBase, buffers, placement->birthOffsets);
     }
-    if (int64_t bytes = relocatedBytes(placement->schedule)) {
+    auto moduleOp = funcOp->getParentOfType<ModuleOp>();
+    bool countSpills = moduleOp && moduleOp->hasAttr(kTileFitProbeCountSpillsAttr);
+    if (int64_t bytes = relocatedBytes(placement->schedule, countSpills)) {
         if (!allowRelocation) {
             LLVM_DEBUG(llvm::dbgs() << "LRAM plan relocates buffers, rejected\n");
             return failure();

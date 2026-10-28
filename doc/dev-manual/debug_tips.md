@@ -186,6 +186,12 @@
     look for a slightly smaller tile that needs no relocation. Turn it off to compare with the
     relocating tile.
 
+  - ``--torq-probe-avoid-spills`` (default on): in a group whose ops are all elementwise, the
+    probe counts the buffers computed in a tile that the LRAM plan spills (stores to XRAM and
+    loads back at a later op) as relocated, so the search above also avoids them. Spilled buffers
+    that a load fills don't count. Other groups (convs, matmuls) keep their spills: their smaller
+    tiles read weights or inputs again. Turn it off to compare.
+
   - ``--torq-probe-relocation-min-bytes=<N>`` (default 32768): the least bytes a tile must
     relocate before that search runs. A smaller relocation costs less than an extra tile.
 

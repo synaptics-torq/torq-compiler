@@ -206,6 +206,19 @@ static llvm::cl::opt<unsigned> clProbeRelocationMinBytes(
     llvm::cl::init(32 * 1024)
 );
 
+// A buffer computed in a tile and spilled is stored and loaded back in every tile, like a
+// relocated one: the tanh GELU on 1x1024x64 bf16 on SR200 spills 256 KB per tile with 512-row
+// tiles, and runs 46% faster with 344-row tiles that spill nothing. Only for elementwise groups,
+// whose tiles are independent: a conv or matmul with smaller tiles reads its weights or input
+// again or computes more halo, which made the rtdetr Conv_1007 layer 22% slower on SL2610.
+static llvm::cl::opt<bool> clProbeAvoidSpills(
+    "torq-probe-avoid-spills",
+    llvm::cl::desc("In an elementwise group, count the computed buffers that the LRAM plan of a "
+                   "tile spills as relocated, so that the probe also looks for a tile that does "
+                   "not spill them"),
+    llvm::cl::init(true)
+);
+
 static llvm::cl::opt<unsigned> clProbeRelocationMaxTileGrowth(
     "torq-probe-relocation-max-tile-growth",
     llvm::cl::desc("Most additional tiles, in percent, worth a tile whose LRAM plan does not "
@@ -1005,6 +1018,8 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
 
     // Set while findRelocationFreeTile probes; the LRAM plan must not relocate.
     bool probeRejectsRelocation_ = false;
+    // Set while fitTileToMemory probes a group whose spills count, see clProbeAvoidSpills.
+    bool probeCountsSpills_ = false;
 
     // Bytes the LRAM plan of the last tile the probe accepted relocates.
     int64_t lastFitRelocatedBytes_ = 0;
@@ -1231,6 +1246,8 @@ TileAndFusePass::checkModuleFitsInMemory(ModuleOp moduleOp, bool optimizeForTile
     moduleOp->setAttr(
         kTileFitProbeAttr, BoolAttr::get(moduleOp->getContext(), probeRejectsRelocation_)
     );
+    if (probeCountsSpills_)
+        moduleOp->setAttr(kTileFitProbeCountSpillsAttr, UnitAttr::get(moduleOp->getContext()));
 
     bool failure = false;
     bool memoryOverflow = false;
@@ -1877,6 +1894,17 @@ FailureOr<std::optional<int64_t>> TileAndFusePass::findRelocationFreeTile(
     return bestCount;
 }
 
+// True if every tiled op of the probe of `consumerOp` and `producerOps` is elementwise.
+static bool isElementwiseGroup(Operation *consumerOp, const SetVector<Operation *> &producerOps) {
+    SmallVector<Operation *> ops;
+    SmallVector<Value> inputs;
+    collectOpsForMemoryCheck(consumerOp, producerOps, ops, inputs);
+    return llvm::all_of(ops, [](Operation *op) {
+        auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
+        return !isa<TilingInterface>(op) || (linalgOp && linalg::isElementwise(linalgOp));
+    });
+}
+
 // Find a tile for `consumerOp` that the memory probe accepts, and write it to
 // `sizes`. Prefer a tile whose LRAM plan does not relocate buffers, if it needs
 // only a few more tiles than the largest tile the probe accepts.
@@ -1885,6 +1913,8 @@ TileFit TileAndFusePass::fitTileToMemory(
     ArrayRef<int64_t> iterDomainSizes, MutableArrayRef<OpFoldResult> offsets,
     MutableArrayRef<OpFoldResult> sizes
 ) {
+    probeCountsSpills_ = clProbeAvoidSpills && isElementwiseGroup(consumerOp, producerOps);
+    llvm::scope_exit resetCountSpills([&] { probeCountsSpills_ = false; });
     TileFit fit = fitTileToMemoryAnyPlan(
         consumerOp, producerOps, tilingInfo, iterDomainSizes, offsets, sizes
     );

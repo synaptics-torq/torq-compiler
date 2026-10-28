@@ -231,6 +231,45 @@ def test_relocation_free_search_keeps_alignment(torq_compiler, tmp_path):
     assert default % 4 == 0, f"tile of {default} columns is not a multiple of 4"
 
 
+# The tanh GELU on SR200: 2 tiles of 512 rows fit only by spilling a 256 KB buffer computed in
+# the tile, which 3 tiles of 344 rows avoid. Only elementwise groups count spills: the probe of
+# encoder_bf16_layer_Conv_2 on SR200 also spills a computed buffer, and keeps its tile.
+SPILL_MODEL = MODELS_DIR / "torch_ops" / "gelu-gemma.mlir"
+
+
+@pytest.mark.ci
+def test_probe_avoids_spilling_computed_buffers(torq_compiler, tmp_path):
+    """The probe must prefer one more tile to a tile that spills a buffer computed in it."""
+    flags = ["--torq-disable-host", "--torq-disable-css"]
+    spilling = tile_loop_step(
+        torq_compiler,
+        tmp_path,
+        SPILL_MODEL,
+        SR200_HW,
+        flags + ["--torq-probe-avoid-spills=false"],
+        1024,
+    )
+    default = tile_loop_step(torq_compiler, tmp_path, SPILL_MODEL, SR200_HW, flags, 1024)
+    # Without this, the test would pass even if the model stopped spilling.
+    assert default != spilling, "the tile no longer spills, so this test proves nothing"
+    assert default < spilling
+
+
+@pytest.mark.ci
+def test_probe_keeps_spills_of_non_elementwise_groups(torq_compiler, tmp_path):
+    """A conv must keep its tile when it spills: a smaller tile reads its weights again."""
+    disabled = tile_loop_step(
+        torq_compiler,
+        tmp_path,
+        ALIGNMENT_MODEL,
+        SR200_HW,
+        ["--torq-probe-avoid-spills=false"],
+        1249,
+    )
+    default = tile_loop_step(torq_compiler, tmp_path, ALIGNMENT_MODEL, SR200_HW, [], 1249)
+    assert default == disabled
+
+
 # Tile-and-fuse must not fuse a producer that a tiled loop would recompute on every
 # iteration, and must keep fusing it when nothing would be recomputed. Both cases feed a
 # matmul's LHS from an elementwise producer (arith.negf).

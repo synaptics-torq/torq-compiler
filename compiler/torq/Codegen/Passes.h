@@ -29,6 +29,12 @@ inline constexpr llvm::StringLiteral kTileFitProbeAttr = "torq.tile_fit_probe";
 // relocates buffers, to the number of bytes it relocates. Never set outside a probe.
 inline constexpr llvm::StringLiteral kLramPlanRelocatesAttr = "torq.lram_plan_relocates";
 
+// Set by TileAndFusePass on a tile-fit probe module (see --torq-probe-avoid-spills). With it,
+// AssignLramAddressesPass counts the computed buffers that an LRAM plan spills (stores and
+// loads back at a later op) as relocated.
+inline constexpr llvm::StringLiteral kTileFitProbeCountSpillsAttr =
+    "torq.tile_fit_probe_count_spills";
+
 //===---------------------------------------------------------------------===//
 // TORQ passes
 //===---------------------------------------------------------------------===//

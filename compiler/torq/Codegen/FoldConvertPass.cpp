@@ -338,6 +338,48 @@ class SwapCollapseAndConvert : public OpRewritePattern<tensor::CollapseShapeOp> 
     }
 };
 
+// View a dense LRAM tensor in place instead of moving it to XRAM for the bitcast:
+//   bitcast(convert(xram, x: lram)) -> convert(xram, bitcast(x: lram))
+// The "convert back to the original type" step of kernel encoding (see
+// encodeKernelInputOutputs) stores every kernel output into XRAM for its
+// external users; a consumer that loads the bitcast back to LRAM then makes
+// the data DMA the LRAM -> XRAM -> LRAM round trip per boundary. The swap
+// leaves the bitcast's result type unchanged (so no consumer sees a
+// different encoding) and restores the round trip to a convert chain,
+// which FoldRoundTripConversion folds to the free LRAM view: mid-chain the
+// kernel's XRAM -> LRAM load and the new convert cancel, and the revert dies
+// with the old bitcast; output-boundary the result insert (a convert to
+// LRAM) folds the same way and the dispatch store reads the view directly.
+class SwapBitcastAndConvert : public OpRewritePattern<torq_hl::BitcastOp> {
+  public:
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(torq_hl::BitcastOp op, PatternRewriter &rewriter) const override {
+        auto convertOp = op.getSource().getDefiningOp<torq_hl::ConvertOp>();
+        if (!convertOp || !convertOp.getOutput() || !convertOp->hasOneUse())
+            return failure();
+        auto src = dyn_cast<TypedValue<RankedTensorType>>(convertOp.getInput());
+        if (!src || getEncoding(src.getType()).getMemSpace() != torq_hl::MemorySpace::Lram)
+            return failure();
+        auto resultType = dyn_cast<RankedTensorType>(op.getResult().getType());
+        if (!resultType || getEncoding(resultType).getMemSpace() == torq_hl::MemorySpace::Lram)
+            return failure();
+
+        // The verifier guarantees the shape and element bit width match, so
+        // the LRAM encoding of the source applies to the view
+        auto lramType = RankedTensorType::get(
+            resultType.getShape(), resultType.getElementType(), getEncoding(src.getType())
+        );
+        auto view = torq_hl::BitcastOp::create(rewriter, op.getLoc(), lramType, src);
+        rewriter.replaceOp(
+            op, convertTensorToType(
+                    rewriter, cast<TypedValue<RankedTensorType>>(view.getResult()), resultType
+                )
+        );
+        return success();
+    }
+};
+
 // Fold a round trip conversion of the type
 //   convert(T1, convert(T2, ... convert(T0, x: T1))) = x
 // this pattern also simplifies the special case:
@@ -1254,6 +1296,7 @@ void FoldConvertPass::runOnOperation() {
     patterns.add<FoldConvertOfEmpty>(ctx);
     patterns.add<FoldRoundTripConversion>(ctx);
     patterns.add<SwapCollapseAndConvert>(ctx);
+    patterns.add<SwapBitcastAndConvert>(ctx);
     patterns.add<FoldLramToLramConversionChain>(ctx);
     // KeepConcatInLram and SwapExtractAndConvert size each op against the tile budget of its
     // tile loop (see lramSizeFor), or the real pipeline would keep more data in LRAM than the
