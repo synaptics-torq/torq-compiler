@@ -1428,8 +1428,20 @@ def comparison_config_from_mlir(mlir_model_file):
     tols = {}
 
     for line in open(mlir_model_file).readlines():
-        if "TORQ_" in line:
-            _, directive, value = line.split()
-            tols[directive[5:-1].lower()] = float(value)
+        if "TORQ_" not in line:
+            continue
+        # Tolerance directives are `// TORQ_<NAME>: <value>`; ignore any other
+        # comment, including TORQ_ directives whose value is not a single
+        # number (e.g. TORQ_COMPILE_OPTIONS, which carries a list of compiler
+        # flags).
+        parts = line.split()
+        if (
+            len(parts) != 3
+            or not parts[1].startswith("TORQ_")
+            or not parts[1].endswith(":")
+            or parts[1] == "TORQ_COMPILE_OPTIONS:"
+        ):
+            continue
+        tols[parts[1][5:-1].lower()] = float(parts[2])
 
     return tols

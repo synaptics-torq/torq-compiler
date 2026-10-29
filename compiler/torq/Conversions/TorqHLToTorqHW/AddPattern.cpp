@@ -70,7 +70,17 @@ LogicalResult AddPattern::transform(torq_hl::AddOp addOp, PatternRewriter &rewri
     FailureOr<SliceTaskOp> sliceTaskOp = failure();
 
     if (addOp.getRhsIsScalar() && params.input2Shape.size() == 1) {
-        bool is_dense = isDenseInMemory(params.type1);
+        // The dense path streams input1 as one linear block and writes the output as a single
+        // sweep; the DEQW it generates uses the XY view (S dims), which discards any unaligned
+        // tail, so it is safe for any physically contiguous data. isDenseInMemory only
+        // recognizes identity layouts, but packed strided subviews (e.g. the halves of a
+        // channel-sliced activation) are contiguous too, so accept both layouts when the data
+        // is packed. The output must be packed for the sweep route; the identity-input route
+        // keeps not checking the output: the non-dense fallback assumes the output is laid out
+        // like input1 (it must not see a gapped one), while the dense builder derives its
+        // write NDL from the output's own layout, which the DEQW bounds check verifies.
+        bool is_dense = isDenseInMemory(params.type1) || (isContiguousInMemory(params.type1) &&
+                                                          isContiguousInMemory(params.outputType));
         if (!is_dense) {
             // Case 1: Input2 is scalar and Input1 is non-contiguous.
             // In this path, we use the least efficient implementation.
