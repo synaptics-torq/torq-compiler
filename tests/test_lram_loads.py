@@ -10,8 +10,8 @@ from torq.testing.iree import MODELS_DIR
 GELU_MODEL = MODELS_DIR / "torch_ops" / "gelu-gemma.mlir"
 
 
-def dispatch_after(torq_compiler, tmp_path, model, hw, pass_arg, extra_flags):
-    """Compile `model` and return the IR of its dispatch after `pass_arg`."""
+def compile_stderr(torq_compiler, tmp_path, model, hw, extra_flags):
+    """Compile `model` and return what the compiler printed to stderr."""
     cmd = [
         str(torq_compiler.file_path),
         str(model),
@@ -23,16 +23,23 @@ def dispatch_after(torq_compiler, tmp_path, model, hw, pass_arg, extra_flags):
         "--torq-disable-css",
         "--mlir-disable-threading",
         "--mlir-elide-elementsattrs-if-larger=16",
-        f"--mlir-print-ir-after={pass_arg}",
     ] + extra_flags
     print("Compiling with:", " ".join(cmd))
     proc = subprocess.run(cmd, capture_output=True, text=True)
     assert proc.returncode == 0, f"compile failed:\n{proc.stderr}"
+    return proc.stderr
+
+
+def dispatch_after(torq_compiler, tmp_path, model, hw, pass_arg, extra_flags):
+    """Compile `model` and return the IR of its dispatch after `pass_arg`."""
+    stderr = compile_stderr(
+        torq_compiler, tmp_path, model, hw, [f"--mlir-print-ir-after={pass_arg}"] + extra_flags
+    )
 
     # The tile-fit probe prints its own runs too; keep the dispatch.
     dumps = [
         dump
-        for dump in proc.stderr.split("// -----// IR Dump After")
+        for dump in stderr.split("// -----// IR Dump After")
         if re.search(r"func\.func @main_dispatch", dump)
     ]
     assert dumps, f"no dump of the dispatch after {pass_arg}"
@@ -41,16 +48,14 @@ def dispatch_after(torq_compiler, tmp_path, model, hw, pass_arg, extra_flags):
 
 @pytest.mark.ci
 def test_spilled_input_copies_are_loaded_again(torq_compiler, tmp_path):
-    """A spilled copy of the input must be loaded again from the input, not stored to XRAM."""
-
-    def stores(flags):
-        ir = dispatch_after(
-            torq_compiler, tmp_path, GELU_MODEL, "SL2610", "torq-assign-lram-addresses", flags
-        )
-        return len(re.findall(r"torq_hl\.store ", ir))
-
-    stored = stores(["--torq-reload-spilled-inputs=false"])
-    assert stores([]) < stored
+    """A spilled copy of the input must be loaded again from the input, not stored to XRAM: the
+    LRAM plan swaps it in with its load, and such a swap-out stores nothing."""
+    stderr = compile_stderr(
+        torq_compiler, tmp_path, GELU_MODEL, "SL2610", ["--torq-vm-print-statistics"]
+    )
+    reloads = re.findall(r"Swap-ins reloaded from the source: (\d+)", stderr)
+    assert reloads, "no swap statistics printed"
+    assert sum(int(count) for count in reloads) > 0
 
 
 @pytest.mark.ci

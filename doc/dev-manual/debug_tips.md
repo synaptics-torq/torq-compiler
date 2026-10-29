@@ -131,10 +131,6 @@
     while materializing buffers (swap-outs, stores/loads skipped, bytes dropped/stored/loaded).
     Useful to see how much spill traffic a model generates. Debug aid; does not change codegen.
 
-  - ``--torq-reload-spilled-inputs`` (default on): when the LRAM plan spills a buffer that holds
-    a copy of a constant or of a dispatch input that nothing writes afterwards, skip storing it
-    to XRAM and load it again from its source. Turn it off to compare.
-
   - ``--torq-dump-compute-constants-ir=<DIR>``: dump the IR of every pass run to JIT-compute
     compile-time constants into a file tree under ``DIR``. Debug aid.
 

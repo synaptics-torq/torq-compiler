@@ -260,6 +260,12 @@ struct LramBuffer {
         torq_hl::ArgAccessBitfield access;
     };
     SmallVector<Access> accesses;
+    // the load from outside LRAM that fills the buffer, see isFill
+    struct Fill {
+        OpIdx opIdx;
+        torq_hl::LoadOp load;
+    };
+    std::optional<Fill> fill;
 
     // addresses are 8-byte aligned
     int64_t alignedSize() const { return align_ceil((uint32_t)bytes, 8u); }
@@ -284,6 +290,21 @@ struct LramBuffer {
 
 } // namespace
 
+// A load fills its buffer when it is the buffer's only write and nothing writes the source
+// after it: the source holds the contents from then on.
+static bool isFill(
+    const LramBuffer &buffer, LramBuffer::Fill load,
+    const llvm::DenseMap<Value, OpIdx> &lastSourceWrite
+) {
+    bool onlyWrite = llvm::none_of(buffer.accesses, [&](const LramBuffer::Access &access) {
+        return access.opIdx != load.opIdx &&
+               bitEnumContainsAny(access.access, torq_hl::ArgAccessBitfield::Write);
+    });
+    auto sourceWrite = lastSourceWrite.find(getViewBase(load.load.getInput()));
+    bool sourceKept = sourceWrite == lastSourceWrite.end() || sourceWrite->second < load.opIdx;
+    return onlyWrite && sourceKept;
+}
+
 // Collect one LramBuffer per LRAM allocation in `funcOp`'s body.
 static SmallVector<LramBuffer> collectLramBuffers(FunctionOpInterface funcOp) {
 
@@ -293,6 +314,12 @@ static SmallVector<LramBuffer> collectLramBuffers(FunctionOpInterface funcOp) {
     llvm::MapVector<Value, LramBuffer> allocToBuffer;
     // each start_program's op and accessed buffers, until its wait_program
     llvm::DenseMap<Value, std::pair<OpIdx, SmallVector<Value>>> openPrograms;
+    // keyed by root: a write to one root must leave every other unchanged, so distinct
+    // roots are assumed not to alias. Not recursive: a write nested in a region is not
+    // detected.
+    llvm::DenseMap<Value, OpIdx> lastSourceWrite;
+    // the last load into each buffer from outside LRAM
+    llvm::MapVector<Value, LramBuffer::Fill> fillCandidates;
     for (auto [opIdx, op] : llvm::enumerate(body.getOperations())) {
         if (auto alloc = dyn_cast<memref::AllocOp>(&op)) {
             if (getEncodingMemorySpace(alloc.getType()) != torq_hl::MemorySpace::Lram) {
@@ -315,8 +342,14 @@ static SmallVector<LramBuffer> collectLramBuffers(FunctionOpInterface funcOp) {
             }
         }
         else if (!isDerivedMemRefOperation(&op)) {
-            for (const auto &[root, access] :
-                 collectRootAccesses(&op, torq_hl::MemorySpace::Lram)) {
+            for (const auto &[root, access] : collectRootAccesses(&op, std::nullopt)) {
+                if (getEncodingMemorySpace(cast<MemRefType>(root.getType())) !=
+                    torq_hl::MemorySpace::Lram) {
+                    if (bitEnumContainsAny(access, torq_hl::ArgAccessBitfield::Write)) {
+                        lastSourceWrite[root] = (OpIdx)opIdx;
+                    }
+                    continue;
+                }
                 // Every LRAM memref is a body memref.alloc or a view of one: bindings
                 // and constants live in XRAM, the LRAM program slots are globals created
                 // after this pass, and views keep their source's memory space (a cross-space
@@ -324,6 +357,18 @@ static SmallVector<LramBuffer> collectLramBuffers(FunctionOpInterface funcOp) {
                 auto it = allocToBuffer.find(root);
                 assert(it != allocToBuffer.end() && "LRAM root is not a body allocation");
                 it->second.accesses.push_back({(OpIdx)opIdx, access});
+            }
+            if (auto load = dyn_cast<torq_hl::LoadOp>(&op)) {
+                auto it = allocToBuffer.find(load.getOutput());
+                Value source = getViewBase(load.getInput());
+                // a program's code section is loaded once: torq-size-slice-code-sections
+                // later shrinks that one load to the compiled code's size
+                if (it != allocToBuffer.end() &&
+                    getEncodingMemorySpace(cast<MemRefType>(source.getType())) !=
+                        torq_hl::MemorySpace::Lram &&
+                    !source.getDefiningOp<torq_hl::CreateInvocationOp>()) {
+                    fillCandidates[it->first] = {(OpIdx)opIdx, load};
+                }
             }
             // a view op does not force residency; the op that consumes the view does
             for (Value operand : op.getOperands()) {
@@ -360,7 +405,46 @@ static SmallVector<LramBuffer> collectLramBuffers(FunctionOpInterface funcOp) {
         }
     }
 
+    for (const auto &[value, load] : fillCandidates) {
+        LramBuffer &buffer = allocToBuffer[value];
+        if (isFill(buffer, load, lastSourceWrite)) {
+            buffer.fill = load;
+        }
+    }
+
     return llvm::to_vector(allocToBuffer.values());
+}
+
+// Runs after convertVirtualToPhysicalMemRefs cloned the reloads: moving an op before it
+// would shift the op indices the schedule refers to.
+static void sinkSourceDeallocs(ArrayRef<LramBuffer> buffers) {
+    for (const LramBuffer &buffer : buffers) {
+        if (!buffer.fill) {
+            continue;
+        }
+        torq_hl::LoadOp fill = buffer.fill->load;
+        Operation *sourceDealloc = nullptr;
+        for (Operation *user : getViewBase(fill.getInput()).getUsers()) {
+            if (isa<memref::DeallocOp>(user)) {
+                sourceDealloc = user;
+            }
+        }
+        if (!sourceDealloc) {
+            continue;
+        }
+        // a load nested in a region counts at its ancestor in the dealloc's block
+        Block *block = sourceDealloc->getBlock();
+        Operation *lastLoad = fill;
+        for (Operation *user : fill.getInput().getUsers()) {
+            Operation *ancestor = block->findAncestorOpInBlock(*user);
+            if (isa<torq_hl::LoadOp>(user) && ancestor && lastLoad->isBeforeInBlock(ancestor)) {
+                lastLoad = ancestor;
+            }
+        }
+        if (sourceDealloc->isBeforeInBlock(lastLoad)) {
+            sourceDealloc->moveAfter(lastLoad);
+        }
+    }
 }
 
 // A compaction forced by re-planning: the op it applies at, and the failing op whose pinned
@@ -470,7 +554,9 @@ class PlacementSimulation {
     Occupancy occupancy_;
     SwapSchedule schedule_;
     PlacementFailure failure_;
-    // per buffer, the op of its last store, at which the swap copy matched its contents
+    // per buffer, the first op whose write makes the copy outside LRAM stale: its last
+    // store's op, which runs after the store, or the op after its fill, whose source holds
+    // the contents once the fill has written them
     SmallVector<std::optional<OpIdx>> copiedAt_;
 
     PlacementSimulation(ArrayRef<LramBuffer> buffers, int64_t usable, ArrayRef<Operation *> ops)
@@ -478,6 +564,10 @@ class PlacementSimulation {
         for (auto [i, buffer] : llvm::enumerate(buffers_)) {
             events_.push({buffer.birth, EventKind::Birth, (BufferIdx)i});
             events_.push({buffer.death, EventKind::Death, (BufferIdx)i});
+            if (buffer.fill) {
+                // the fill's own write is the one the source holds
+                copiedAt_[i] = buffer.fill->opIdx + 1;
+            }
         }
     }
 
@@ -537,8 +627,11 @@ void PlacementSimulation::swapOut(BufferIdx idx, OpIdx opIdx) {
 }
 
 void PlacementSimulation::scheduleSwapIn(BufferIdx idx, OpIdx opIdx) {
-    bool load = buffers_[idx].contentsLiveAt(opIdx);
-    schedule_[opIdx].push_back({Swap::Kind::In, buffers_[idx].value, occupancy_.offset(idx), load});
+    const LramBuffer &buffer = buffers_[idx];
+    bool load = buffer.contentsLiveAt(opIdx);
+    // a filled buffer is never written after its fill, so its only copy is the source
+    torq_hl::LoadOp fill = load && buffer.fill ? buffer.fill->load : nullptr;
+    schedule_[opIdx].push_back({Swap::Kind::In, buffer.value, occupancy_.offset(idx), load, fill});
 }
 
 void PlacementSimulation::scheduleReload(BufferIdx idx, OpIdx opIdx) {
@@ -980,6 +1073,7 @@ static LogicalResult allocateLramAddresses(
         ))) {
         return failure();
     }
+    sinkSourceDeallocs(buffers);
     // the swapped-in buffers have their addresses; the allocations the plan started from
     // get theirs here, with every view
     return commitLramLayout(funcOp, reservedBase, buffers, placement->birthOffsets);

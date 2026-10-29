@@ -432,10 +432,11 @@ SmallVector<torq_hl::AsyncAccess> collectBufferAccesses(Operation *op) {
 }
 
 llvm::MapVector<Value, torq_hl::ArgAccessBitfield>
-collectRootAccesses(Operation *op, torq_hl::MemorySpace memorySpace) {
+collectRootAccesses(Operation *op, std::optional<torq_hl::MemorySpace> memorySpace) {
     llvm::MapVector<Value, torq_hl::ArgAccessBitfield> rootAccesses;
     for (auto &access : collectBufferAccesses(op)) {
-        if (getEncodingMemorySpace(access.buffer.getType()) != memorySpace) {
+        auto space = getEncodingMemorySpace(access.buffer.getType());
+        if (space != memorySpace.value_or(space)) {
             continue;
         }
         Value root = getViewBase(access.buffer);
