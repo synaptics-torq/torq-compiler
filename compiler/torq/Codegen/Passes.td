@@ -398,37 +398,16 @@ def PrefetchConstantLoads :
   let description = [{
     Moves the LRAM load of a constant in front of an earlier wait_program, so the
     DMA runs while that program computes: the nearest one, or one further back
-    where the estimated idle time hides all of the load. A load moves only when the
-    LRAM that stays live longer fits, and the moves are kept only when the allocator
-    swaps no more bytes than before. Runs only in the real pipeline, after
-    `torq-recover-lram-residency`, so it also sees the plans that fit only after
-    recovery. The tile-fit probe must not count on this overlap.
+    where the estimated idle time hides all of the load. Whether the loaded buffer
+    then stays resident until its use is the LRAM plan's decision; the moves stay
+    only when a plan exists for them. Runs only in the real pipeline: the tile-fit
+    probe must not count on this overlap.
   }];
   let constructor =
       "mlir::syna::torq::createPrefetchConstantLoadsPass()";
 
   let dependentDialects = [
         "syna::torq_hl::TorqHLDialect",
-        "mlir::memref::MemRefDialect"
-    ];
-}
-
-def RecoverLramResidency :
-    InterfacePass<"torq-recover-lram-residency",
-         "mlir::FunctionOpInterface"> {
-  let summary = "Reduce peak LRAM residency in functions whose address allocation would fail";
-  let description = [{
-    Runs immediately before `torq-assign-lram-addresses`, and only in the real
-    pipeline: the tile-fit probe pipelines that TileAndFuse builds must not include
-    it, because the probe only reports "fits" or "does not fit" and would therefore
-    pick a tile that only fits thanks to the extra DMA the revert costs.
-  }];
-  let constructor =
-      "mlir::syna::torq::createRecoverLramResidencyPass()";
-
-  let dependentDialects = [
-        "syna::torq_hl::TorqHLDialect",
-        "bufferization::BufferizationDialect",
         "mlir::memref::MemRefDialect"
     ];
 }

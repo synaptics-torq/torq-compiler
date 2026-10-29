@@ -337,13 +337,6 @@ static unsigned applyReuses(ArrayRef<ReuseCandidate> candidates) {
         dst.replaceAllUsesWith(c.keep);
         if (allocOp && isa<memref::AllocOp>(allocOp) && allocOp->use_empty())
             allocOp->erase();
-        // Tag the now-shared resident buffer. A reuse keeps this read-only buffer
-        // resident across the consumers it merged; if that later makes LRAM address
-        // assignment fail, AssignLramAddresses reverts the reuse for the tagged
-        // buffer (reloads the source per consumer). Safe to revert because the
-        // reuse was only recorded for read-only buffers (never written in-block).
-        if (Operation *keepAlloc = c.keep.getDefiningOp())
-            keepAlloc->setAttr("torq.lram_reuse", UnitAttr::get(keepAlloc->getContext()));
     }
     return candidates.size();
 }

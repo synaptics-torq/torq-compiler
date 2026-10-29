@@ -734,10 +734,9 @@ void addNssLramAllocationPasses(OpPassManager &funcPm, bool isRealPipeline, int6
         funcPm.addPass(createAddDeallocationPass());
     }
 
-    // Only the real pipeline recovers: a probe throws its result away, so the DMA this
-    // costs would buy nothing there and would hide it from the tile choice.
+    // Only the real pipeline prefetches: a probe throws its result away, so the overlap
+    // would buy nothing there and would hide its LRAM cost from the tile choice.
     if (isRealPipeline) {
-        funcPm.addPass(createRecoverLramResidencyPass());
         // only one prefetch algorithm runs in a compile
         if (prefetchAlgorithm() == PrefetchAlgorithm::ConstantLoads) {
             funcPm.addPass(createPrefetchConstantLoadsPass());

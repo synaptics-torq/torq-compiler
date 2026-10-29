@@ -82,7 +82,7 @@ TileAndFuse -> ... -> bufferization -> slice programs outlined
   -> ConvertSliceProgramToTorqHw
   -> AnnotateDmaAndSliceCycles        (durations)
   -> PrefetchInputs   <== here (--torq-prefetch-algorithm=stream-schedule)
-  -> AddDeallocation -> RecoverLramResidency -> AssignLramAddresses
+  -> AddDeallocation -> AssignLramAddresses
 ```
 
 It runs **before** LRAM addresses are assigned. The buffers are still

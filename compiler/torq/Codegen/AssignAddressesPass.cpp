@@ -49,12 +49,6 @@ static llvm::cl::opt<int> clXramStartAddress(
     llvm::cl::init(0x100000) // 1MB
 );
 
-// Reduce read-only LRAM load residency in functions whose address allocation would
-// otherwise fail (see runOnOperation): only when the plain plan fails are load-CSE
-// reuses (tagged "torq.lram_reuse") that keep a shared buffer resident reverted.
-// Functions that already fit are left untouched (the revert splits one shared load
-// into more concurrent loads and can make allocation worse).
-
 llvm::cl::opt<int> clMaxNssProgramsSize(
     "torq-max-nss-programs-size", llvm::cl::desc("Size of the XRAM reserved for NSS programs"),
     llvm::cl::init(mlir::syna::torq::HwInfo::xram_nss_programs_size)
@@ -236,6 +230,9 @@ class ResidentRanges {
         const auto *range = firstPast(opIdx + 1);
         return range == ranges_.end() ? INT_MAX : std::max(range->first, opIdx + 1);
     }
+
+    // ascending, disjoint [start, end) ranges
+    ArrayRef<std::pair<OpIdx, OpIdx>> ranges() const { return ranges_; }
 };
 
 // One LRAM buffer to place.
@@ -259,7 +256,7 @@ struct LramBuffer {
     // the load from outside LRAM that fills the buffer, see isFill
     struct Fill {
         OpIdx opIdx;
-        torq_hl::LoadOp load;
+        Value source;
     };
     std::optional<Fill> fill;
 
@@ -277,9 +274,17 @@ struct LramBuffer {
 
     // over [from, to)
     bool writtenBetween(OpIdx from, OpIdx to) const {
+        return accessedBetween(from, to, torq_hl::ArgAccessBitfield::Write);
+    }
+    bool readBetween(OpIdx from, OpIdx to) const {
+        return accessedBetween(from, to, torq_hl::ArgAccessBitfield::Read);
+    }
+
+  private:
+    bool accessedBetween(OpIdx from, OpIdx to, torq_hl::ArgAccessBitfield how) const {
         return llvm::any_of(accesses, [&](const Access &access) {
             return from <= access.opIdx && access.opIdx < to &&
-                   bitEnumContainsAny(access.access, torq_hl::ArgAccessBitfield::Write);
+                   bitEnumContainsAny(access.access, how);
         });
     }
 };
@@ -289,15 +294,15 @@ struct LramBuffer {
 // A load fills its buffer when it is the buffer's only write and nothing writes the source
 // after it: the source holds the contents from then on.
 static bool isFill(
-    const LramBuffer &buffer, LramBuffer::Fill load,
+    const LramBuffer &buffer, const LramBuffer::Fill &fill,
     const llvm::DenseMap<Value, OpIdx> &lastSourceWrite
 ) {
     bool onlyWrite = llvm::none_of(buffer.accesses, [&](const LramBuffer::Access &access) {
-        return access.opIdx != load.opIdx &&
+        return access.opIdx != fill.opIdx &&
                bitEnumContainsAny(access.access, torq_hl::ArgAccessBitfield::Write);
     });
-    auto sourceWrite = lastSourceWrite.find(getViewBase(load.load.getInput()));
-    bool sourceKept = sourceWrite == lastSourceWrite.end() || sourceWrite->second < load.opIdx;
+    auto sourceWrite = lastSourceWrite.find(getViewBase(fill.source));
+    bool sourceKept = sourceWrite == lastSourceWrite.end() || sourceWrite->second < fill.opIdx;
     return onlyWrite && sourceKept;
 }
 
@@ -362,7 +367,7 @@ static SmallVector<LramBuffer> collectLramBuffers(FunctionOpInterface funcOp) {
                     getEncodingMemorySpace(cast<MemRefType>(source.getType())) !=
                         torq_hl::MemorySpace::Lram &&
                     !source.getDefiningOp<torq_hl::CreateInvocationOp>()) {
-                    fillCandidates[it->first] = {(OpIdx)opIdx, load};
+                    fillCandidates[it->first] = {(OpIdx)opIdx, load.getInput()};
                 }
             }
             // a view op does not force residency; the op that consumes the view does
@@ -417,9 +422,9 @@ static void sinkSourceDeallocs(ArrayRef<LramBuffer> buffers) {
         if (!buffer.fill) {
             continue;
         }
-        torq_hl::LoadOp fill = buffer.fill->load;
+        Value source = buffer.fill->source;
         Operation *sourceDealloc = nullptr;
-        for (Operation *user : getViewBase(fill.getInput()).getUsers()) {
+        for (Operation *user : getViewBase(source).getUsers()) {
             if (isa<memref::DeallocOp>(user)) {
                 sourceDealloc = user;
             }
@@ -429,14 +434,15 @@ static void sinkSourceDeallocs(ArrayRef<LramBuffer> buffers) {
         }
         // a load nested in a region counts at its ancestor in the dealloc's block
         Block *block = sourceDealloc->getBlock();
-        Operation *lastLoad = fill;
-        for (Operation *user : fill.getInput().getUsers()) {
+        Operation *lastLoad = nullptr;
+        for (Operation *user : source.getUsers()) {
             Operation *ancestor = block->findAncestorOpInBlock(*user);
-            if (isa<torq_hl::LoadOp>(user) && ancestor && lastLoad->isBeforeInBlock(ancestor)) {
+            if (isa<torq_hl::LoadOp>(user) && ancestor &&
+                (!lastLoad || lastLoad->isBeforeInBlock(ancestor))) {
                 lastLoad = ancestor;
             }
         }
-        if (sourceDealloc->isBeforeInBlock(lastLoad)) {
+        if (lastLoad && sourceDealloc->isBeforeInBlock(lastLoad)) {
             sourceDealloc->moveAfter(lastLoad);
         }
     }
@@ -447,6 +453,8 @@ static void sinkSourceDeallocs(ArrayRef<LramBuffer> buffers) {
 struct ForcedCompaction {
     OpIdx opIdx;
     OpIdx failingOpIdx;
+    // the failing buffer once every position is tried: the compaction places it itself
+    BufferIdx placeFirst = -1;
 };
 
 namespace {
@@ -474,6 +482,7 @@ class Occupancy {
 
     // Make `idx` resident; when no free range fits it, changes nothing and returns false.
     bool place(BufferIdx idx) {
+        assert(!resident_.test(idx) && "placing a resident buffer");
         int64_t offset = space_.allocate(buffers_[idx].alignedSize());
         if (offset < 0) {
             return false;
@@ -500,8 +509,8 @@ class Occupancy {
 struct PlacementFailure {
     enum class Cause { BytePressure, Fragmentation };
     Cause cause = Cause::BytePressure;
-    // the op whose buffer could not be placed
     OpIdx opIdx = -1;
+    BufferIdx buffer = -1;
     // the buffers pinned there, the only ones left resident
     SmallVector<BufferIdx> pinned;
     // the op at `opIdx`, for the diagnostic (null if out of range)
@@ -527,9 +536,9 @@ struct Placement {
 // Places each buffer at its birth, frees it at its death and places a spilled one again at
 // its next use; see place() for how a placement failure is resolved.
 class PlacementSimulation {
-    // At an equal op, deaths are processed first, then reloads, then births: space freed
-    // there is available to the buffers placed there.
-    enum class EventKind { Death, Reload, Birth };
+    // At an equal op, use ends and deaths are processed first, then reloads, then births:
+    // space freed there is available to the buffers placed there.
+    enum class EventKind { UseEnd, Death, Reload, Birth };
     struct Event {
         OpIdx opIdx;
         EventKind kind;
@@ -549,19 +558,36 @@ class PlacementSimulation {
     Occupancy occupancy_;
     SwapSchedule schedule_;
     PlacementFailure failure_;
-    // per buffer, the first op whose write makes the copy outside LRAM stale: its last
-    // store's op, which runs after the store, or the op after its fill, whose source holds
-    // the contents once the fill has written them
-    SmallVector<std::optional<OpIdx>> copiedAt_;
+    // per buffer, the op after its latest transfer to or from a copy outside LRAM: a store,
+    // its fill, or a swap-in repeating the fill
+    SmallVector<std::optional<OpIdx>> copyHoldsFrom_;
+    // filled buffers deferred at their birth, waiting for free space before their first use
+    SmallVector<BufferIdx> deferredFills_;
 
-    PlacementSimulation(ArrayRef<LramBuffer> buffers, int64_t usable, ArrayRef<Operation *> ops)
-        : buffers_(buffers), ops_(ops), occupancy_(buffers, usable), copiedAt_(buffers.size()) {
+    // With `spillFilledAfterUse`, a filled buffer is resident only while in use: it is
+    // spilled at the end of each use after its fill and reloaded at the next.
+    PlacementSimulation(
+        ArrayRef<LramBuffer> buffers, int64_t usable, ArrayRef<Operation *> ops,
+        bool spillFilledAfterUse
+    )
+        : buffers_(buffers), ops_(ops), occupancy_(buffers, usable),
+          copyHoldsFrom_(buffers.size()) {
         for (auto [i, buffer] : llvm::enumerate(buffers_)) {
             events_.push({buffer.birth, EventKind::Birth, (BufferIdx)i});
             events_.push({buffer.death, EventKind::Death, (BufferIdx)i});
-            if (buffer.fill) {
-                // the fill's own write is the one the source holds
-                copiedAt_[i] = buffer.fill->opIdx + 1;
+            if (!buffer.fill) {
+                continue;
+            }
+            OpIdx filledAt = buffer.fill->opIdx + 1;
+            copyHoldsFrom_[i] = filledAt;
+            if (spillFilledAfterUse) {
+                for (auto [start, end] : buffer.resident.ranges()) {
+                    // use ranges past the fill's own, which ends at filledAt, and before
+                    // the death, which releases the buffer itself
+                    if (end > filledAt && end < buffer.death) {
+                        events_.push({end, EventKind::UseEnd, (BufferIdx)i});
+                    }
+                }
             }
         }
     }
@@ -574,17 +600,23 @@ class PlacementSimulation {
     void scheduleReload(BufferIdx idx, OpIdx opIdx);
     // Swap `victim` out at `opIdx` and reload it at its next use.
     void spill(BufferIdx victim, OpIdx opIdx);
-    // Re-place every buffer not pinned at `opIdx`: those pinned at `pinnedFirstAt` first (so
-    // they take the extremes and leave the middle contiguous), then largest first. A buffer
+    // Leave the filled `idx` out from its birth, its fill cancelled, and reload it at its first
+    // use unless placeDeferredFills places it before.
+    void deferFill(BufferIdx idx);
+    // Place the deferred fills that free space holds at `opIdx`, before its events.
+    void placeDeferredFills(OpIdx opIdx);
+    // Place `placeFirst` (-1 for none), then move every buffer not pinned at `opIdx`; one
     // that no longer fits is spilled. False when nothing was movable.
-    bool compact(OpIdx opIdx, OpIdx pinnedFirstAt);
+    bool compact(OpIdx opIdx, OpIdx pinnedFirstAt, BufferIdx placeFirst);
     // Record that `idx` cannot be placed at `opIdx`: every resident buffer is pinned there.
     void recordFailure(BufferIdx idx, OpIdx opIdx, PlacementFailure::Cause cause);
+    // Whether nothing has read `idx` since its latest fill ran, as of `opIdx`.
+    bool fillUnread(BufferIdx idx, OpIdx opIdx) const;
     // Among the resident buffers not pinned at `opIdx`; -1 if there is none.
     BufferIdx farthestNextUseBuffer(OpIdx opIdx) const;
-    // Spill the buffer needed last to make room for `idx`: any victim costs one reload at
-    // its next use, and this one keeps the freed space available the longest before that
-    // reload comes due. False when every resident buffer is pinned at `opIdx`.
+    // Spill the buffer needed last to make room for `idx`: a victim costs one reload at its
+    // next use, and this one keeps the freed space available the longest before that reload
+    // comes due. False when every resident buffer is pinned at `opIdx`.
     bool spillVictim(BufferIdx idx, OpIdx opIdx, PlacementFailure::Cause cause);
     // Place `idx` at `opIdx`. Spill under byte pressure, compact once, and then
     // spill under fragmentation. False when nothing more can be spilled.
@@ -598,8 +630,8 @@ class PlacementSimulation {
     // placement exists.
     static std::optional<Placement>
     run(ArrayRef<LramBuffer> buffers, int64_t usable, ArrayRef<ForcedCompaction> forcedCompactions,
-        PlacementFailure &failure, ArrayRef<Operation *> ops) {
-        PlacementSimulation simulation(buffers, usable, ops);
+        PlacementFailure &failure, ArrayRef<Operation *> ops, bool spillFilledAfterUse) {
+        PlacementSimulation simulation(buffers, usable, ops, spillFilledAfterUse);
         if (!simulation.sweep(forcedCompactions)) {
             failure = simulation.failure_;
             return std::nullopt;
@@ -613,19 +645,25 @@ class PlacementSimulation {
 void PlacementSimulation::swapOut(BufferIdx idx, OpIdx opIdx) {
     occupancy_.release(idx);
     const LramBuffer &buffer = buffers_[idx];
-    bool held = copiedAt_[idx] && !buffer.writtenBetween(*copiedAt_[idx], opIdx);
+    bool held = copyHoldsFrom_[idx] && !buffer.writtenBetween(*copyHoldsFrom_[idx], opIdx);
     bool store = buffer.contentsLiveAt(opIdx) && !held;
     if (store) {
-        copiedAt_[idx] = opIdx;
+        copyHoldsFrom_[idx] = opIdx;
     }
-    schedule_[opIdx].push_back({Swap::Kind::Out, buffer.value, -1, store});
+    bool cancelsFill = fillUnread(idx, opIdx);
+    schedule_[opIdx].push_back(
+        {Swap::Kind::Out, buffer.value, -1, store, /*fill=*/false, cancelsFill}
+    );
 }
 
 void PlacementSimulation::scheduleSwapIn(BufferIdx idx, OpIdx opIdx) {
     const LramBuffer &buffer = buffers_[idx];
     bool load = buffer.contentsLiveAt(opIdx);
     // a filled buffer is never written after its fill, so its only copy is the source
-    torq_hl::LoadOp fill = load && buffer.fill ? buffer.fill->load : nullptr;
+    bool fill = load && buffer.fill;
+    if (fill) {
+        copyHoldsFrom_[idx] = opIdx;
+    }
     schedule_[opIdx].push_back({Swap::Kind::In, buffer.value, occupancy_.offset(idx), load, fill});
 }
 
@@ -641,7 +679,7 @@ void PlacementSimulation::spill(BufferIdx victim, OpIdx opIdx) {
     scheduleReload(victim, opIdx);
 }
 
-bool PlacementSimulation::compact(OpIdx opIdx, OpIdx pinnedFirstAt) {
+bool PlacementSimulation::compact(OpIdx opIdx, OpIdx pinnedFirstAt, BufferIdx placeFirst) {
     SmallVector<BufferIdx> movable;
     for (BufferIdx candidate : occupancy_.residents()) {
         if (!buffers_[candidate].resident.contains(opIdx)) {
@@ -651,6 +689,8 @@ bool PlacementSimulation::compact(OpIdx opIdx, OpIdx pinnedFirstAt) {
     if (movable.empty()) {
         return false;
     }
+    // those pinned at `pinnedFirstAt` go first so they do not split the space the others
+    // leave for the buffer that failed there
     llvm::sort(movable, [&](BufferIdx a, BufferIdx b) {
         bool aFirst = buffers_[a].resident.contains(pinnedFirstAt);
         bool bFirst = buffers_[b].resident.contains(pinnedFirstAt);
@@ -666,6 +706,9 @@ bool PlacementSimulation::compact(OpIdx opIdx, OpIdx pinnedFirstAt) {
     for (BufferIdx moved : movable) {
         swapOut(moved, opIdx);
     }
+    if (placeFirst >= 0 && occupancy_.place(placeFirst)) {
+        scheduleSwapIn(placeFirst, opIdx);
+    }
     for (BufferIdx moved : movable) {
         if (occupancy_.place(moved)) {
             scheduleSwapIn(moved, opIdx);
@@ -680,6 +723,7 @@ bool PlacementSimulation::compact(OpIdx opIdx, OpIdx pinnedFirstAt) {
 void PlacementSimulation::recordFailure(BufferIdx idx, OpIdx opIdx, PlacementFailure::Cause cause) {
     failure_.cause = cause;
     failure_.opIdx = opIdx;
+    failure_.buffer = idx;
     auto residents = occupancy_.residents();
     failure_.pinned.assign(residents.begin(), residents.end());
     failure_.op = opIdx >= 0 && opIdx < (OpIdx)ops_.size() ? ops_[opIdx] : nullptr;
@@ -714,6 +758,13 @@ void PlacementSimulation::recordFailure(BufferIdx idx, OpIdx opIdx, PlacementFai
     });
 }
 
+bool PlacementSimulation::fillUnread(BufferIdx idx, OpIdx opIdx) const {
+    const LramBuffer &buffer = buffers_[idx];
+    // the fill has run once the source holds the contents
+    return buffer.fill && *copyHoldsFrom_[idx] <= opIdx &&
+           !buffer.readBetween(*copyHoldsFrom_[idx], opIdx);
+}
+
 BufferIdx PlacementSimulation::farthestNextUseBuffer(OpIdx opIdx) const {
     BufferIdx result = -1;
     OpIdx farthest = -1;
@@ -740,6 +791,35 @@ bool PlacementSimulation::spillVictim(BufferIdx idx, OpIdx opIdx, PlacementFailu
     return true;
 }
 
+void PlacementSimulation::deferFill(BufferIdx idx) {
+    const LramBuffer &buffer = buffers_[idx];
+    // at the alloc: convertVirtualToPhysicalMemRefs registers the buffer swapped out
+    schedule_[buffer.birth].push_back(
+        {Swap::Kind::Out, buffer.value, -1, /*transfers=*/false, /*fill=*/false,
+         /*cancelsFill=*/true}
+    );
+    deferredFills_.push_back(idx);
+    scheduleReload(idx, buffer.fill->opIdx);
+}
+
+void PlacementSimulation::placeDeferredFills(OpIdx opIdx) {
+    SmallVector<BufferIdx> stillDeferred;
+    for (BufferIdx idx : deferredFills_) {
+        const LramBuffer &buffer = buffers_[idx];
+        // a forced compaction or the reload at its first use has placed it
+        if (occupancy_.isResident(idx) || opIdx >= buffer.resident.nextAfter(buffer.fill->opIdx)) {
+            continue;
+        }
+        // a swap-in at or before the fill carries no load: the next access is the fill itself
+        if (opIdx <= buffer.fill->opIdx || !occupancy_.place(idx)) {
+            stillDeferred.push_back(idx);
+            continue;
+        }
+        scheduleSwapIn(idx, opIdx);
+    }
+    deferredFills_ = std::move(stillDeferred);
+}
+
 bool PlacementSimulation::place(BufferIdx idx, OpIdx opIdx) {
     while (occupancy_.bytes() + buffers_[idx].alignedSize() > occupancy_.usable()) {
         if (!spillVictim(idx, opIdx, PlacementFailure::Cause::BytePressure)) {
@@ -747,7 +827,7 @@ bool PlacementSimulation::place(BufferIdx idx, OpIdx opIdx) {
         }
     }
     bool placed = occupancy_.place(idx);
-    if (!placed && compact(opIdx, opIdx)) {
+    if (!placed && compact(opIdx, opIdx, /*placeFirst=*/-1)) {
         placed = occupancy_.place(idx);
     }
     while (!placed) {
@@ -760,21 +840,57 @@ bool PlacementSimulation::place(BufferIdx idx, OpIdx opIdx) {
 }
 
 bool PlacementSimulation::sweep(ArrayRef<ForcedCompaction> forcedCompactions) {
+    OpIdx lastOpIdx = -1;
     while (!events_.empty()) {
         Event event = events_.top();
         events_.pop();
+        if (event.opIdx != lastOpIdx) {
+            // the space the earlier ops released is free from here
+            placeDeferredFills(event.opIdx);
+            lastOpIdx = event.opIdx;
+        }
         // a forced compaction precedes the events of the op it applies at
         while (!forcedCompactions.empty() && forcedCompactions.front().opIdx <= event.opIdx) {
-            compact(forcedCompactions.front().opIdx, forcedCompactions.front().failingOpIdx);
+            const ForcedCompaction &forced = forcedCompactions.front();
+            BufferIdx placeFirst = forced.placeFirst;
+            // an earlier compaction for the same op may have placed it already; at its alloc
+            // it is not born yet, its Birth event comes after this compaction; and a swap-in
+            // at or before a fill carries no load, which leaves a deferred fill unfilled
+            if (placeFirst >= 0) {
+                const LramBuffer &first = buffers_[placeFirst];
+                OpIdx bornAt = first.fill ? first.fill->opIdx : first.birth;
+                if (bornAt >= forced.opIdx || occupancy_.isResident(placeFirst)) {
+                    placeFirst = -1;
+                }
+            }
+            compact(forced.opIdx, forced.failingOpIdx, placeFirst);
             forcedCompactions = forcedCompactions.drop_front();
         }
-        if (event.kind == EventKind::Death) {
+        if (event.kind == EventKind::UseEnd) {
+            // not resident when pressure spilled it during the use
+            if (occupancy_.isResident(event.buffer)) {
+                spill(event.buffer, event.opIdx);
+            }
+        }
+        else if (event.kind == EventKind::Death) {
             // not resident when it was spilled with no reload before dying
             if (occupancy_.isResident(event.buffer)) {
                 occupancy_.release(event.buffer);
             }
         }
+        else if (event.kind == EventKind::Birth && buffers_[event.buffer].fill) {
+            // a fill takes free space or waits: deferring it to the first use is free, an
+            // eviction or a compaction is not
+            if (!occupancy_.place(event.buffer)) {
+                deferFill(event.buffer);
+            }
+        }
         else {
+            // a forced compaction, or free space before a deferred fill's first use, placed
+            // it already
+            if (event.kind == EventKind::Reload && occupancy_.isResident(event.buffer)) {
+                continue;
+            }
             if (!place(event.buffer, event.opIdx)) {
                 return false;
             }
@@ -795,6 +911,10 @@ static LogicalResult commitLramLayout(
     ArrayRef<int64_t> birthOffsets
 ) {
     for (auto [buffer, offset] : llvm::zip_equal(buffers, birthOffsets)) {
+        if (offset < 0) {
+            // never resident: its fill was deferred and nothing used it
+            continue;
+        }
         if (failed(setAddress(buffer.value, reservedBase + offset))) {
             return buffer.value.getDefiningOp()->emitOpError("failed to set LRAM address");
         }
@@ -896,13 +1016,49 @@ static std::optional<OpIdx> lastMovablePosition(
     return std::nullopt;
 }
 
+// Force one more compaction for `failure`: at the last op where its largest obstacle was
+// still movable, or, once every such op is forced, by letting the compactions already
+// forced for its op place the buffer themselves. False when nothing more can be forced.
+static bool forceCompaction(
+    ArrayRef<LramBuffer> buffers, const PlacementFailure &failure,
+    SmallVectorImpl<ForcedCompaction> &forcedCompactions
+) {
+    if (auto compactAt = lastMovablePosition(buffers, failure, forcedCompactions)) {
+        LLVM_DEBUG(
+            llvm::dbgs() << "re-planning with a forced compaction before op " << *compactAt
+                         << " for op " << failure.opIdx << "\n"
+        );
+        ForcedCompaction compaction{*compactAt, failure.opIdx};
+        forcedCompactions.insert(
+            llvm::upper_bound(
+                forcedCompactions, compaction.opIdx,
+                [](OpIdx opIdx, const ForcedCompaction &forced) { return opIdx < forced.opIdx; }
+            ),
+            compaction
+        );
+        return true;
+    }
+    bool changed = false;
+    for (ForcedCompaction &compaction : forcedCompactions) {
+        if (compaction.failingOpIdx == failure.opIdx && compaction.placeFirst < 0) {
+            compaction.placeFirst = failure.buffer;
+            changed = true;
+        }
+    }
+    LLVM_DEBUG(if (changed) {
+        llvm::dbgs() << "re-planning with the forced compactions for op " << failure.opIdx
+                     << " placing its buffer\n";
+    });
+    return changed;
+}
+
 // The offsets and swaps that place `buffers` in [0, usable), or nullopt when none exist.
-// With `replan`, a fragmentation failure forces a compaction where lastMovablePosition says
-// and the placement is planned again, once per attempt. On failure, `lastFailure` (if
-// given) describes the last attempt's.
+// With `replan`, a fragmentation failure forces a compaction as forceCompaction says and
+// the placement is planned again, once per attempt. On failure, `lastFailure` (if given)
+// describes the last attempt's.
 static std::optional<Placement> planPlacement(
     ArrayRef<LramBuffer> buffers, int64_t usable, bool replan, Block *body,
-    PlacementFailure *lastFailure = nullptr
+    bool spillFilledAfterUse, PlacementFailure *lastFailure = nullptr
 ) {
     // each attempt adds one forced compaction; a stack of repeated layers needs a few per layer
     constexpr int maxReplans = 256;
@@ -911,31 +1067,18 @@ static std::optional<Placement> planPlacement(
     PlacementFailure failure;
     for (int attempt = 0; attempt <= maxReplans; attempt++) {
         failure = PlacementFailure();
-        auto placement = PlacementSimulation::run(buffers, usable, forcedCompactions, failure, ops);
+        auto placement = PlacementSimulation::run(
+            buffers, usable, forcedCompactions, failure, ops, spillFilledAfterUse
+        );
         if (placement) {
             return placement;
         }
         if (!replan || failure.cause != PlacementFailure::Cause::Fragmentation) {
             break;
         }
-        auto compactAt = lastMovablePosition(buffers, failure, forcedCompactions);
-        if (!compactAt) {
+        if (!forceCompaction(buffers, failure, forcedCompactions)) {
             break;
         }
-        LLVM_DEBUG(
-            llvm::dbgs() << "re-planning with a forced compaction before op " << *compactAt
-                         << " for op " << failure.opIdx << "\n"
-        );
-        ForcedCompaction compaction{*compactAt, failure.opIdx};
-        forcedCompactions.insert(
-            llvm::upper_bound(
-                forcedCompactions, compaction,
-                [](const ForcedCompaction &a, const ForcedCompaction &b) {
-                    return a.opIdx < b.opIdx;
-                }
-            ),
-            compaction
-        );
     }
     if (lastFailure) {
         *lastFailure = std::move(failure);
@@ -981,10 +1124,18 @@ struct SwapTraffic {
 
 static SwapTraffic swapTraffic(const SwapSchedule &schedule) {
     SwapTraffic traffic;
+    llvm::SmallDenseSet<Value> cancelledFills;
     for (const auto &[opIdx, swaps] : schedule) {
         llvm::SmallDenseSet<Value> swappedOut;
         for (const Swap &swap : swaps) {
             int64_t bytes = swap.transfers ? getEncodedTotalSizeBytes(swap.buffer.getType()) : 0;
+            if (swap.cancelsFill) {
+                cancelledFills.insert(swap.buffer);
+            }
+            else if (swap.fill && cancelledFills.erase(swap.buffer)) {
+                // the rewrite moves the cancelled load here; later swap-ins clone it
+                bytes = 0;
+            }
             traffic.transferred += bytes;
             if (swap.kind == Swap::Kind::Out) {
                 swappedOut.insert(swap.buffer);
@@ -996,6 +1147,30 @@ static SwapTraffic swapTraffic(const SwapSchedule &schedule) {
         traffic.spilledComputed += bytesSpilledComputed(swaps);
     }
     return traffic;
+}
+
+static std::optional<Placement> planCheapestPlacement(
+    ArrayRef<LramBuffer> buffers, int64_t usable, bool replan, Block *body,
+    PlacementFailure *lastFailure = nullptr
+) {
+    std::optional<Placement> plain =
+        planPlacement(buffers, usable, replan, body, /*spillFilledAfterUse=*/false, lastFailure);
+    if (!replan) {
+        // the probe plans plainly: a tile must not fit only by the spills' traffic
+        return plain;
+    }
+    std::optional<Placement> spilled =
+        planPlacement(buffers, usable, replan, body, /*spillFilledAfterUse=*/true);
+    if (!plain || !spilled) {
+        return plain ? plain : spilled;
+    }
+    int64_t plainBytes = swapTraffic(plain->schedule).transferred;
+    int64_t spilledBytes = swapTraffic(spilled->schedule).transferred;
+    LLVM_DEBUG(
+        llvm::dbgs() << "plain plan transfers " << plainBytes
+                     << " bytes, spill-after-use plan transfers " << spilledBytes << " bytes\n"
+    );
+    return spilledBytes < plainBytes ? spilled : plain;
 }
 
 // The tile-fit probe mark of the module of `funcOp`: null outside a probe, true in a
@@ -1019,7 +1194,7 @@ static int64_t usableLramBytes(int64_t poolSize) {
 }
 
 std::optional<int64_t> lramSwapBytes(FunctionOpInterface funcOp, int64_t poolSize) {
-    std::optional<Placement> placement = planPlacement(
+    std::optional<Placement> placement = planCheapestPlacement(
         collectLramBuffers(funcOp), usableLramBytes(poolSize), /*replan=*/true,
         &funcOp.getFunctionBody().front()
     );
@@ -1044,7 +1219,7 @@ static LogicalResult allocateLramAddresses(
     const int64_t usable = usableLramBytes(lramSize);
 
     SmallVector<LramBuffer> buffers = collectLramBuffers(funcOp);
-    std::optional<Placement> placement = planPlacement(
+    std::optional<Placement> placement = planCheapestPlacement(
         buffers, usable, replan, &funcOp.getFunctionBody().front(), &placementFailure
     );
     if (!placement) {
@@ -1068,9 +1243,8 @@ static LogicalResult allocateLramAddresses(
         }
     }
 
-    // has no failure path today; lramAllocationSucceeds and lramSwapBytes treat a
-    // successful plan as a successful allocation and rely on that (see
-    // convertVirtualToPhysicalMemRefs)
+    // has no failure path today; lramSwapBytes treats a successful plan as a successful
+    // allocation and relies on that (see convertVirtualToPhysicalMemRefs)
     if (failed(convertVirtualToPhysicalMemRefs(
             funcOp, usable, torq_hl::MemorySpace::Lram, placement->schedule, reservedBase
         ))) {
@@ -1391,177 +1565,7 @@ static void getBackwardSlice(Operation *op, SetVector<Operation *> *slice) {
     slice->insert(op);
 }
 
-// Revert load-CSE reuses (tagged "torq.lram_reuse" by EliminateRedundantLramLoads)
-// that keep a read-only buffer resident and shared across consumers. When slicing
-// is on, such a shared buffer stays pinned by an in-flight start_program while other
-// programs need LRAM, so address assignment runs out of space. Give each group of
-// consumers that run at the same time its own fresh load of the same source, so
-// each copy is short-lived and swappable (this restores the pre-reuse per-use load
-// for the tagged buffers only). Safe: the reuse was recorded only for buffers never
-// written in-block (read-only).
-static void revertSharedReadOnlyReuses(FunctionOpInterface funcOp) {
-    SmallVector<memref::AllocOp> tagged;
-    funcOp->walk([&](memref::AllocOp alloc) {
-        if (alloc->hasAttr("torq.lram_reuse"))
-            tagged.push_back(alloc);
-    });
-
-    IRRewriter rewriter(funcOp->getContext());
-    for (memref::AllocOp alloc : tagged) {
-        // The buffer must be written by exactly one torq_hl.load (its fill) and
-        // otherwise only read; collect the reading consumer ops.
-        torq_hl::LoadOp load = nullptr;
-        memref::DeallocOp dealloc = nullptr;
-        SmallVector<Operation *> consumers;
-        bool ok = true;
-        for (Operation *user : alloc.getResult().getUsers()) {
-            if (auto ld = dyn_cast<torq_hl::LoadOp>(user)) {
-                if (ld.getOutput() == alloc.getResult()) {
-                    if (load) { // a second writer: not the read-only pattern
-                        ok = false;
-                        break;
-                    }
-                    load = ld;
-                }
-                else {
-                    consumers.push_back(user);
-                }
-            }
-            else if (auto dc = dyn_cast<memref::DeallocOp>(user)) {
-                dealloc = dc;
-            }
-            else {
-                consumers.push_back(user);
-            }
-        }
-        if (!ok || !load || consumers.empty())
-            continue;
-
-        // The clones re-read the original load's XRAM source. AddDeallocation
-        // already placed that source's dealloc right after the (single) original
-        // load; moving the reads to the later consumers would leave them reading a
-        // freed buffer. Find the source buffer's dealloc so we can sink it past the
-        // reloaded reads below.
-        Value srcBase = getViewBase(load.getInput());
-        memref::DeallocOp srcDealloc = nullptr;
-        for (Operation *u : srcBase.getUsers())
-            if (auto dc = dyn_cast<memref::DeallocOp>(u))
-                srcDealloc = dc;
-
-        // A start_program keeps its operands live until the matching wait_program;
-        // any other consumer is done at its own point.
-        auto getDoneOp = [](Operation *consumer) {
-            if (auto startOp = dyn_cast<torq_hl::StartProgramOp>(consumer))
-                for (Operation *u : startOp.getInvocation().getUsers())
-                    if (isa<torq_hl::WaitProgramOp>(u) && u->getBlock() == consumer->getBlock())
-                        return u;
-            return consumer;
-        };
-
-        // Consumers that run at the same time keep sharing one copy: the slices of an
-        // scf.forall, which FoldConvert made read one buffer (see
-        // hoistSliceInvariantLoads), all start before the first of them is waited for.
-        // A private copy per slice needs more LRAM at that point, not less. So a
-        // consumer joins the current group when it starts before the group is done.
-        struct ConsumerGroup {
-            SmallVector<Operation *> members;
-            Operation *done;
-        };
-        SmallVector<ConsumerGroup> groups;
-        Block *block = consumers.front()->getBlock();
-        bool oneBlock =
-            llvm::all_of(consumers, [&](Operation *c) { return c->getBlock() == block; });
-        if (oneBlock) {
-            llvm::sort(consumers, [](Operation *a, Operation *b) { return a->isBeforeInBlock(b); });
-            consumers.erase(llvm::unique(consumers), consumers.end());
-        }
-        for (Operation *consumer : consumers) {
-            Operation *done = getDoneOp(consumer);
-            Operation *groupDone = groups.empty() ? nullptr : groups.back().done;
-            if (!oneBlock || !groupDone || !consumer->isBeforeInBlock(groupDone)) {
-                groups.push_back({{consumer}, done});
-                continue;
-            }
-            groups.back().members.push_back(consumer);
-            if (groupDone->isBeforeInBlock(done))
-                groups.back().done = done;
-        }
-
-        // Give each group its own fresh load from the same source, and free that copy
-        // as soon as the group is done with it, so it is not resident across the other
-        // programs (which is what made the shared buffer overflow LRAM). The source
-        // (load's input) dominates the original load, hence every later consumer.
-        for (ConsumerGroup &group : groups) {
-            rewriter.setInsertionPoint(group.members.front());
-            auto newAlloc = memref::AllocOp::create(rewriter, load.getLoc(), alloc.getType());
-            Operation *newLoad = rewriter.clone(*load.getOperation());
-            cast<torq_hl::LoadOp>(newLoad).getOutputMutable().set(newAlloc.getResult());
-            for (Operation *consumer : group.members)
-                consumer->replaceUsesOfWith(alloc.getResult(), newAlloc.getResult());
-
-            rewriter.setInsertionPointAfter(group.done);
-            memref::DeallocOp::create(rewriter, load.getLoc(), newAlloc.getResult());
-        }
-
-        // Keep the source buffer live until the last reloaded read. Sink its
-        // dealloc past the latest consumer (its ancestor in the dealloc's block),
-        // so the clones never read freed memory.
-        if (srcDealloc) {
-            Block *db = srcDealloc->getBlock();
-            Operation *latest = nullptr;
-            for (Operation *consumer : consumers)
-                if (Operation *anc = db->findAncestorOpInBlock(*consumer))
-                    if (!latest || latest->isBeforeInBlock(anc))
-                        latest = anc;
-            if (latest && srcDealloc->isBeforeInBlock(latest))
-                srcDealloc->moveAfter(latest);
-        }
-
-        // Original shared load / alloc are now dead.
-        if (dealloc)
-            rewriter.eraseOp(dealloc);
-        rewriter.eraseOp(load);
-        rewriter.eraseOp(alloc);
-    }
-}
-
-// True if a plain (no re-planning) LRAM placement exists for `funcOp`. This is the
-// only way allocateLramAddresses can fail with allowRelocation=true: the swap
-// conversion applies the plan and always succeeds, and the commit only records
-// offsets on the allocations the plan came from. The check is therefore the pure
-// plan over the collected buffers -- it never mutates IR, so it runs on `funcOp`
-// itself. The trial used to clone the whole function and run the pass on the copy;
-// the clone carries every nested program region, which took hours on whole-net
-// single-dispatch functions for a bit the plan already computes.
-static bool lramAllocationSucceeds(FunctionOpInterface funcOp) {
-    // without re-planning, so recovery applies whenever the plain plan fails and
-    // re-planning handles what the recovered IR still cannot place
-    return planPlacement(
-               collectLramBuffers(funcOp), usableLramBytes(0), /*replan=*/false,
-               &funcOp.getFunctionBody().front()
-    )
-        .has_value();
-}
-
 namespace {
-
-// Reduce peak LRAM residency in functions whose address allocation would otherwise
-// fail. Added only to the real pipeline: the tile-fit probe cannot see the DMA this
-// costs, so it would pick a tile that only fits because of it.
-class RecoverLramResidencyPass : public impl::RecoverLramResidencyBase<RecoverLramResidencyPass> {
-  public:
-    RecoverLramResidencyPass() = default;
-    RecoverLramResidencyPass(const RecoverLramResidencyPass &pass) {}
-
-    void runOnOperation() override {
-        auto funcOp = getOperation();
-
-        if (lramAllocationSucceeds(funcOp))
-            return;
-
-        revertSharedReadOnlyReuses(funcOp);
-    }
-};
 
 class AssignLramAddressesPass : public impl::AssignLramAddressesBase<AssignLramAddressesPass> {
   public:
@@ -1678,10 +1682,6 @@ class AssignDtcmItcmXramAddressesPass
 };
 
 } // namespace
-
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createRecoverLramResidencyPass() {
-    return std::make_unique<RecoverLramResidencyPass>();
-}
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>>
 createAssignLramAddressesPass(bool replan, int64_t lramSize) {

@@ -10,10 +10,8 @@
 #include "torq/Codegen/LramAllocation.h"
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
-#include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/ProfilingUtils.h"
-#include "torq/Utils/TorqHw.h"
 
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
@@ -25,7 +23,6 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Debug.h"
 
-#include <algorithm>
 #include <cstdint>
 #include <optional>
 
@@ -175,11 +172,10 @@ namespace {
 // wait_program, so the NSS runs that DMA while the program computes instead of
 // after it. A load moves in front of the nearest earlier wait, or further back (at
 // most kMaxDepth waits) to one where the NSS idles long enough to hide all of it.
-// The idle time comes from the DMA and slice cycle estimates. A load moves only
-// while the LRAM that its earlier alloc keeps live fits. The LRAM planner checks
-// the result, and a tighter budget is tried when it does not place or swaps more
-// bytes than before. Added only to the real pipeline, so the tile-fit probe does
-// not count on it.
+// The idle time comes from the DMA and slice cycle estimates. Whether the loaded
+// buffer stays resident until its use is the LRAM plan's decision; the moves stay
+// only when a plan exists for them. Added only to the real pipeline, so the
+// tile-fit probe does not count on it.
 class PrefetchConstantLoadsPass
     : public impl::PrefetchConstantLoadsBase<PrefetchConstantLoadsPass> {
   public:
@@ -190,112 +186,82 @@ class PrefetchConstantLoadsPass
         auto funcOp = getOperation();
         if (!clPrefetchConstantLoads || !funcOp.getFunctionBody().hasOneBlock())
             return;
-        std::optional<int64_t> baseSwapBytes = lramSwapBytes(funcOp);
-        if (!baseSwapBytes)
-            return;
         Block &body = funcOp.getFunctionBody().front();
 
-        // Live LRAM bytes after each op of the body.
         DenseMap<Operation *, int64_t> index;
-        SmallVector<int64_t> live;
-        int64_t current = 0;
-        for (Operation &op : body) {
-            if (auto allocOp = dyn_cast<memref::AllocOp>(op)) {
-                if (getEncodingMemorySpace(allocOp.getType()) == torq_hl::MemorySpace::Lram)
-                    current += getEncodedTotalSizeBytes(allocOp.getType());
-            }
-            else if (auto deallocOp = dyn_cast<memref::DeallocOp>(op)) {
-                auto type = cast<MemRefType>(deallocOp.getMemref().getType());
-                if (getEncodingMemorySpace(type) == torq_hl::MemorySpace::Lram)
-                    current -= getEncodedTotalSizeBytes(type);
-            }
-            index[&op] = live.size();
-            live.push_back(current);
-        }
+        for (auto [i, op] : llvm::enumerate(body))
+            index[&op] = i;
 
         SmallVector<ConstLoad> loads = findConstLoads(body, index);
         SmallVector<WaitRun> waitRuns = findWaitRuns(body, index);
         if (loads.empty() || waitRuns.empty())
             return;
 
-        const int64_t usable = TorqHw::get().getLramSize() - HwInfo::nss_max_program_size * 2;
         constexpr size_t kMaxDepth = 8;
-        for (int percent : {100, 90, 75, 50}) {
-            int64_t budget = usable * percent / 100;
-            SmallVector<int64_t> planned = live;
-            SmallVector<int64_t> slack =
-                llvm::map_to_vector(waitRuns, [](const WaitRun &run) { return run.slack; });
-            SmallVector<std::pair<const ConstLoad *, Operation *>> moves;
-            for (const ConstLoad &load : loads) {
-                // The wait runs before the alloc, nearest first.
-                auto it = llvm::partition_point(waitRuns, [&](const WaitRun &run) {
-                    return run.index < load.allocIndex;
-                });
-                // The nearest wait run, or an earlier one (at most kMaxDepth back)
-                // that has the idle time to hide all of the load.
-                std::optional<size_t> nearest, chosen;
-                size_t first = it - waitRuns.begin();
-                for (size_t run = first; run-- > 0 && first - run <= kMaxDepth;) {
-                    int64_t from = waitRuns[run].index;
-                    // The alloc is live from allocIndex already, so the move adds
-                    // its bytes only in front of it.
-                    auto range = ArrayRef(planned).slice(from, load.allocIndex - from);
-                    if (*llvm::max_element(range) + load.bytes > budget ||
-                        !operandsDefinedBefore(load, waitRuns[run].firstWait))
-                        break;
-                    if (!nearest)
-                        nearest = run;
-                    if (slack[run] >= load.cycles) {
-                        chosen = run;
-                        break;
-                    }
-                }
-                if (!chosen)
-                    chosen = nearest;
-                LLVM_DEBUG(
-                    llvm::dbgs() << "prefetch: load at " << load.loadIndex << " (" << load.bytes
-                                 << " B, " << load.cycles << " cycles) -> "
-                                 << (chosen ? waitRuns[*chosen].index : -1) << "\n"
-                );
-                if (!chosen)
-                    continue;
-                slack[*chosen] -= load.cycles;
-                for (int64_t i = waitRuns[*chosen].index; i < load.allocIndex; ++i)
-                    planned[i] += load.bytes;
-                moves.emplace_back(&load, waitRuns[*chosen].firstWait);
-            }
-            if (moves.empty())
-                return;
-
-            // Each moved op goes back in front of the next op that stays, if the
-            // allocator rejects the result.
-            DenseSet<Operation *> moved;
-            for (auto [load, wait] : moves)
-                moved.insert(load->ops.begin(), load->ops.end());
-            SmallVector<std::pair<Operation *, Operation *>> undo;
-            for (Operation &op : body) {
-                if (!moved.contains(&op))
-                    continue;
-                Operation *anchor = op.getNextNode();
-                while (moved.contains(anchor))
-                    anchor = anchor->getNextNode();
-                undo.emplace_back(&op, anchor);
-            }
-
-            // A view that another load already moved further up stays there.
-            for (auto [load, wait] : moves) {
-                for (Operation *op : load->ops) {
-                    if (wait->isBeforeInBlock(op))
-                        op->moveBefore(wait);
+        SmallVector<int64_t> slack =
+            llvm::map_to_vector(waitRuns, [](const WaitRun &run) { return run.slack; });
+        SmallVector<std::pair<const ConstLoad *, Operation *>> moves;
+        for (const ConstLoad &load : loads) {
+            // The wait runs before the alloc, nearest first.
+            auto it = llvm::partition_point(waitRuns, [&](const WaitRun &run) {
+                return run.index < load.allocIndex;
+            });
+            // The nearest wait run, or an earlier one (at most kMaxDepth back)
+            // that has the idle time to hide all of the load.
+            std::optional<size_t> nearest, chosen;
+            size_t first = it - waitRuns.begin();
+            for (size_t run = first; run-- > 0 && first - run <= kMaxDepth;) {
+                if (!operandsDefinedBefore(load, waitRuns[run].firstWait))
+                    break;
+                if (!nearest)
+                    nearest = run;
+                if (slack[run] >= load.cycles) {
+                    chosen = run;
+                    break;
                 }
             }
-            // The moves must not make the allocator swap more bytes than before.
-            std::optional<int64_t> swapBytes = lramSwapBytes(funcOp);
-            if (swapBytes && *swapBytes <= *baseSwapBytes)
-                return;
-            for (auto [op, anchor] : undo)
-                op->moveBefore(anchor);
+            if (!chosen)
+                chosen = nearest;
+            LLVM_DEBUG(
+                llvm::dbgs() << "prefetch: load at " << load.loadIndex << " (" << load.bytes
+                             << " B, " << load.cycles << " cycles) -> "
+                             << (chosen ? waitRuns[*chosen].index : -1) << "\n"
+            );
+            if (!chosen)
+                continue;
+            slack[*chosen] -= load.cycles;
+            moves.emplace_back(&load, waitRuns[*chosen].firstWait);
         }
+
+        // Each moved op goes back in front of the next op that stays, if the LRAM plan
+        // cannot place the result.
+        DenseSet<Operation *> moved;
+        for (auto [load, wait] : moves)
+            moved.insert(load->ops.begin(), load->ops.end());
+        SmallVector<std::pair<Operation *, Operation *>> undo;
+        for (Operation &op : body) {
+            if (!moved.contains(&op))
+                continue;
+            Operation *anchor = op.getNextNode();
+            while (moved.contains(anchor))
+                anchor = anchor->getNextNode();
+            undo.emplace_back(&op, anchor);
+        }
+
+        // A view that another load already moved further up stays there.
+        for (auto [load, wait] : moves) {
+            for (Operation *op : load->ops) {
+                if (wait->isBeforeInBlock(op))
+                    op->moveBefore(wait);
+            }
+        }
+        // The plan defers a load it has no room for, but a buffer it then cannot place at
+        // the use, among the ones pinned there, leaves no plan at all.
+        if (lramSwapBytes(funcOp))
+            return;
+        LLVM_DEBUG(llvm::dbgs() << "prefetch: no LRAM plan places the moved loads, undone\n");
+        for (auto [op, anchor] : undo)
+            op->moveBefore(anchor);
     }
 };
 

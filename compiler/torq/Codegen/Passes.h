@@ -66,7 +66,6 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createMapBindingsPass();
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createLowerArithConstantsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createPrefetchConstantLoadsPass();
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createRecoverLramResidencyPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>>
 createAssignLramAddressesPass(bool replan = false, int64_t lramSize = 0);
@@ -191,9 +190,10 @@ bool prefetchInputsEnabled();
 // iterations of an scf::ForOp have the same memory requirements, we can reduce
 // it to a single iteration.
 // Builds the tile-fit probe pipeline by default. `isRealPipeline` says the result is
-// kept rather than thrown away, which is what makes failure-driven recovery worth its
-// DMA; a probe that recovered would report a tile as fitting when it only fits because
-// of that DMA. `sliceBufferSharing` is for the real pipeline only, see FoldConvert.
+// kept rather than thrown away: only then do the LRAM plan's re-planning and the
+// constant-load prefetch run, since a probe that used them would report a tile as
+// fitting when it only fits by their DMA. `sliceBufferSharing` is for the real pipeline
+// only, see FoldConvert.
 // `budgetPercent` is the part of LRAM the passes size against: a tile-fit probe for a
 // smaller tile budget passes less than 100.
 void addPassesPostTileAndFuseUpToAssignLramAddresses(
@@ -201,8 +201,8 @@ void addPassesPostTileAndFuseUpToAssignLramAddresses(
     SliceBufferSharing sliceBufferSharing = SliceBufferSharing::None, int budgetPercent = 100
 );
 
-// The tail of the NSS pipeline: buffer deallocation, failure-driven LRAM residency
-// recovery, constant-load prefetch, and LRAM address assignment. `funcPm` must already
+// The tail of the NSS pipeline: buffer deallocation, constant-load prefetch, and LRAM
+// address assignment. `funcPm` must already
 // be nested on the function op. `isRealPipeline` as above. `lramSize` is the total LRAM
 // pool the allocator may place into, including the NSS program slots (0 = whole LRAM).
 void addNssLramAllocationPasses(OpPassManager &funcPm, bool isRealPipeline, int64_t lramSize = 0);

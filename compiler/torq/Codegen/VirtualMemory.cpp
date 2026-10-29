@@ -3,6 +3,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/MemoryUtils.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CommandLine.h"
@@ -81,6 +82,22 @@ class VirtualBuffer : public VirtualObject {
     // The copy of the contents in the swap space, allocated by the first storing swap-out
     // and kept until the buffer dies; the plan says which swaps move the contents.
     Value swappedOutValue_;
+    Operation *fill_ = nullptr;
+
+    // The load that last filled the buffer. The original is its only torq_hl.load user,
+    // since a fill is the buffer's only write; a repeated one writes the physical alloc.
+    Operation *fill() {
+        if (!fill_) {
+            for (Operation *user : value().getUsers()) {
+                if (isa<torq_hl::LoadOp>(user)) {
+                    assert(!fill_ && "a filled buffer has one load");
+                    fill_ = user;
+                }
+            }
+            assert(fill_ && "a filled buffer has a load");
+        }
+        return fill_;
+    }
 
   public:
     VirtualBuffer(VirtualMemory &vm, Value value)
@@ -90,6 +107,11 @@ class VirtualBuffer : public VirtualObject {
     VirtualBuffer &root() override { return *this; }
 
     int64_t size() const { return size_; }
+
+    void cancelFill();
+
+    // Start swapped out, with the fill cancelled: the plan found no room at the alloc.
+    void deferFromBirth();
 
     void swapIn(IRRewriter &rewriter, Location loc, const Swap &swap);
 
@@ -171,6 +193,7 @@ struct SwapStatistics {
     int storesSkipped = 0;
     int loadsSkipped = 0;
     int reloads = 0;
+    int fillsCancelled = 0;
     int64_t storedBytes = 0;
     int64_t loadedBytes = 0;
 };
@@ -185,6 +208,10 @@ class VirtualMemory {
     const torq_hl::MemorySpace swapMemSpace;
     const int64_t addressBase;
     SwapStatistics stats;
+    // Fills the plan cancelled, until the rewrite moves or erases them.
+    llvm::SmallPtrSet<Operation *, 8> cancelledFills;
+    // Buffers the plan leaves out from their alloc, their fill cancelled there.
+    llvm::DenseSet<Value> deferredAtBirth;
 
     VirtualMemory(int64_t capacity, torq_hl::MemorySpace memorySpace, int64_t addressBase)
         : capacity(capacity), memorySpace(memorySpace),
@@ -206,10 +233,16 @@ class VirtualMemory {
         return root;
     }
 
-    // Register an allocation; it is resident from the start.
+    bool has(Value virtualValue) const { return objects_.contains(virtualValue); }
+
+    // Register an allocation; it is resident from the start unless the plan deferred it.
     void addBuffer(Value virtualValue) {
         assert(!objects_.contains(virtualValue) && "virtual object already registered");
-        objects_.try_emplace(virtualValue, std::make_unique<VirtualBuffer>(*this, virtualValue));
+        auto buffer = std::make_unique<VirtualBuffer>(*this, virtualValue);
+        if (deferredAtBirth.contains(virtualValue)) {
+            buffer->deferFromBirth();
+        }
+        objects_.try_emplace(virtualValue, std::move(buffer));
         assert(residentBytes() <= capacity && "resident bytes exceed the capacity");
     }
 
@@ -233,6 +266,16 @@ class VirtualMemory {
     }
 };
 
+void VirtualBuffer::cancelFill() {
+    vm().cancelledFills.insert(fill());
+    vm().stats.fillsCancelled++;
+}
+
+void VirtualBuffer::deferFromBirth() {
+    setPhysical(nullptr);
+    cancelFill();
+}
+
 void VirtualBuffer::swapIn(IRRewriter &rewriter, Location loc, const Swap &swap) {
     assert(isSwappedOut() && "the buffer is resident");
 
@@ -242,11 +285,18 @@ void VirtualBuffer::swapIn(IRRewriter &rewriter, Location loc, const Swap &swap)
         llvm::report_fatal_error("LRAM plan: a swapped-in buffer cannot carry an address");
     }
 
-    if (torq_hl::LoadOp fill = swap.fill) {
-        Operation *reload = rewriter.clone(*fill.getOperation());
+    if (swap.fill) {
+        Operation *reload = fill();
+        if (vm().cancelledFills.erase(reload)) {
+            reload->moveBefore(rewriter.getInsertionBlock(), rewriter.getInsertionPoint());
+        }
+        else {
+            reload = rewriter.clone(*reload);
+            vm().stats.reloads++;
+            vm().stats.loadedBytes += size();
+        }
         cast<torq_hl::LoadOp>(reload).getOutputMutable().set(physicalAlloc);
-        vm().stats.reloads++;
-        vm().stats.loadedBytes += size();
+        fill_ = reload;
     }
     else if (swap.transfers) {
         if (!swappedOutValue_) {
@@ -301,6 +351,9 @@ void VirtualBuffer::swapOut(IRRewriter &rewriter, Location loc, const Swap &swap
     else {
         vm().stats.storesSkipped++;
     }
+    if (swap.cancelsFill) {
+        cancelFill();
+    }
 
     invalidateAliases();
     memref::DeallocOp::create(rewriter, loc, physical());
@@ -309,6 +362,10 @@ void VirtualBuffer::swapOut(IRRewriter &rewriter, Location loc, const Swap &swap
 }
 
 void VirtualBuffer::deallocate(memref::DeallocOp deallocOp, IRRewriter &rewriter) {
+    if (fill_ && vm().cancelledFills.erase(fill_)) {
+        // cancelled and never run: the buffer died first
+        rewriter.eraseOp(fill_);
+    }
     rewriter.setInsertionPoint(deallocOp);
     Value target;
     if (isSwappedOut()) {
@@ -451,7 +508,11 @@ static void performScheduledSwaps(
 ) {
     rewriter.setInsertionPoint(op);
     for (const Swap &swap : swaps) {
-        if (swap.kind == Swap::Kind::Out) {
+        if (swap.kind == Swap::Kind::Out && !vm.has(swap.buffer)) {
+            // scheduled at the buffer's own alloc, which `op` is: it starts swapped out
+            vm.deferredAtBirth.insert(swap.buffer);
+        }
+        else if (swap.kind == Swap::Kind::Out) {
             vm.buffer(swap.buffer).swapOut(rewriter, op->getLoc(), swap);
         }
         else {
@@ -470,6 +531,7 @@ static void printStatistics(const SwapStatistics &stats) {
     llvm::dbgs() << "Swap-out stores skipped: " << stats.storesSkipped << "\n";
     llvm::dbgs() << "Swap-in loads skipped: " << stats.loadsSkipped << "\n";
     llvm::dbgs() << "Swap-ins reloaded from the source: " << stats.reloads << "\n";
+    llvm::dbgs() << "Fills cancelled: " << stats.fillsCancelled << "\n";
     llvm::dbgs() << "Swap-out bytes stored: " << stats.storedBytes << "\n";
     llvm::dbgs() << "Swap-in bytes loaded: " << stats.loadedBytes << "\n";
 }
@@ -495,6 +557,13 @@ LogicalResult convertVirtualToPhysicalMemRefs(
     for (auto [opIndex, op] : llvm::enumerate(ops)) {
         if (auto it = schedule.find((int)opIndex); it != schedule.end()) {
             performScheduledSwaps(op, it->second, vm, rewriter);
+        }
+        if (vm.cancelledFills.contains(op)) {
+            // the swap-in that brings the buffer back runs the load
+            if (!vm.buffer(cast<torq_hl::LoadOp>(op).getOutput()).isSwappedOut()) {
+                llvm::report_fatal_error("LRAM plan: a cancelled fill's buffer is resident");
+            }
+            continue;
         }
 
         LLVM_DEBUG({
