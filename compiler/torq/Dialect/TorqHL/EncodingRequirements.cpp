@@ -369,12 +369,23 @@ KernelEncoding ReduceOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding DeriveQuantParamsOp::getKernelEncoding() { return getNoEncoding(); }
 
+// Both inputs must have the same layout (LData::stack in ElementWiseShiftPattern.cpp). int32 data
+// can have any layout. 1 and 2-byte data are packed in int32 words, which needs rows aligned to 4
+// bytes: they are kept dense, as an alignment requirement would also pad dense tensors.
 KernelEncoding ElementWiseShiftOp::getKernelEncoding() {
-    return {
-        {},
-        {{}, torq::HwInfo::max_input, true},
-        {{getInput1Mutable().getOperandNumber(), getInput2Mutable().getOperandNumber()}}
+    KernelEncoding encoding = getNoEncoding();
+    if (getElementTypeOrSelf(getInput1().getType()).getIntOrFloatBitWidth() < 32) {
+        KernelTensorEncoding dense{{}, 0, true};
+        encoding.inputEncodings = {
+            {getInput1Mutable().getOperandNumber(), dense},
+            {getInput2Mutable().getOperandNumber(), dense}
+        };
+        encoding.outputEncoding = dense;
+    }
+    encoding.equalEncodingOperands = {
+        {getInput1Mutable().getOperandNumber(), getInput2Mutable().getOperandNumber()}
     };
+    return encoding;
 }
 
 template <typename ActOp> static KernelEncoding getActLikeEncoding(ActOp op) {

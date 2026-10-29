@@ -813,6 +813,19 @@ class Act : SliceComponent {
         const PData &pdata, const BData &bdata, int shift, int zeroPoint, int clipMin, int clipMax
     );
 
+    // Shift elementwise values by elementwise amounts.
+    // pdata: int32 partials of shape {width(int32)}, each one holding packed values of
+    // elementType (4 int8, 2 int16 or 1 int32), as loaded by the ALU from int32 data.
+    // The first half of the partials holds the values, the second half the shift amounts.
+    // Only the 5 lower bits of an amount are used. ASR rounds as set with setRoundingMode().
+    // ActMode can only be: LSL, LSR or ASR
+    // return: result data
+    QData shift(const PData &pdata, DType elementType, torq_hw::ACTMode actMode);
+
+    // Set the rounding mode.
+    // If not set rounds to nearest, ties towards positive infinity (NTP).
+    void setRoundingMode(torq_hw::RoundingMode mode);
+
     // Max number of output items that can be computed in parallel for the given in and weight type
     // The flag biasScalePerItem indicates if a different bias/scale is required for each item
     // (in which case the width may be reduced)

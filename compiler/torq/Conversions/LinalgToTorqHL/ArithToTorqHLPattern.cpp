@@ -534,10 +534,11 @@ class RoundingRightShiftPattern : public OpRewritePattern<linalg::GenericOp> {
                 );
             }
 
-            auto i32Type = rewriter.getI32Type();
-            auto input2Type = RankedTensorType::get(resultType.getShape(), i32Type);
+            // torq_hl.elementwiseshift needs both operands with the same element type.
+            auto elementType = resultType.getElementType();
+            auto input2Type = RankedTensorType::get(resultType.getShape(), elementType);
             auto splatAttr =
-                SplatElementsAttr::get(input2Type, IntegerAttr::get(i32Type, *shiftVal));
+                SplatElementsAttr::get(input2Type, IntegerAttr::get(elementType, *shiftVal));
             input2 = arith::ConstantOp::create(rewriter, op.getLoc(), splatAttr).getResult();
         }
 

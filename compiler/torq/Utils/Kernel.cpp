@@ -291,6 +291,14 @@ static int getBusScatterGather(NdlType type) {
     return 0;
 }
 
+// Block info of data as DEDR reads it from LRAM
+static SGBlockInfo sgElementCountDedr(const Shape &shape, DType elementType) {
+    return sgElementCount(
+        shape, getBusWidth(NdlType::DEDR, elementType) / sizeofType(elementType),
+        getBusScatterGather(NdlType::DEDR)
+    );
+}
+
 // SliceCfg contains the same fields as SliceCFGAttr
 struct SliceCfg {
     torq_hw::ALUOp0Mode alu_op0_mode[2]{}; // One mode for each setId
@@ -1241,6 +1249,7 @@ struct SlicePrivate {
         const PData &pdata, int actShift, int actZeroPoint, int actClipMin, int actClipMax,
         torq_hw::ACTMode actMode
     );
+    QData actShift(const PData &pdata, DType elementType, torq_hw::ACTMode actMode);
     QData actRescaleClamp(
         const PData &pdata, const BData &bdata, int actShift, int actZeroPoint, int actClipMin,
         int actClipMax, torq_hw::ACTMode actMode
@@ -1856,7 +1865,7 @@ static int roundUp(int value, const int *validValues) {
 void SlicePrivate::cedr(const IData &idata, uint32_t weightSize, bool transpose) {
     Shape shape = idata.subShape();
     const int elementSize = sizeofType(idata.elementType());
-    SGBlockInfo bi = sgElementCount(shape, backDimCount(shape));
+    SGBlockInfo bi = sgElementCountDedr(shape, idata.elementType());
     int biCount = elementSize;
 
     // Generate CEDR to load the data from IRAM to ALU
@@ -1893,14 +1902,17 @@ void SlicePrivate::cedr(const IData &idata, uint32_t weightSize, bool transpose)
 
     if (bi.sgGroups > 1 || bi.outerGroups > 1) {
         // Not sure if stride is actually used by HW here
-        int stride = bi.stride.intVal.has_value() ? bi.stride.intVal.value() : 1;
+        int stride = (bi.stride.intVal.has_value() ? bi.stride.intVal.value() : 1) * elementSize;
         static const int sValidGroupCount[] = {1, 4, 8, 16, 32, 0};
-        int groupCount = roundUp(bi.sgGroups * bi.outerGroups, sValidGroupCount);
+        // TODO: see how we can combine sgGroups with outerGroups
+        int iramWidth = HwInfo::iram_seg * getBusWidth(NdlType::DEDR, idata.elementType());
+        int groupCount = bi.sgGroups > 1 ? iramWidth / stride : bi.outerGroups;
+        groupCount = roundUp(groupCount, sValidGroupCount);
         if (!groupCount) {
             llvm::errs() << "Invalid CEDR group size: " << groupCount << "\n";
             assert(false && "Invalid CEDR group size");
         }
-        cedrDims.push_back({DimType::L, RegDimTag::G, groupCount, stride * elementSize});
+        cedrDims.push_back({DimType::L, RegDimTag::G, groupCount, stride});
     }
 
     // Now add hdims for each loop deeper the iram load
@@ -1921,7 +1933,9 @@ void SlicePrivate::cedw(const IData &idata, int setId) {
     Shape shape = idata.subShape();
     // assert(shape.size() <= 1);
     const int elementSize = sizeofType(idata.elementType());
-    SGBlockInfo bi = sgElementCount(shape, backDimCount(shape));
+    bool gathered = shape.size() >= 2 && shape[0].stride.hasVal();
+    SGBlockInfo bi = gathered ? sgElementCountDedr(shape, idata.elementType())
+                              : sgElementCount(shape, backDimCount(shape));
 
     // Generate CEDW to load the data from DEDR to IRAM
     // TODO: check that the data fits IRAM and that dataShape has natural strides
@@ -2890,6 +2904,31 @@ QData SlicePrivate::actClamp(
     return qdata;
 }
 
+QData SlicePrivate::actShift(const PData &pdata, DType elementType, torq_hw::ACTMode actMode) {
+    assert(
+        (actMode == ACTMode::LSL || actMode == ACTMode::LSR || actMode == ACTMode::ASR) &&
+        "Not a shift mode"
+    );
+    assert(
+        pdata.elementType() == DType::int32 &&
+        elementCount(pdata.subShape()) == HwInfo::act_width &&
+        "Shift needs a full row of int32 partials"
+    );
+    const int elementSize = sizeofType(elementType);
+    assert(isInt(elementType) && (elementSize == 1 || elementSize == 2 || elementSize == 4));
+
+    // Configure the ACT as for a clamp on the full int32 range, then the size of the packed values
+    // (the ACT reads the values and the amounts at this size)
+    actClamp(pdata, 0, 0, minVal(DType::int32), maxVal(DType::int32), actMode);
+    _cfg.act_sum_bits = elementSize * 8;
+
+    // The ACT shifts as many values as it has outputs: half of them for 4-byte values
+    const int resultCount = elementSize == 4 ? HwInfo::act_width / 2 : HwInfo::act_width;
+    QData qdata({resultCount}, elementType);
+    debugData(qdata);
+    return qdata;
+}
+
 QData SlicePrivate::actRescaleClamp(
     const PData &pdata, const BData &bdata, int actShift, int actZeroPoint, int actClipMin,
     int actClipMax, torq_hw::ACTMode actMode
@@ -3276,7 +3315,6 @@ static IData iramLoadImpl(
     d->_iram.usingData(data, setId);
 
     auto idata = IData(iramShape, data.elementType());
-    d->cedw(idata, setId);
 
     // Adjust IRAM shape strides to natural strides, in IRAM data is contiguous
     for (auto &iramShapeItem : iramShape) {
@@ -3284,16 +3322,17 @@ static IData iramLoadImpl(
     }
 
     if (iramShape.size() > 0) {
-        SGBlockInfo bi =
-            sgElementCount(iramShape, backDimCount(iramShape), getBusScatterGather(NdlType::DEDR));
-        if (bi.stride.intVal.has_value()) {
+        SGBlockInfo bi = sgElementCountDedr(idata.shape(), idata.elementType());
+        if (bi.stride.hasVal()) {
             // Set the actual stride in the IRAM
             // The blocks read with gather are not contiguous in IRAM but have a fixed stride.
-            iramShape[iramShape.size() - 1].stride = HwInfo::iram_seg_width / bi.sgGroups;
+            iramShape.at(iramShape.size() - 2).stride =
+                HwInfo::iram_seg_width / bi.sgGroups / sizeofType(idata.elementType());
         }
     }
 
     idata.setShape(iramShape);
+    d->cedw(idata, setId);
 
     checkLoadSize(iRam, idata);
 
@@ -3729,6 +3768,12 @@ QData Act::clamp(const PData &pdata, int clipMin, int clipMax, ACTMode actMode) 
     assert(!isPacked(pdata.elementType()) && "Packed types not supported here");
     return d->actClamp(pdata, 0, 0, clipMin, clipMax, actMode);
 }
+
+QData Act::shift(const PData &pdata, DType elementType, ACTMode actMode) {
+    return d->actShift(pdata, elementType, actMode);
+}
+
+void Act::setRoundingMode(RoundingMode mode) { d->_cfg.act_round_mode = mode; }
 
 QData Act::rescaleClamp(
     const PData &pdata, const BData &bdata, int shift, int zeroPoint, int clipMin, int clipMax

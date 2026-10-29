@@ -907,6 +907,37 @@ tensor boundary (this will normally generate an assertion).
 :::
 
 
+#### Feeding two inputs to the Act in one pass
+
+Some *Act* operations take two operands per output value. For example `act.shift()` (`LSL`, `LSR`
+and `ASR` modes) shifts each value by its own amount: the *Act* reads its row of `width(int32)`
+int32 partials as two halves, the values in the first half and the shift amounts in the second,
+both packed at the element size (4 int8, 2 int16 or 1 int32 per partial).
+
+To build such a row, stack the two inputs with `LData::stack()` and load them with
+`iram.load()`. When the *outer* dimension of the loaded data has up to `gather()` rows, at any
+stride, `iram.load()` gathers them in one transfer, and the *ALU* reads the rows one after the
+other: with 2 rows of 8 int32 words, `alu.load()` returns the 8 words of the first row then the 8
+words of the second one.
+The stacked dimension must be the outermost one, so index the other dimensions after it:
+
+```{code} C++
+// input1, input2: int32 words, vectorized by width(int32) / 2 words
+LData input = LData::stack(rewriter, input1, input2, 0);
+slice.act.setRoundingMode(torq_hw::RoundingMode::OFF);
+For(auto iv = slice.iterate(input.dim(1))) {
+    IData idata = slice.iram.load(input[":"][iv]);  // both rows in one IRAM segment
+    PData pdata = slice.alu.load(idata);            // values then amounts
+    QData res = slice.act.shift(pdata, elementType, torq_hw::ACTMode::ASR);
+    slice.append(output, res);
+}
+```
+
+`act.shift()` rounds as set with `act.setRoundingMode()`. If no mode is set the *Act* rounds to
+nearest, so a plain shift must set `RoundingMode::OFF`. See `ElementWiseShiftPattern.cpp` for the
+complete kernel, including non-dense tensors and how the inputs are rounded up to whole vectors.
+
+
 #### Writing output results
 
 The Slice class provides two methods for writing results to the output tensor:

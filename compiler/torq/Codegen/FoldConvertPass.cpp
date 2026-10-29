@@ -791,8 +791,8 @@ class SwapExtractAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
                 continue;
             }
 
-            // torq_hl.elementwiseshift stops with "Input strides must match" --
-            // ElementWiseShiftPattern.cpp
+            // torq_hl.elementwiseshift needs its two operands with the same layout (see
+            // ElementWiseShiftPattern.cpp), which the swap of only one of them would break
             if (isa<torq_hl::ElementWiseShiftOp>(consumer)) {
                 return Rejection{"elementwise", "consumer needs its operands to share strides"};
             }
