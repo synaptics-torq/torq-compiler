@@ -50,14 +50,10 @@ static llvm::cl::opt<int> clXramStartAddress(
 );
 
 // Reduce read-only LRAM load residency in functions whose address allocation would
-// otherwise fail. Two actions share this one trigger (see runOnOperation): a
-// whole-function clone is allocated first, and only when that clone fails do we
-// (1) revert load-CSE reuses (tagged "torq.lram_reuse") that keep a shared buffer
-// resident, and (2) narrow read-only full-buffer loads (a weight loaded whole and
-// then sliced per-invocation with memref.subview) into per-use sub-loads, so only
-// the used slice is resident. Functions that already fit are left untouched (both
-// transforms would split one shared load into more concurrent loads and can make
-// allocation worse).
+// otherwise fail (see runOnOperation): only when the plain plan fails are load-CSE
+// reuses (tagged "torq.lram_reuse") that keep a shared buffer resident reverted.
+// Functions that already fit are left untouched (the revert splits one shared load
+// into more concurrent loads and can make allocation worse).
 
 llvm::cl::opt<int> clMaxNssProgramsSize(
     "torq-max-nss-programs-size", llvm::cl::desc("Size of the XRAM reserved for NSS programs"),
@@ -1395,127 +1391,6 @@ static void getBackwardSlice(Operation *op, SetVector<Operation *> *slice) {
     slice->insert(op);
 }
 
-// True if `t`'s layout is contiguous row-major (a non-zero offset is allowed). Only
-// such a subview can be reloaded from its source as a plain contiguous DMA; a
-// subview that slices inner dimensions is strided (has gaps) and is left alone.
-static bool isContiguousRowMajor(MemRefType t) {
-    SmallVector<int64_t> strides;
-    int64_t offset;
-    if (failed(t.getStridesAndOffset(strides, offset)))
-        return false;
-    int64_t expected = 1;
-    ArrayRef<int64_t> shape = t.getShape();
-    for (int d = (int)shape.size() - 1; d >= 0; --d) {
-        if (strides[d] != expected)
-            return false;
-        expected *= shape[d];
-    }
-    return true;
-}
-
-// If `alloc` is written by exactly one torq_hl.load (as its output) and otherwise
-// only read via memref.subview (an optional dealloc aside), return that load and
-// collect the subviews and dealloc. Return nullptr otherwise. Such a buffer is a
-// read-only value loaded whole and then sliced.
-static torq_hl::LoadOp matchWholeBufferReadOnlyLoad(
-    memref::AllocOp alloc, SmallVectorImpl<memref::SubViewOp> &subs, memref::DeallocOp &dealloc
-) {
-    torq_hl::LoadOp load = nullptr;
-    for (Operation *user : alloc.getResult().getUsers()) {
-        if (auto ld = dyn_cast<torq_hl::LoadOp>(user)) {
-            if (load || ld.getOutput() != alloc.getResult())
-                return nullptr;
-            load = ld;
-        }
-        else if (auto sv = dyn_cast<memref::SubViewOp>(user)) {
-            subs.push_back(sv);
-        }
-        else if (auto dc = dyn_cast<memref::DeallocOp>(user)) {
-            dealloc = dc;
-        }
-        else {
-            return nullptr;
-        }
-    }
-    return load;
-}
-
-// For a read-only buffer loaded whole and then sliced per-invocation with
-// memref.subview (a weight), replace each subview use with a fresh load of only the
-// matching sub-region from the original XRAM source, then drop the now-dead
-// whole-buffer load. This keeps only the used slice resident instead of the whole
-// weight, reducing peak LRAM residency.
-static void narrowReadOnlyWeightLoads(FunctionOpInterface funcOp) {
-    // A root larger than the usable LRAM can never be resident whole; the allocator
-    // already streams its subviews, and splitting it into per-use loads only adds
-    // concurrent loads. Only narrow roots that could be resident (so keeping them
-    // whole is the waste we remove).
-    int64_t budget = usableLramBytes(0);
-
-    SmallVector<memref::AllocOp> roots;
-    funcOp->walk([&](memref::AllocOp alloc) { roots.push_back(alloc); });
-
-    IRRewriter rewriter(funcOp->getContext());
-    for (memref::AllocOp alloc : roots) {
-        auto rootType = dyn_cast<MemRefType>(alloc.getType());
-        if (!rootType || getEncodingMemorySpace(rootType) != torq_hl::MemorySpace::Lram)
-            continue;
-        int64_t rootSize = getEncodedTotalSizeBytes(rootType);
-        if (rootSize > budget)
-            continue;
-
-        SmallVector<memref::SubViewOp> subs;
-        memref::DeallocOp dealloc = nullptr;
-        torq_hl::LoadOp load = matchWholeBufferReadOnlyLoad(alloc, subs, dealloc);
-        if (!load || subs.empty())
-            continue;
-
-        Value xramSrc = load.getInput();
-        auto xramType = dyn_cast<MemRefType>(xramSrc.getType());
-        if (!xramType || xramType.getShape() != rootType.getShape())
-            continue; // load is not a straight whole-buffer copy
-
-        bool narrowedAll = true;
-        for (memref::SubViewOp sv : subs) {
-            auto svType = cast<MemRefType>(sv.getType());
-            // contiguous LRAM buffer of the subview's logical shape
-            auto newType = MemRefType::get(
-                svType.getShape(), svType.getElementType(), MemRefLayoutAttrInterface(),
-                rootType.getMemorySpace()
-            );
-            int64_t svSize = getEncodedTotalSizeBytes(newType);
-            // Skip subviews that save nothing or are strided (see isContiguousRowMajor).
-            if (svSize >= rootSize || !isContiguousRowMajor(svType)) {
-                narrowedAll = false;
-                continue;
-            }
-
-            // Load the matching sub-region of the XRAM source (same offsets/sizes/
-            // strides, applied to the identically-shaped source) into a fresh buffer.
-            rewriter.setInsertionPoint(sv);
-            auto xsv = memref::SubViewOp::create(
-                rewriter, sv.getLoc(), xramSrc, sv.getMixedOffsets(), sv.getMixedSizes(),
-                sv.getMixedStrides()
-            );
-            auto newAlloc = memref::AllocOp::create(rewriter, sv.getLoc(), newType);
-            torq_hl::LoadOp::create(
-                rewriter, sv.getLoc(), newAlloc.getResult(), xsv.getResult(),
-                SmallVector<int64_t>{}, SmallVector<int64_t>{}, svSize, /*unsafe=*/true
-            );
-            rewriter.replaceAllUsesWith(sv.getResult(), newAlloc.getResult());
-            rewriter.eraseOp(sv);
-        }
-
-        // If every subview was narrowed, the whole-buffer load is now dead.
-        if (narrowedAll) {
-            if (dealloc)
-                rewriter.eraseOp(dealloc);
-            rewriter.eraseOp(load);
-            rewriter.eraseOp(alloc);
-        }
-    }
-}
-
 // Revert load-CSE reuses (tagged "torq.lram_reuse" by EliminateRedundantLramLoads)
 // that keep a read-only buffer resident and shared across consumers. When slicing
 // is on, such a shared buffer stays pinned by an in-flight start_program while other
@@ -1685,7 +1560,6 @@ class RecoverLramResidencyPass : public impl::RecoverLramResidencyBase<RecoverLr
             return;
 
         revertSharedReadOnlyReuses(funcOp);
-        narrowReadOnlyWeightLoads(funcOp);
     }
 };
 

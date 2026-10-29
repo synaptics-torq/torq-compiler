@@ -421,7 +421,7 @@ def RecoverLramResidency :
     Runs immediately before `torq-assign-lram-addresses`, and only in the real
     pipeline: the tile-fit probe pipelines that TileAndFuse builds must not include
     it, because the probe only reports "fits" or "does not fit" and would therefore
-    pick a tile that only fits thanks to the extra DMA these transforms cost.
+    pick a tile that only fits thanks to the extra DMA the revert costs.
   }];
   let constructor =
       "mlir::syna::torq::createRecoverLramResidencyPass()";
