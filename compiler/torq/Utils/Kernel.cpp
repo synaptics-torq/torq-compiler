@@ -24,7 +24,8 @@ using namespace std;
 
 namespace mlir::syna::torq {
 
-enum class NdlSyncMode { NONE, R = 'R' };
+// R: the two NDL sets take turns. P: set 1 produces the addresses (indices) used by set 0.
+enum class NdlSyncMode { NONE, R = 'R', P = 'P' };
 
 static int denseDims(const LData &);
 static int broadcastDims(const Shape &);
@@ -1189,6 +1190,8 @@ struct SlicePrivate {
     struct Ram {
         // DType of each element
         DType elementType{DType::none};
+        // IRAM only: loaded with IRam::loadIndexed() (DEDR set 1 reads indices, not data)
+        bool indexed{};
         // Loop nesting level at the point the RAM is loaded
         int loadNesting = -1;
 
@@ -1327,6 +1330,11 @@ struct SlicePrivate {
     // Return true if HW supports DEQW split writes (G dim in LDIMs) with a stride between the
     // groups that is not a multiple of 8 bytes
     bool supportDEQWMisalignedWrite() const { return false; }
+
+    // Return true if DEDR set 1 loads data to process in turn with set 0 (not indices)
+    bool usingDedr1Data() const {
+        return _ndls.getMemNdl(NdlType::DEDR, 0, 1) != nullptr && !_iram.indexed;
+    }
 
     // Applying bias,scale per-item in ACT
     bool _biasScalePerItem{false};
@@ -1822,7 +1830,7 @@ int SlicePrivate::outerIterCount(const std::vector<Loop> &forStack, int iv) {
 
 void SlicePrivate::aluSetMode(torq_hw::ALUOp0Mode op0, torq_hw::ALUOp1Mode op1) {
     // If DEDR set1 is used we also configure set1 in the same way as set0
-    for (int i = 0; i < (_ndls.getMemNdl(NdlType::DEDR, 0, 1) ? 2 : 1); i++) {
+    for (int i = 0; i < (usingDedr1Data() ? 2 : 1); i++) {
         _cfg.alu_op0_mode[i] = op0;
         _cfg.alu_op1_mode[i] = op1;
     }
@@ -1924,7 +1932,7 @@ void SlicePrivate::cedr(const IData &idata, uint32_t weightSize, bool transpose)
     _ndls.add(NdlType::CEDR, cedrDims);
 
     // If we use DEDR1 also add CEDR1 configured in the same way as CEDR0
-    if (_ndls.getMemNdl(NdlType::DEDR, 0, 1)) {
+    if (usingDedr1Data()) {
         _ndls.add(NdlType::CEDR, cedrDims, 1);
     }
 }
@@ -2146,7 +2154,8 @@ void SlicePrivate::acpr(const PData &pdata) {
 
     // Now add hdims for each loop deeper than the last endfor (end of the ALU accumulate)
     addDims(NdlType::ACPR, acprDims, pdata, _pram.loadNesting, false, true);
-    if (_wram.elementType == DType::none && !supportACPRs32()) {
+    // This limit is for bf16 only, and indexed loads are integer (checked in IRam::loadIndexed())
+    if (_wram.elementType == DType::none && !supportACPRs32() && !_iram.indexed) {
         // Only PRAM transfer width of 64 is supported when ALU is in bypass,
         // that is the S dimension, if specified, must have a stride of 64 (even if count is 1)
         // This is a limitation in current HW for non-MAC bf16 accumulate, supported in next release
@@ -2211,7 +2220,7 @@ void SlicePrivate::cepr(const PData &pdata) {
         }
     }
     int outerCount = outerIterCount(_stackCopy, _pram.loadNesting);
-    bool usingDedr1 = _ndls.getMemNdl(NdlType::DEDR, 0, 1);
+    bool usingDedr1 = usingDedr1Data();
     if (usingDedr1) {
         // TODO: if the switch is outside accumulation we might have to divide outerCount
         assert(accumulationCount % 2 == 0 && "Accumulation count must be even with DEDR1");
@@ -3083,6 +3092,28 @@ static int32_t extendPadValue(int32_t value, DType type) {
     }
 }
 
+// Row view of a table accessed with indices: the indexed sub-tensor without its rows dimension.
+// The rows must be dense and consecutive, since the hardware computes the address of row i as
+// i * row size.
+static LData indexedRow(const LData &table) {
+    const Shape tableShape = table.subShape();
+    assert(tableShape.size() == 2 && "Table must be indexed down to its rows of elements");
+    assert(
+        denseElementCount(tableShape) >= 0 &&
+        "Table rows must be dense and consecutive (row stride == row size)"
+    );
+    LData row = table;
+    row.eraseDim(-2);
+    return row;
+}
+
+static void checkIndices(const LData &indices, int maxCount) {
+    const Shape shape = indices.subShape();
+    assert(shape.size() == 1 && indices.denseDims() >= 1 && "Indices must be a dense vector");
+    assert(shape[0].count <= maxCount && "Too many indices");
+    assert(isInt(indices.elementType()) && sizeofType(indices.elementType()) != 3);
+}
+
 void Slice::append(const LData &output, const QData &data) {
     debugTensor("QTensor", output);
     assert(data.indexes().size() == 0 && "QData can't be indexed during append");
@@ -3121,6 +3152,48 @@ void Slice::store(const LData &output, const QData &data) {
     d->deqw(output);
     d->ref(output);
     d->_pram.usingData(output);
+}
+
+void Slice::storeIndexed(const LData &table, const LData &indices, const QData &data) {
+    debugTensor("QTable", table);
+    debugTensor("QIndices", indices);
+    assert(data.indexes().size() == 0 && "QData can't be indexed during store");
+    const LData row = indexedRow(table);
+    checkIndices(indices, 1);
+    checkCompatibility(row, data);
+
+    // DEBR set 1 reads the indices and gives them to DEQW, which writes the row at
+    // index * row size (de_b_rx.c and de_q_w.c in the C model). DEBR set 1 takes turns with DEBR
+    // set 0, which reads the bias/scale, so both switch at each transfer (dummy first H dim).
+    MemNdlData *biasNdl = d->_ndls.getMemNdl(NdlType::DEBR, 0, 0);
+    assert(biasNdl && "storeIndexed() needs a BRam::load()");
+    assert(
+        d->_bram.loadNesting == (int)d->_forStack.size() &&
+        "BRam::load() must be at the same loop level as storeIndexed()"
+    );
+    // The two sets switch at the end of the first H dim (sync_nhd 0), so a dummy H dim of 1 makes
+    // them switch at each transfer. Stride -1 keeps compactHDims() from removing it.
+    biasNdl->dims.insert(
+        biasNdl->dims.begin() + getLdimCount(biasNdl->dims), {DimType::H, MemDimTag::O, 1, -1}
+    );
+    biasNdl->sync_mode = static_cast<int>(NdlSyncMode::R);
+    d->_ndls.add(d->memNdl(NdlType::DEBR, indices, true, NdlSyncMode::R));
+    d->_bram.usingData(indices, 1);
+
+    d->deqw(row);
+    // DEQW applies the index to whole words only: no split (G dim) and no XY view (S dims)
+    assert(
+        llvm::none_of(
+            d->_ndls.getMemNdl(NdlType::DEQW, 0, 0)->dims,
+            [](const MemNdlDimData &dim) {
+                return dim.type == DimType::S ||
+                       (dim.type == DimType::L && dim.tag == MemDimTag::G);
+            }
+        ) &&
+        "Indexed store needs a single DEQW word per row"
+    );
+    d->ref(row);
+    d->_pram.usingData(row);
 }
 
 void Slice::store(const LData &output, int value) {
@@ -3163,7 +3236,7 @@ void Slice::setOutputChannelShape(int height, int width) {
 }
 
 torq_hw::SliceCFGAttr Slice::getCfgAttr(MLIRContext *ctx) const {
-    bool usingSet1 = d->_ndls.getMemNdl(NdlType::DEDR, 0, 1) != nullptr;
+    bool usingSet1 = d->usingDedr1Data();
     SliceCFGAttr cfgAttr = d->_cfg.toSliceCFGAttr(ctx, usingSet1);
     LLVM_DEBUG(llvm::dbgs() << cfgAttr);
     return cfgAttr;
@@ -3277,7 +3350,7 @@ Slice::createSliceTaskOp(::mlir::OpBuilder &builder, Location loc, ValueRange sy
         checkNonNull(d->_bram.values),     // BiasScale tensor
         checkNonNull(d->_pram.values),     // Output tensor initializer
         checkNonNull(d->_iram.valuesSet1), // Dx
-        ValueRange{},                      // Bx
+        checkNonNull(d->_bram.valuesSet1), // Bx
         allSymbols,                        // Symbols used to compute the NDLs
         getCfgAttr(builder.getContext()),  // Slice configuration
         getNdls()
@@ -3314,6 +3387,7 @@ static IData iramLoadImpl(
     d->_iram.elementType = data.elementType();
     d->_iram.usingData(data, setId);
 
+    d->_iram.indexed = false;
     auto idata = IData(iramShape, data.elementType());
 
     // Adjust IRAM shape strides to natural strides, in IRAM data is contiguous
@@ -3354,6 +3428,48 @@ static IData iramLoadImpl(
 
 IData IRam::load(const LData &data) {
     IData idata = iramLoadImpl(this, d, data, NdlSyncMode::NONE, 0);
+    debugData(idata);
+    return idata;
+}
+
+IData IRam::loadIndexed(const LData &table, const LData &indices) {
+    debugTensor("ITable", table);
+    debugTensor("IIndices", indices);
+    const DType elementType = table.elementType();
+    assert(isInt(elementType) && "Indexed table must be integer (bit-cast float tables)");
+    const int elementSize = sizeofType(elementType);
+    const LData row = indexedRow(table);
+    checkIndices(indices, gather());
+    const int rows = indices.subShape()[0].count;
+    assert((rows == 1 || rows == 2 || rows == 4) && "Unsupported number of indices");
+    const int rowElements = elementCount(row.subShape());
+    // The ALU reads each row as its part of an ALU group
+    const int partBytes = HwInfo::max_input / rows;
+    assert(rowElements * elementSize <= partBytes && "Table row too large");
+    assert(HwInfo::iram_seg_width / rows % elementSize == 0 && "Row part not element aligned");
+
+    // DEDR set 1 reads the indices and gives them to DEDR set 0, which reads each row at
+    // index * row size (de_d_rx.c and de_d_r.c in the C model) and gathers them in the parts of
+    // one bus word (G dimension, with stride 0 since the addresses come from the indices).
+    // Set 0 must be defined first.
+    d->_iram.indexed = true;
+    MemNdlData rowNdl = d->memNdl(NdlType::DEDR, row, true, NdlSyncMode::P);
+    rowNdl.dims.insert(
+        rowNdl.dims.begin() + getLdimCount(rowNdl.dims), {DimType::L, MemDimTag::G, rows, 0}
+    );
+    d->_ndls.add(rowNdl);
+    d->_ndls.add(d->memNdl(NdlType::DEDR, indices, true, NdlSyncMode::P));
+
+    d->_iram.loadNesting = d->_forStack.size();
+    d->_iram.elementType = elementType;
+    d->_iram.usingData(table, 0);
+    d->_iram.usingData(indices, 1);
+
+    // Each row lands in its part of the IRAM segment, and the ALU reads 64 / rows bytes of it
+    const int partStride = HwInfo::iram_seg_width / rows / elementSize;
+    d->cedw(IData({{rows, partStride}, {rowElements, 1}}, elementType), 0);
+    IData idata({{rows, partStride}, {partBytes / elementSize, 1}}, elementType);
+    checkLoadSize(this, idata);
     debugData(idata);
     return idata;
 }

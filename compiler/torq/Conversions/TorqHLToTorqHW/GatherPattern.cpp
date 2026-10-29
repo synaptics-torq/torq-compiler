@@ -6,244 +6,122 @@
 
 #include "Patterns.h"
 #include "torq/Utils/ConversionUtils.h"
+#include "torq/Utils/Kernel.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "llvm/Support/Debug.h"
-#include <numeric>
 
 #define DEBUG_TYPE "torq-lower-torqhl-gather"
 
-using namespace mlir::syna::torq_hw;
-
 namespace mlir::syna::torq {
 
+// Copy to output[0..count) the rows of a table selected by count indices (1, 2 or 4)
+static void copyIndexedRows(
+    Slice &slice, const LData &table, const LData &indices, const LData &output, int count
+) {
+    IData idata = slice.iram.loadIndexed(table, indices);
+    // Same as alu.load(), which is limited to the ACT width
+    PData pdata = slice.alu.accumulate(idata, torq_hw::ALUOp1Mode::BOR);
+    // The rows come one after the other in the partials, each one padded as in the IData
+    pdata.setShape({{count, idata.dim(-1)}, {1, 1}});
+    For(auto r = slice.iterate(count)) {
+        QData res = slice.act.clamp(pdata[r], minVal(DType::int32), maxVal(DType::int32));
+        slice.store(output[r], res);
+    }
+}
+
+// Each index selects one row of a table, and the same indices are used for all the tables. The op
+// comes in two forms (see ExtractPattern.cpp):
+// - Lookups: the tables are the last dimension of the values, each index selects one element of
+//   each table:
+//     output[..., n] = values[..., indices[n]]
+//   values [tables..., K] and output [tables..., W], with W indices: for example values
+//   [1, 32, 256], indices [1, 16], output [1, 32, 16]. Rank-2 values [C, K] may come with an
+//   output [1, C', W] (C' <= C), from a unit-batch gather collapsed to rank 2.
+// - Slice gathers: rank-2 values [R, S] (other than the case above), each index selects a slice of
+//   S elements:
+//     output[n, ...] = values[i_n, ...]
+//   output [index dims..., slice dims...], where the slice dims have S elements: for example values
+//   [16, 64], indices [16], output [16, 1, 64]. ExtractPattern gives the element offset i_n * S of
+//   each slice instead of i_n. So the kernel sees S tables, one per column s, starting at element s
+//   of the values, in which offset i_n * S selects values[i_n, s].
 template <>
 LogicalResult GatherPattern::transform(torq_hl::GatherOp op, PatternRewriter &rewriter) const {
-    auto input_type = llvm::cast<MemRefType>(op.getValues().getType());
-
-    auto indices_type = llvm::cast<MemRefType>(op.getIndices().getType());
-    auto indicesShape = indices_type.getShape();
-    llvm::SmallVector<int64_t> indices_shape(indicesShape.begin(), indicesShape.end());
-
-    uint32_t entry_size = input_type.getElementType().getIntOrFloatBitWidth() / 8;
-    uint32_t idx_size = indices_type.getElementType().getIntOrFloatBitWidth() / 8;
-    // output
-    auto output_type = llvm::dyn_cast<MemRefType>(op.getInit().getType());
-
-    auto input_strides = getEncodedStridesElements(input_type);
-    auto indices_strides = getEncodedStridesElements(indices_type);
-    auto input_shape = input_type.getShape();
-    if (input_shape.empty() || input_shape.size() > 3) {
-        return rewriter.notifyMatchFailure(op, "Expected GatherOp values rank to be 1, 2, or 3");
+    LData values(op.getValues());
+    LData indices(op.getIndices());
+    LData output(op.getInit());
+    const int valuesRank = values.shape().size();
+    const int indicesRank = indices.shape().size();
+    if (valuesRank == 0) {
+        return rewriter.notifyMatchFailure(op, "Expected GatherOp values rank >= 1");
     }
-    auto output_strides = getEncodedStridesElements(output_type);
-    auto output_shape = output_type.getShape();
-    int indicesCount = indices_type.getNumElements();
-    int channelCount = 1;
-    int channelStride = 0;
-    int outChannelStride = 0;
-    // DEQW inner indices-dim stride. Rank-1 and rank-3 walk single elements
-    // per index, so the stride is just `entry_size`; rank-2 writes a full
-    // per-index slice (`channelCount * outChannelStride`) and overrides this
-    // below.
-    int outputSliceStride = entry_size;
-    const bool rank2AxisLastGather =
-        input_shape.size() == 2 && output_shape.size() == 3 && indices_shape.size() == 1 &&
-        output_shape.back() == indicesCount && output_shape[1] <= input_shape[0];
-
-    if (input_shape.size() == 3) {
-        channelCount = input_shape[1];
-        channelStride = input_strides[1] * entry_size;
-        outChannelStride = output_strides[1] * entry_size;
+    if (indices.denseDims() < indicesRank) {
+        return op.emitError("Gather indices must be dense");
     }
-    else if (rank2AxisLastGather) {
-        // Unit-batch axis-last gathers may be collapsed to rank-2 values
-        // [C, W] while the output remains [1, C_tile, W_out].
-        channelCount = output_shape[1];
-        channelStride = input_strides[0] * entry_size;
-        outChannelStride = output_strides[1] * entry_size;
+    indices.fuse(indicesRank);
+    const int indicesCount = indices.dim(0);
+
+    // Lookup with rank-2 values [C, K] and an output [1, C', W]
+    const bool unitBatchLookup = valuesRank == 2 && output.shape().size() == 3 &&
+                                 indicesRank == 1 && output.dim(-1) == indicesCount &&
+                                 output.dim(1) <= values.dim(0);
+    const bool sliceGather = valuesRank == 2 && !unitBatchLookup;
+
+    // Floats are copied as integers of the same size
+    if (isFloat(values.elementType())) {
+        const DType intType = sizeofType(values.elementType()) == 2 ? DType::int16 : DType::int32;
+        values.bitCast(intType);
+        output.bitCast(intType);
     }
-    else if (input_shape.size() == 2) {
-        // Rank-2 gathers come from collapsing a trailing singleton/channel dimension.
-        // In that form, the last dim is the full contiguous slice we must copy for each index.
-        channelCount = input_shape.back();
-        channelStride = input_strides.back() * entry_size;
-        outChannelStride = output_strides.back() * entry_size;
-        outputSliceStride = channelCount * outChannelStride;
-    }
-    // Rank-2 sliced gathers need group_size=1 to preserve full-slice writes
-    // for each index. Axis-last rank-2 gathers use the rank-3-style grouped
-    // path because each index writes one element per channel.
-    const bool rank2SlicedGather = input_shape.size() == 2 && !rank2AxisLastGather;
-    const uint32_t group_size = rank2SlicedGather         ? 1
-                                : (indicesCount % 4 == 0) ? 4
-                                : (indicesCount % 2 == 0) ? 2
-                                                          : 1;
-    LLVM_DEBUG({
-        llvm::dbgs() << "\nindicesCount: " << indicesCount << " group_size: " << group_size << "\n";
-    });
 
-    uint32_t alu_width = alu_group_width / group_size;
-    uint32_t max_input = 256 / alu_width;
-
-    LLVM_DEBUG(llvm::dbgs() << "Indices strides:\n";
-               for (int i = 0; i < indices_strides.size(); ++i) llvm::dbgs()
-               << indices_strides[i] << " ";
-               llvm::dbgs() << "\nchannelCount: " << channelCount << "\n";);
-
-    // Create split of max_entries since idx dimension maybe aligned to 64 in activation cases.
-    auto dense_splits = groupAsDenseDims(indices_shape, indices_strides);
-
-    // Find the indices max entries based on the alignment
-    dense_splits.front().size = div_ceil(dense_splits.front().size, group_size);
-    dense_splits.front().stride = group_size;
-
-    int64_t max_entries = std::accumulate(
-        dense_splits.begin(), dense_splits.end(), 1,
-        [&](int64_t x, ShapeStrideTuple y) { return x * y.size; }
-    );
-
-    LLVM_DEBUG({
-        llvm::dbgs() << "Max entry splits:\n";
-        for (int i = 0; i < dense_splits.size(); ++i) {
-            llvm::dbgs() << dense_splits[i].size << " " << dense_splits[i].stride << "\n";
+    Slice slice("gather");
+    if (sliceGather) {
+        const int sliceSize = values.dim(-1);
+        // The S tables of rows of one element, table s starting at element s
+        values.fuse(2).insertDim(0, {sliceSize, 1}).reshapeDim(-1, {-1, 1});
+        // Fuse the slice dims of the output and make them the tables: [S, index dims...]
+        int sliceDims = 0;
+        for (int64_t size = 1; size < sliceSize;) {
+            size *= output.dim(-1 - sliceDims++);
         }
-        llvm::dbgs() << "Max entries:" << max_entries << "\n";
-    });
+        if (elementCount(output.shape()) != int64_t(sliceSize) * indicesCount ||
+            output.denseDims() < sliceDims) {
+            return op.emitError("Gather output slices must be dense");
+        }
+        output.fuse(sliceDims).moveDim(-1, 0).reshapeDim(-1, {-1, 1, 1});
+        // Each index as a list of one, with the shape of the index dims of the output
+        indices.reshapeDim(0, output.dims(1, -1));
 
-    auto ctx = rewriter.getContext();
-
-    auto slice_cfg_attr = torq_hw::SliceCFGAttr::get(
-        ctx, {ALUOp0Mode::DBYP, ALUOp0Mode::DBYP, ALUOp0Mode::DBYP, ALUOp0Mode::DBYP},
-        {ALUOp1Mode::BOR, ALUOp1Mode::BOR, ALUOp1Mode::BOR, ALUOp1Mode::BOR},
-        0xf,                                 // alu_d_unsigned
-        0,                                   // alu_w_unsigned
-        ACTMode::ACT,                        // act_mode
-        {0, 0, 0, 0},                        // act left shift
-        0,                                   // shift_factor
-        std::numeric_limits<int32_t>::min(), // output_min
-        std::numeric_limits<int32_t>::max(), // output_max
-        0,                                   // act_zero_point
-        0,                                   // no_p_clear
-        0,                                   // no_p_output
-        0, 0, 0, 0,                          // Kernel
-        0, 0, 0, 0,                          // Pad
-        0,                                   // pad_value
-        1,                                   // stride
-        0                                    // stride_offset
-
-    );
-
-    // Rank-2 sliced gathers fold the per-index slice into the REF loop, so each
-    // REF iteration covers `group_size * max_entries` work units. Rank-1,
-    // rank-3, and axis-last rank-2 gathers rely on the DEDR/DEQW indices-dim
-    // loop and only advance `group_size` per REF iteration.
-    const int refSize = rank2SlicedGather ? static_cast<int>(group_size * max_entries)
-                                          : static_cast<int>(group_size);
-
-    Ndls ndls;
-    ndls.add(NdlType::REF, {{DimType::H, MemDimTag::X, refSize}});
-
-    ndls.add(
-        NdlType::DEDR,
-        {{DimType::L, MemDimTag::X, entry_size, 1},
-         {DimType::L, MemDimTag::G, group_size, 0},
-         {DimType::H, MemDimTag::X, 1, 0},
-         {DimType::H, MemDimTag::X, max_entries, 0},
-         {DimType::H, MemDimTag::O, channelCount, channelStride}
-
-        },
-        0, // offset
-        0, // set-id
-        0, // sync_mode: consumer agent
-        1  // sync_nhd: number of HDIM
-    );
-
-    MemNdlDimsData dedr_dims = {
-        {DimType::L, MemDimTag::X, idx_size * group_size, 1},
-        {DimType::H, MemDimTag::X, 1, idx_size * group_size}
-    };
-
-    int num_splits = dense_splits.size();
-    for (int i = 0; i < num_splits; ++i) {
-        auto s = dense_splits[i];
-        dedr_dims.push_back({DimType::H, MemDimTag::X, s.size, s.stride * idx_size});
+        For(auto t = slice.iterate(values.dim(0))) {
+            For(auto n = slice.iterate(output.dims(1, -2))) {
+                copyIndexedRows(slice, values[t], indices[n], output[t][n], 1);
+            }
+        }
     }
-    dedr_dims.push_back({DimType::H, MemDimTag::O, channelCount, 0});
+    else {
+        // A rank-1 lookup is a single table, and a rank-2 one has the unit batch of its output
+        if (valuesRank == 1 || unitBatchLookup) {
+            values.insertDim(0, {1});
+        }
+        if (valuesRank == 1) {
+            output.insertDim(0, {1});
+        }
+        // Look up to 4 indices at a time
+        const int groupSize = indicesCount % 4 == 0 ? 4 : indicesCount % 2 == 0 ? 2 : 1;
+        indices.reshapeDim(0, {-1, groupSize});
+        // Tables of rows of one element. The rows dimension of the values is only used to compute
+        // the address of the indexed rows.
+        values.reshapeDim(-1, {-1, 1});
+        output.reshapeDim(-1, {-1, groupSize, 1});
 
-    ndls.add(
-        NdlType::DEDR, dedr_dims,
-        0,   // offset
-        1,   // set-id
-        'P', // sync_mode: producer agent
-        1    // sync_nhd: number of HDIM
-    );
-
-    MemNdlDimsData deqw_dims = {
-        {DimType::L, MemDimTag::B, 1, 1},
-        {DimType::L, MemDimTag::D, entry_size, 1},
-        {DimType::H, MemDimTag::X, group_size, entry_size},
-    };
-
-    for (int i = 0; i < num_splits; ++i) {
-        auto s = dense_splits[i];
-        deqw_dims.push_back({DimType::H, MemDimTag::X, s.size, s.stride * outputSliceStride});
+        For(auto t = slice.iterate(output.dims(0, -3))) {
+            For(auto g = slice.iterate(indices.dim(0))) {
+                copyIndexedRows(slice, values[t], indices[g], output[t][g], groupSize);
+            }
+        }
     }
-    deqw_dims.push_back({DimType::H, MemDimTag::O, channelCount, outChannelStride});
-    ndls.add(NdlType::DEQW, deqw_dims);
 
-    ndls.add(
-        NdlType::CEDW, {{DimType::L, RegDimTag::B, 1, 1},
-                        {DimType::L, RegDimTag::D, HwInfo::iram_seg_width / group_size, 1},
-                        {DimType::L, RegDimTag::G, 1, HwInfo::iram_seg_width / group_size},
-                        {DimType::H, RegDimTag::S, 1, 1},
-                        {DimType::H, RegDimTag::M, 1, 0},
-                        {DimType::H, RegDimTag::W, 1, HwInfo::iram_width},
-                        {DimType::H, RegDimTag::N, 1, 0},
-                        {DimType::H, RegDimTag::T, max_entries * channelCount, HwInfo::iram_width}}
-    );
-
-    ndls.add(
-        NdlType::CEDR, {{DimType::L, RegDimTag::B, 1, 1},
-                        {DimType::L, RegDimTag::D, alu_width, 1},
-                        {DimType::L, RegDimTag::G, max_input, HwInfo::iram_seg_width / group_size},
-                        {DimType::H, RegDimTag::S, 1, 1},
-                        {DimType::H, RegDimTag::M, 1, 0},
-                        {DimType::H, RegDimTag::W, 1, HwInfo::iram_width},
-                        {DimType::H, RegDimTag::N, 1, 0},
-                        {DimType::H, RegDimTag::T, max_entries * channelCount, HwInfo::iram_width}}
-    );
-
-    ndls.add(
-        NdlType::CEPR, {{DimType::L, RegDimTag::B, HwInfo::pdat_width, 1},
-                        {DimType::L, RegDimTag::D, 64, HwInfo::pdat_width},
-                        {DimType::H, RegDimTag::S, 1, HwInfo::pdat_width * 64},
-                        {DimType::H, RegDimTag::M, 1, 0},
-                        {DimType::H, RegDimTag::W, 1, HwInfo::pram_width},
-                        {DimType::H, RegDimTag::N, 1, 0},
-                        {DimType::H, RegDimTag::T, max_entries * channelCount,
-                         HwInfo::pram_width * HwInfo::pram_depth}}
-    );
-
-    ndls.add(
-        NdlType::ACPR, {{DimType::L, RegDimTag::B, HwInfo::pdat_width, 1},
-                        {DimType::L, RegDimTag::D, HwInfo::act_width, HwInfo::pdat_width},
-                        {DimType::H, RegDimTag::S, group_size, HwInfo::pdat_width * alu_width},
-                        {DimType::H, RegDimTag::M, 1, 0},
-                        {DimType::H, RegDimTag::W, 1, HwInfo::pram_width},
-                        {DimType::H, RegDimTag::N, 1, 0},
-                        {DimType::H, RegDimTag::T, max_entries * channelCount,
-                         HwInfo::pram_width * HwInfo::pram_depth}}
-    );
-
-    rewriter.replaceOpWithNewOp<torq_hw::SliceTaskOp>(
-        op,       // Operation to replace
-        "gather", // Task name
-        op.getValues(), ValueRange{}, ValueRange{}, op.getInit(), op.getIndices(), ValueRange{},
-        ValueRange{},
-        slice_cfg_attr, // Slice configuration
-        ndls            // NDLs
-    );
+    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
     return success();
 }
 

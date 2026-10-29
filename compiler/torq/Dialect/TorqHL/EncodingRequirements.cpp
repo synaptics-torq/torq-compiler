@@ -495,9 +495,32 @@ KernelEncoding ArgMaxOp::getKernelEncoding() { return getDenseEncoding(); }
 
 KernelEncoding FillOp::getKernelEncoding() { return getDenseEncoding(); }
 
-KernelEncoding ScatterOp::getKernelEncoding() { return getDenseEncoding(); }
+// The indices of a gather or a scatter are fused, so they must be dense
+static KernelInputEncoding getDenseIndicesEncoding(OpOperand &indices) {
+    KernelTensorEncoding encoding;
+    encoding.denseInnerDims = cast<ShapedType>(indices.get().getType()).getRank();
+    return {indices.getOperandNumber(), encoding};
+}
 
-KernelEncoding GatherOp::getKernelEncoding() { return getDenseEncoding(); }
+KernelEncoding ScatterOp::getKernelEncoding() {
+    // The tables are the last dim of the output
+    KernelEncoding encoding;
+    encoding.inputEncodings.push_back(getDenseIndicesEncoding(getIndicesMutable()));
+    encoding.outputEncoding.denseInnerDims = 1;
+    return encoding;
+}
+
+KernelEncoding GatherOp::getKernelEncoding() {
+    // The tables are the last dim of the values, or the two dims of rank-2 values [R, S] in slice
+    // gathers, whose output is fused on the slice dims
+    KernelEncoding encoding;
+    KernelTensorEncoding valuesEncoding;
+    valuesEncoding.denseInnerDims = 2;
+    encoding.inputEncodings.push_back({getValuesMutable().getOperandNumber(), valuesEncoding});
+    encoding.inputEncodings.push_back(getDenseIndicesEncoding(getIndicesMutable()));
+    encoding.outputEncoding.denseInnerDims = 2;
+    return encoding;
+}
 
 KernelEncoding Im2ColOp::getKernelEncoding() { return getDenseEncoding(); }
 

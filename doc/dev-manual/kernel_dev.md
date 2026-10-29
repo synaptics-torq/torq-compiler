@@ -941,6 +941,39 @@ nearest, so a plain shift must set `RoundingMode::OFF`. See `ElementWiseShiftPat
 complete kernel, including non-dense tensors and how the inputs are rounded up to whole vectors.
 
 
+#### Indexed loads and stores (gather and scatter)
+
+The addresses of a load or a store can come from a tensor of indices in LRAM (int8, int16 or
+int32):
+
+- `iram.loadIndexed(table, indices)` loads the rows of `table` selected by up to `gather()`
+  indices.
+- `slice.storeIndexed(table, indices, res)` writes `res` to the row of `table` selected by one
+  index.
+
+`table` is indexed down to its rows (its last two dimensions), which must be dense and
+consecutive: index *i* selects row *i* from the start of the indexed sub-tensor. It must be
+integer: bit-cast a float table to the integer type of the same size.
+
+`loadIndexed()` returns one IData row per index, each row padded with junk to the size of an IData
+row. The gather kernel reads them one by one from the partials:
+
+```{code} C++
+// values: {tables..., rows, 1}, indices: {groups, groupSize}
+IData idata = slice.iram.loadIndexed(values[t], indices[g]);
+PData pdata = slice.alu.accumulate(idata, torq_hw::ALUOp1Mode::BOR); // all the partials
+pdata.setShape({{groupSize, idata.dim(-1)}, {1, 1}});                // one row per index
+For(auto r = slice.iterate(groupSize)) {
+    QData res = slice.act.clamp(pdata[r], minVal(DType::int32), maxVal(DType::int32));
+    slice.store(output[t][g][r], res);
+}
+```
+
+`storeIndexed()` needs a `bram.load()` at the same loop level: the scatter kernel loads an
+identity bias/scale and uses `act.rescaleClamp()`. See `GatherPattern.cpp` and
+`ScatterPattern.cpp`.
+
+
 #### Writing output results
 
 The Slice class provides two methods for writing results to the output tensor:

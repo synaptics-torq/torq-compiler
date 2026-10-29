@@ -594,6 +594,13 @@ class IRam : public SliceRam {
     // Load the IRAM with (input) data.
     IData load(const LData &data);
 
+    // Load the rows of a table selected by indices (gather).
+    // table: {rows, row elements}, dense, integer; index i selects row i.
+    // indices: 1, 2 or 4 integer indices, >= 0.
+    // A row can be up to 64 bytes / number of indices.
+    // return: one IData row per index, padded to the same size.
+    IData loadIndexed(const LData &table, const LData &indices);
+
     // Load the IRAM with generalized (input) data.
     // Support has limitations and is only applicable in specific scenarios:
     // - for stacked data with different strides the stacked dimension can only be used inside
@@ -872,6 +879,13 @@ class Slice {
     //    The case n == 1 is only supported for item size <= 2
     //  - an array of shape [{n,1},{2,s}] (even-odd split mode) only supported for item size <= 2
     void store(const LData &output, const QData &data);
+
+    // Store data to the row of a table selected by an index (scatter).
+    // table: as for IRam::loadIndexed().
+    // indices: 1 integer index, >= 0.
+    // data: one row.
+    // Needs a BRam::load() at the same loop level.
+    void storeIndexed(const LData &table, const LData &indices, const QData &data);
 
     // Store a value to LRAM
     // output must represent a scalar or a subtensor with up to act::width() items
