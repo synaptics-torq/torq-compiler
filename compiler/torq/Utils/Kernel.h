@@ -706,8 +706,12 @@ class Alu : SliceComponent {
     // N can be any value up to act.width(iType)
     // idata: input tensor data in iram
     // acc: accumulate operation (accumulate with ALUOp1Mode::BOR is equivalent to load()
+    // With AMAX (AMIN), the result is the index of the iteration of the accumulation loop that
+    // gave the largest (smallest) value, the first one if several are equal. Up to 32768
+    // iterations.
     // return: pram data of shape {ceil(N/act::width), act::width}:pType
-    // where pType is int32 for integer input, iType for float input
+    // where pType is int32 for integer input or comparisons (GT, GE, EQ, AMAX, AMIN),
+    // iType for float input
     // if N < act::width the result will be {1, N}:pType
     PData accumulate(const IData &idata, torq_hw::ALUOp1Mode acc = torq_hw::ALUOp1Mode::ACC);
 

@@ -2538,8 +2538,11 @@ PData SlicePrivate::aluPData(int blockSize, DType dataType, bool isMulAcc) {
     return pdata;
 }
 
+// Comparison and arg-max/min operations: their partials are int32 with the result in the upper
+// 16 bits (for AMAX/AMIN, the index of the accumulation step that gave the max/min)
 static bool isCompareMode(torq_hw::ALUOp1Mode mode) {
-    return mode == ALUOp1Mode::EQ || mode == ALUOp1Mode::GT || mode == ALUOp1Mode::GE;
+    return mode == ALUOp1Mode::EQ || mode == ALUOp1Mode::GT || mode == ALUOp1Mode::GE ||
+           mode == ALUOp1Mode::AMAX || mode == ALUOp1Mode::AMIN;
 }
 
 PData SlicePrivate::aluAccumulate(const IData &idata, torq_hw::ALUOp1Mode acc, bool transpose) {

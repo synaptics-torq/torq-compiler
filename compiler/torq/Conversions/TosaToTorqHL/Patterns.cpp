@@ -85,6 +85,12 @@ struct ArgMaxOpConversion : public OpConversionPattern<tosa::ArgMaxOp> {
         Value inputVal = adaptor.getInput();
         int64_t axisVal = srcOp.getAxis();
 
+        // The NPU computes indices up to 32767 (see Alu::accumulate() with AMAX)
+        auto inputType = cast<ShapedType>(inputVal.getType());
+        if (!inputType.hasStaticShape() || inputType.getDimSize(axisVal) > 32768) {
+            return rewriter.notifyMatchFailure(srcOp, "ArgMax axis too long for the NPU");
+        }
+
         // Only do transpose trick if argmax on axis=2 on an [N, C, H] layout
         // so we can perform argmax on axis=1 in [N, H, C].
         bool transposeInput = (axisVal == 2);

@@ -491,7 +491,7 @@ KernelEncoding IdentityOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding ElementWiseBinaryOp::getKernelEncoding() { return getNoEncoding(); }
 
-KernelEncoding ArgMaxOp::getKernelEncoding() { return getDenseEncoding(); }
+KernelEncoding ArgMaxOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding FillOp::getKernelEncoding() { return getDenseEncoding(); }
 
