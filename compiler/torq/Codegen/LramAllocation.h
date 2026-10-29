@@ -13,12 +13,9 @@
 
 namespace mlir::syna::torq {
 
-// The bytes the swaps of `funcOp`'s allocation move, counting each swap-out and each
-// swap-in, or nullopt when the allocation fails. The trial does not change `funcOp`.
-std::optional<int64_t> lramSwapBytes(FunctionOpInterface funcOp);
-
-// True when the LRAM planner places `funcOp` within `usableBytes` without any swap.
-// `funcOp` must already contain the deallocations that define the buffer lifetimes.
-bool lramPlacementFitsWithoutSwaps(FunctionOpInterface funcOp, int64_t usableBytes);
+// The bytes the swaps of `funcOp`'s LRAM plan transfer, or nullopt when no placement
+// exists. Plans as the real pipeline does, within `poolSize` (the whole LRAM when 0),
+// without changing `funcOp`, which must already contain its deallocations.
+std::optional<int64_t> lramSwapBytes(FunctionOpInterface funcOp, int64_t poolSize = 0);
 
 } // namespace mlir::syna::torq

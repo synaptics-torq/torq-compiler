@@ -947,29 +947,6 @@ static std::optional<Placement> planPlacement(
     return std::nullopt;
 }
 
-// The bytes `swap` moves: its buffer's when convertVirtualToPhysicalMemRefs emits the store
-// or load, else none.
-static int64_t transferredBytes(const Swap &swap) {
-    if (!swap.transfers)
-        return 0;
-    return getEncodedTotalSizeBytes(swap.buffer.getType());
-}
-
-// Bytes of the buffers that `swaps`, scheduled at one op, swap out and back in there,
-// counted once per buffer. A buffer whose contents were dropped comes back without a
-// load, so it moved nothing.
-static int64_t bytesSwappedOutAndIn(ArrayRef<Swap> swaps) {
-    llvm::DenseSet<Value> swappedOut;
-    int64_t bytes = 0;
-    for (const Swap &swap : swaps) {
-        if (swap.kind == Swap::Kind::Out)
-            swappedOut.insert(swap.buffer);
-        else if (swappedOut.contains(swap.buffer))
-            bytes += transferredBytes(swap);
-    }
-    return bytes;
-}
-
 // True if a torq_hl.load fills `buffer`: it holds a copy of data in XRAM.
 static bool isLoadedBuffer(Value buffer) {
     return llvm::any_of(buffer.getUsers(), [&](Operation *user) {
@@ -989,22 +966,40 @@ static int64_t bytesSpilledComputed(ArrayRef<Swap> swaps) {
     for (const Swap &swap : swaps) {
         if (swap.kind == Swap::Kind::Out && !swappedIn.contains(swap.buffer) &&
             !isLoadedBuffer(swap.buffer))
-            bytes += getEncodedTotalSizeBytes(cast<MemRefType>(swap.buffer.getType()));
+            bytes += getEncodedTotalSizeBytes(swap.buffer.getType());
     }
     return bytes;
 }
 
-// Bytes that `schedule` stores to XRAM only to load them straight back, at the same
-// op. A spill reloads its buffer at a later op; with `countSpills`, the computed buffers
-// it spills count too.
-static int64_t relocatedBytes(const SwapSchedule &schedule, bool countSpills) {
-    int64_t bytes = 0;
-    for (const auto &opSwaps : schedule) {
-        bytes += bytesSwappedOutAndIn(opSwaps.second);
-        if (countSpills)
-            bytes += bytesSpilledComputed(opSwaps.second);
+// The bytes the swaps of a schedule transfer.
+struct SwapTraffic {
+    int64_t transferred = 0;
+    // the part of `transferred` by buffers swapped out and back in at one op, counted once
+    // per buffer: they store to XRAM only to load straight back, where a spill reloads at
+    // a later op
+    int64_t relocated = 0;
+    // the bytes of the computed buffers the schedule spills, which a tile-fit probe marked
+    // kTileFitProbeCountSpillsAttr avoids like relocations
+    int64_t spilledComputed = 0;
+};
+
+static SwapTraffic swapTraffic(const SwapSchedule &schedule) {
+    SwapTraffic traffic;
+    for (const auto &[opIdx, swaps] : schedule) {
+        llvm::SmallDenseSet<Value> swappedOut;
+        for (const Swap &swap : swaps) {
+            int64_t bytes = swap.transfers ? getEncodedTotalSizeBytes(swap.buffer.getType()) : 0;
+            traffic.transferred += bytes;
+            if (swap.kind == Swap::Kind::Out) {
+                swappedOut.insert(swap.buffer);
+            }
+            else if (swappedOut.contains(swap.buffer)) {
+                traffic.relocated += bytes;
+            }
+        }
+        traffic.spilledComputed += bytesSpilledComputed(swaps);
     }
-    return bytes;
+    return traffic;
 }
 
 // The tile-fit probe mark of the module of `funcOp`: null outside a probe, true in a
@@ -1014,11 +1009,28 @@ static BoolAttr getTileFitProbeAttr(FunctionOpInterface funcOp) {
     return moduleOp ? moduleOp->getAttrOfType<BoolAttr>(kTileFitProbeAttr) : BoolAttr();
 }
 
-bool lramPlacementFitsWithoutSwaps(FunctionOpInterface funcOp, int64_t usableBytes) {
-    SmallVector<LramBuffer> buffers = collectLramBuffers(funcOp);
-    std::optional<Placement> placement =
-        planPlacement(buffers, usableBytes, /*replan=*/true, &funcOp.getFunctionBody().front());
-    return placement && placement->schedule.empty();
+// LRAM begins with two NSS program slots: one for the running program, one for the next,
+// which the running one loads.
+constexpr int64_t kReservedLramBytes = HwInfo::nss_max_program_size * 2;
+
+// The LRAM a plan places into, out of a pool of `poolSize` (the whole LRAM when 0): past
+// the program slots.
+static int64_t usableLramBytes(int64_t poolSize) {
+    if (poolSize <= 0) {
+        poolSize = TorqHw::get().getLramSize();
+    }
+    return poolSize - kReservedLramBytes;
+}
+
+std::optional<int64_t> lramSwapBytes(FunctionOpInterface funcOp, int64_t poolSize) {
+    std::optional<Placement> placement = planPlacement(
+        collectLramBuffers(funcOp), usableLramBytes(poolSize), /*replan=*/true,
+        &funcOp.getFunctionBody().front()
+    );
+    if (!placement) {
+        return std::nullopt;
+    }
+    return swapTraffic(placement->schedule).transferred;
 }
 
 // Lay out every LRAM allocation over its whole lifetime; when that does not fit, schedule
@@ -1032,13 +1044,8 @@ static LogicalResult allocateLramAddresses(
     FunctionOpInterface funcOp, bool replan, bool allowRelocation,
     PlacementFailure &placementFailure, int64_t lramSize = 0
 ) {
-
-    // we reserve space for two NSS programs at the begininng of LRAM
-    // (one block for the currently executing program and one for the
-    // next program to be executed that will be loaded by the current one)
-    int64_t reservedBase = HwInfo::nss_max_program_size * 2;
-    int64_t poolSize = lramSize > 0 ? lramSize : static_cast<int64_t>(TorqHw::get().getLramSize());
-    const int64_t usable = poolSize - reservedBase;
+    const int64_t reservedBase = kReservedLramBytes;
+    const int64_t usable = usableLramBytes(lramSize);
 
     SmallVector<LramBuffer> buffers = collectLramBuffers(funcOp);
     std::optional<Placement> placement = planPlacement(
@@ -1050,9 +1057,10 @@ static LogicalResult allocateLramAddresses(
     if (placement->schedule.empty()) {
         return commitLramLayout(funcOp, reservedBase, buffers, placement->birthOffsets);
     }
+    SwapTraffic traffic = swapTraffic(placement->schedule);
     auto moduleOp = funcOp->getParentOfType<ModuleOp>();
     bool countSpills = moduleOp && moduleOp->hasAttr(kTileFitProbeCountSpillsAttr);
-    if (int64_t bytes = relocatedBytes(placement->schedule, countSpills)) {
+    if (int64_t bytes = traffic.relocated + (countSpills ? traffic.spilledComputed : 0)) {
         if (!allowRelocation) {
             LLVM_DEBUG(llvm::dbgs() << "LRAM plan relocates buffers, rejected\n");
             return failure();
@@ -1442,8 +1450,7 @@ static void narrowReadOnlyWeightLoads(FunctionOpInterface funcOp) {
     // already streams its subviews, and splitting it into per-use loads only adds
     // concurrent loads. Only narrow roots that could be resident (so keeping them
     // whole is the waste we remove).
-    int64_t budget =
-        static_cast<int64_t>(TorqHw::get().getLramSize()) - HwInfo::nss_max_program_size * 2;
+    int64_t budget = usableLramBytes(0);
 
     SmallVector<memref::AllocOp> roots;
     funcOp->walk([&](memref::AllocOp alloc) { roots.push_back(alloc); });
@@ -1652,32 +1659,13 @@ static void revertSharedReadOnlyReuses(FunctionOpInterface funcOp) {
 // the clone carries every nested program region, which took hours on whole-net
 // single-dispatch functions for a bit the plan already computes.
 static bool lramAllocationSucceeds(FunctionOpInterface funcOp) {
-    const int64_t usable = TorqHw::get().getLramSize() - HwInfo::nss_max_program_size * 2;
     // without re-planning, so recovery applies whenever the plain plan fails and
     // re-planning handles what the recovered IR still cannot place
-    std::optional<Placement> placement = planPlacement(
-        collectLramBuffers(funcOp), usable, /*replan=*/false, &funcOp.getFunctionBody().front()
-    );
-    return placement.has_value();
-}
-
-std::optional<int64_t> lramSwapBytes(FunctionOpInterface funcOp) {
-    const int64_t usable = TorqHw::get().getLramSize() - HwInfo::nss_max_program_size * 2;
-    // plain (replan=false) plan, as in lramAllocationSucceeds: the estimate stands
-    // in for what the real pass will do, so it must use the same plan mode
-    std::optional<Placement> placement = planPlacement(
-        collectLramBuffers(funcOp), usable, /*replan=*/false, &funcOp.getFunctionBody().front()
-    );
-    if (!placement)
-        return std::nullopt;
-    int64_t bytes = 0;
-    for (const auto &[opIdx, swaps] : placement->schedule) {
-        // a transferring entry is one DMA, so a relocation counts its buffer out and back in
-        for (const Swap &swap : swaps) {
-            bytes += transferredBytes(swap);
-        }
-    }
-    return bytes;
+    return planPlacement(
+               collectLramBuffers(funcOp), usableLramBytes(0), /*replan=*/false,
+               &funcOp.getFunctionBody().front()
+    )
+        .has_value();
 }
 
 namespace {

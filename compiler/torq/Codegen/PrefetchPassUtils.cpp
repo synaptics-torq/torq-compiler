@@ -96,36 +96,9 @@ bool isPureProducer(Operation *op) {
         torq_hl::MapBindingOp, torq_hl::CreateInvocationOp, torq_hl::ProgramOp>(op);
 }
 
-/// Peak simultaneous LRAM bytes, deallocs already in place. Mirrors
-/// checkPeakMemoryUsage: sum live allocations, no contiguity, no extra alignment.
-static int64_t peakLramBytes(FunctionOpInterface funcOp) {
-    int64_t current = 0, peak = 0;
-    for (Operation &op : funcOp.getFunctionBody().front()) {
-        if (auto allocOp = dyn_cast<memref::AllocOp>(&op)) {
-            int64_t bytes = isLramAlloc(allocOp) ? lramAllocBytes(allocOp) : 0;
-            if (bytes <= 0) {
-                continue;
-            }
-            current += bytes;
-            peak = std::max(peak, current);
-        }
-        else if (auto deallocOp = dyn_cast<memref::DeallocOp>(&op)) {
-            memref::AllocOp base = getBaseAlloc(deallocOp.getMemref());
-            int64_t bytes = (base && isLramAlloc(base)) ? lramAllocBytes(base) : 0;
-            if (bytes > 0) {
-                current -= bytes;
-            }
-        }
-    }
-    return peak;
-}
-
 /// Cheap whole-order probe: clone, run AddDeallocation, then ask the global LRAM planner
-/// whether this order fits without inserted swaps. Orders needing swaps proceed to the
+/// whether this order fits without swap traffic. Orders with swap traffic proceed to the
 /// real allocation measurement below, where their cost is compared against the baseline.
-///
-///  - capacity: peak live bytes within the usable size. AssignAddressesPass treats
-///    going over as a compile error.
 bool orderPlacesInLram(FunctionOpInterface funcOp, int64_t poolSize) {
     Operation *clonedOp = funcOp->clone();
     auto clone = cast<FunctionOpInterface>(clonedOp);
@@ -135,17 +108,13 @@ bool orderPlacesInLram(FunctionOpInterface funcOp, int64_t poolSize) {
 
     bool fits = false;
     if (succeeded(pm.run(clone))) {
-        int reservedBytes = HwInfo::nss_max_program_size * 2;
-        int64_t usable = (poolSize / 8) * 8 - reservedBytes;
-        int64_t peak = peakLramBytes(clone);
-        bool withinCapacity = peak <= usable;
-        bool placeable = withinCapacity && lramPlacementFitsWithoutSwaps(clone, usable);
-        fits = withinCapacity && placeable;
+        std::optional<int64_t> swapBytes = lramSwapBytes(clone, poolSize);
+        fits = swapBytes == 0;
         LLVM_DEBUG(
-            llvm::dbgs() << "[prefetch] peak " << peak << "/" << usable << " B -> "
-                         << (!withinCapacity ? "OVER CAPACITY"
-                             : placeable     ? "fits"
-                                             : "needs swaps")
+            llvm::dbgs() << "[prefetch] order "
+                         << (!swapBytes ? "does not place"
+                             : fits     ? "fits"
+                                        : "needs swaps")
                          << "\n"
         );
     }

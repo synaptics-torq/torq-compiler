@@ -744,8 +744,9 @@ void addNssLramAllocationPasses(OpPassManager &funcPm, bool isRealPipeline, int6
         }
     }
 
-    // assign addresses to all allocations; the probe gets no re-planning for the same
-    // reason it gets no recovery
+    // assign addresses to all allocations. The probe plans without re-planning, so the
+    // tile it picks never depends on a forced compaction; the real pass re-plans for
+    // what the passes after the probe change.
     funcPm.addPass(createAssignLramAddressesPass(/*replan=*/isRealPipeline, lramSize));
 }
 

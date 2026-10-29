@@ -176,9 +176,10 @@ namespace {
 // after it. A load moves in front of the nearest earlier wait, or further back (at
 // most kMaxDepth waits) to one where the NSS idles long enough to hide all of it.
 // The idle time comes from the DMA and slice cycle estimates. A load moves only
-// while the LRAM that its earlier alloc keeps live fits. The real allocator checks
-// the result, and a tighter budget is tried when it fails or swaps more bytes than
-// before. Added only to the real pipeline, so the tile-fit probe does not count on it.
+// while the LRAM that its earlier alloc keeps live fits. The LRAM planner checks
+// the result, and a tighter budget is tried when it does not place or swaps more
+// bytes than before. Added only to the real pipeline, so the tile-fit probe does
+// not count on it.
 class PrefetchConstantLoadsPass
     : public impl::PrefetchConstantLoadsBase<PrefetchConstantLoadsPass> {
   public:
