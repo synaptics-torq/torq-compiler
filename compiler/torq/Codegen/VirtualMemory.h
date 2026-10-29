@@ -10,12 +10,15 @@
 namespace mlir::syna::torq {
 
 // One buffer convertVirtualToPhysicalMemRefs swaps out to the swapMemSpace (XRAM for
-// LRAM), or back in at `offset`.
+// LRAM), or back in at `offset`. The contents are transferred only when `transfers`: a
+// swap-out stores them if they are still read and the swap copy does not hold them, and a
+// swap-in loads them if they are still read.
 struct Swap {
     enum class Kind { Out, In };
     Kind kind;
     Value buffer;
     int64_t offset = -1;
+    bool transfers = true;
 };
 
 // The swaps to perform just before the op at each index into the function's op list, in

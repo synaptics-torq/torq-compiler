@@ -88,8 +88,8 @@ class VirtualObject {
 class VirtualBuffer : public VirtualObject {
     const int64_t size_;
 
-    // Copy of the contents in the swap space, kept across a swap-in and freed when the
-    // buffer is written: while it exists it is up to date, so a swap-out skips the store.
+    // The copy of the contents in the swap space, allocated by the first storing swap-out
+    // and kept until the buffer dies; the plan says which swaps move the contents.
     Value swappedOutValue_;
 
     // The load that filled the whole buffer from data the function no longer writes, reset
@@ -106,24 +106,13 @@ class VirtualBuffer : public VirtualObject {
 
     int64_t size() const { return size_; }
 
-    // Free the retained swap copy; called before the contents change.
-    void freeSwappedOutValue(IRRewriter &rewriter, Location loc) {
-        assert(!isSwappedOut() && "the swap copy holds the only contents");
-        sourceLoad_ = nullptr;
-        if (!swappedOutValue_) {
-            return;
-        }
-        memref::DeallocOp::create(rewriter, loc, swappedOutValue_);
-        swappedOutValue_ = nullptr;
-    }
-
     // Record that `loadOp` just filled the whole buffer from data the function no longer
-    // writes.
+    // writes, or null when the buffer is written.
     void setSourceLoad(torq_hl::LoadOp loadOp) { sourceLoad_ = loadOp; }
 
-    void swapIn(IRRewriter &rewriter, Location loc, int64_t address);
+    void swapIn(IRRewriter &rewriter, Location loc, const Swap &swap);
 
-    void swapOut(IRRewriter &rewriter, Location loc);
+    void swapOut(IRRewriter &rewriter, Location loc, const Swap &swap);
 
     // Rewrite the buffer's dealloc to whatever storage is left, or erase it.
     void deallocate(memref::DeallocOp deallocOp, IRRewriter &rewriter);
@@ -199,8 +188,6 @@ void VirtualObject::invalidateAliases() {
 struct SwapStatistics {
     int swapOuts = 0;
     int storesSkipped = 0;
-    int dropped = 0;
-    int64_t droppedBytes = 0;
     int loadsSkipped = 0;
     int64_t storedBytes = 0;
     int64_t loadedBytes = 0;
@@ -216,12 +203,6 @@ class VirtualMemory {
     const torq_hl::MemorySpace swapMemSpace;
     const int64_t addressBase;
     SwapStatistics stats;
-
-    // ordered (op index, contents fully overwritten) accesses per buffer
-    DenseMap<Value, SmallVector<std::pair<unsigned, bool>>> bufferAccessSchedule;
-
-    // index (into the processed op list) of the op being processed
-    unsigned currentOpIndex = 0;
 
     VirtualMemory(int64_t capacity, torq_hl::MemorySpace memorySpace, int64_t addressBase)
         : capacity(capacity), memorySpace(memorySpace),
@@ -268,40 +249,19 @@ class VirtualMemory {
         }
         return bytes;
     }
-
-    // Whether the buffer's current contents are dead: no access at or after the op being
-    // processed observes them, because the next one overwrites them whole or none remains.
-    bool contentsDead(Value rootValue) const {
-        auto it = bufferAccessSchedule.find(rootValue);
-        if (it == bufferAccessSchedule.end()) {
-            return true;
-        }
-        const auto *access = llvm::lower_bound(
-            it->second, currentOpIndex,
-            [](const std::pair<unsigned, bool> &access, unsigned opIndex) {
-                return access.first < opIndex;
-            }
-        );
-        return access == it->second.end() || access->second;
-    }
 };
 
-void VirtualBuffer::swapIn(IRRewriter &rewriter, Location loc, int64_t address) {
+void VirtualBuffer::swapIn(IRRewriter &rewriter, Location loc, const Swap &swap) {
     assert(isSwappedOut() && "the buffer is resident");
 
     auto physicalAlloc =
         memref::AllocOp::create(rewriter, loc, cast<MemRefType>(value().getType()));
-    if (failed(setAddress(physicalAlloc.getOperation(), address))) {
+    if (failed(setAddress(physicalAlloc.getOperation(), vm().addressBase + swap.offset))) {
         llvm::report_fatal_error("LRAM plan: a swapped-in buffer cannot carry an address");
     }
 
-    if (swappedOutValue_) {
-        // overwriting the alignment bytes of the new buffer as well
-        torq_hl::LoadOp::create(
-            rewriter, loc, physicalAlloc, swappedOutValue_, SmallVector<int64_t>{},
-            SmallVector<int64_t>{}, getEncodedTotalSizeBytes(physicalAlloc.getType()), true
-        );
-        vm().stats.loadedBytes += size();
+    if (!swap.transfers) {
+        vm().stats.loadsSkipped++;
     }
     else if (sourceLoad_) {
         // load the data again from where the buffer was filled
@@ -310,8 +270,15 @@ void VirtualBuffer::swapIn(IRRewriter &rewriter, Location loc, int64_t address) 
         vm().stats.loadedBytes += size();
     }
     else {
-        // the contents were dropped at swap-out: nothing to load
-        vm().stats.loadsSkipped++;
+        if (!swappedOutValue_) {
+            llvm::report_fatal_error("LRAM plan: a swap-in loads contents never stored");
+        }
+        // overwriting the alignment bytes of the new buffer as well
+        torq_hl::LoadOp::create(
+            rewriter, loc, physicalAlloc, swappedOutValue_, SmallVector<int64_t>{},
+            SmallVector<int64_t>{}, getEncodedTotalSizeBytes(physicalAlloc.getType()), true
+        );
+        vm().stats.loadedBytes += size();
     }
 
     setPhysical(physicalAlloc);
@@ -323,7 +290,7 @@ void VirtualBuffer::swapIn(IRRewriter &rewriter, Location loc, int64_t address) 
     });
 }
 
-void VirtualBuffer::swapOut(IRRewriter &rewriter, Location loc) {
+void VirtualBuffer::swapOut(IRRewriter &rewriter, Location loc, const Swap &swap) {
     assert(!isSwappedOut() && "the buffer is swapped out");
     assert(!isPinned() && "the buffer is pinned");
 
@@ -332,35 +299,27 @@ void VirtualBuffer::swapOut(IRRewriter &rewriter, Location loc) {
         value().dump();
     });
 
-    if (vm().contentsDead(value())) {
-        // nothing observes the contents: drop them, and the swap-in loads nothing
-        freeSwappedOutValue(rewriter, loc);
-        vm().stats.dropped++;
-        vm().stats.droppedBytes += size();
-    }
-    else if (swappedOutValue_) {
-        // the swap copy is still up to date
-        vm().stats.storesSkipped++;
-    }
-    else if (sourceLoad_) {
-        // the data the buffer was loaded from is still there: the swap-in loads it again
-        vm().stats.storesSkipped++;
-    }
-    else {
-        // otherwise create the swap copy (an existing one is still up to date and kept as is)
-        auto physicalType = cast<MemRefType>(value().getType());
-        auto swappedOutType = createMemRefTypeWithEncoding(
-            physicalType,
-            cloneEncodingWithNewMemorySpace(getEncoding(physicalType), vm().swapMemSpace)
-        );
-        swappedOutValue_ = memref::AllocOp::create(rewriter, loc, swappedOutType);
-
+    // with a source load, the data is still where the buffer was loaded from: the swap-in
+    // loads it again
+    if (swap.transfers && !sourceLoad_) {
+        if (!swappedOutValue_) {
+            auto physicalType = cast<MemRefType>(value().getType());
+            auto swappedOutType = createMemRefTypeWithEncoding(
+                physicalType,
+                cloneEncodingWithNewMemorySpace(getEncoding(physicalType), vm().swapMemSpace)
+            );
+            swappedOutValue_ = memref::AllocOp::create(rewriter, loc, swappedOutType);
+        }
         // overwriting the alignment bytes of the swap copy as well
         torq_hl::StoreOp::create(
             rewriter, loc, swappedOutValue_, physical(), SmallVector<int64_t>{},
-            SmallVector<int64_t>{}, getEncodedTotalSizeBytes(swappedOutType), true
+            SmallVector<int64_t>{},
+            getEncodedTotalSizeBytes(cast<MemRefType>(swappedOutValue_.getType())), true
         );
         vm().stats.storedBytes += size();
+    }
+    else {
+        vm().stats.storesSkipped++;
     }
 
     invalidateAliases();
@@ -376,7 +335,9 @@ void VirtualBuffer::deallocate(memref::DeallocOp deallocOp, IRRewriter &rewriter
         target = swappedOutValue_;
     }
     else {
-        freeSwappedOutValue(rewriter, deallocOp.getLoc());
+        if (swappedOutValue_) {
+            memref::DeallocOp::create(rewriter, deallocOp.getLoc(), swappedOutValue_);
+        }
         target = physical();
     }
     swappedOutValue_ = nullptr;
@@ -387,24 +348,6 @@ void VirtualBuffer::deallocate(memref::DeallocOp deallocOp, IRRewriter &rewriter
     }
     else {
         rewriter.eraseOp(deallocOp);
-    }
-}
-
-// Precompute, for every allocation in `memorySpace`, the ordered list of the
-// function's accesses to it, so eviction can ask whether any remaining access
-// observes a buffer's current contents.
-static void buildBufferAccessSchedule(
-    ArrayRef<Operation *> ops, torq_hl::MemorySpace memorySpace,
-    DenseMap<Value, SmallVector<std::pair<unsigned, bool>>> &schedule
-) {
-    for (auto [index, op] : llvm::enumerate(ops)) {
-        if (isa<memref::DeallocOp>(op) || isDerivedMemRefOperation(op)) {
-            continue;
-        }
-
-        for (const auto &[root, access] : collectRootAccesses(op, memorySpace)) {
-            schedule[root].emplace_back(index, access == torq_hl::ArgAccessBitfield::Write);
-        }
     }
 }
 
@@ -560,10 +503,10 @@ static void performScheduledSwaps(
     rewriter.setInsertionPoint(op);
     for (const Swap &swap : swaps) {
         if (swap.kind == Swap::Kind::Out) {
-            vm.buffer(swap.buffer).swapOut(rewriter, op->getLoc());
+            vm.buffer(swap.buffer).swapOut(rewriter, op->getLoc(), swap);
         }
         else {
-            vm.buffer(swap.buffer).swapIn(rewriter, op->getLoc(), vm.addressBase + swap.offset);
+            vm.buffer(swap.buffer).swapIn(rewriter, op->getLoc(), swap);
         }
     }
 }
@@ -575,11 +518,8 @@ static void printStatistics(const SwapStatistics &stats) {
         return;
     }
     llvm::dbgs() << "Total swap outs: " << stats.swapOuts << "\n";
-    llvm::dbgs() << "Total swap-out stores skipped (clean buffers): " << stats.storesSkipped
-                 << "\n";
-    llvm::dbgs() << "Swap outs dropped (contents dead): " << stats.dropped << " ("
-                 << stats.droppedBytes << " bytes)\n";
-    llvm::dbgs() << "Swap-in loads skipped (dropped contents): " << stats.loadsSkipped << "\n";
+    llvm::dbgs() << "Swap-out stores skipped: " << stats.storesSkipped << "\n";
+    llvm::dbgs() << "Swap-in loads skipped: " << stats.loadsSkipped << "\n";
     llvm::dbgs() << "Swap-out bytes stored: " << stats.storedBytes << "\n";
     llvm::dbgs() << "Swap-in bytes loaded: " << stats.loadedBytes << "\n";
 }
@@ -600,9 +540,6 @@ LogicalResult convertVirtualToPhysicalMemRefs(
         ops.push_back(&op);
     }
 
-    // Future accesses determine whether an evicted buffer must be copied to swap memory.
-    buildBufferAccessSchedule(ops, memorySpace, vm.bufferAccessSchedule);
-
     // The last op that writes each buffer, by view base: a buffer loaded from one that is not
     // written afterwards can be loaded again instead of stored.
     DenseMap<Value, unsigned> lastSourceWrite;
@@ -616,9 +553,6 @@ LogicalResult convertVirtualToPhysicalMemRefs(
     // Keep StartProgramOp operands pinned until the corresponding WaitProgramOp.
     llvm::MapVector<Value, SmallVector<Value>> invocationToVirtual;
     for (auto [opIndex, op] : llvm::enumerate(ops)) {
-        // the scheduled swap-outs judge the deadness of a buffer's contents relative to this op
-        vm.currentOpIndex = opIndex;
-
         if (auto it = schedule.find((int)opIndex); it != schedule.end()) {
             performScheduledSwaps(op, it->second, vm, rewriter);
         }
@@ -645,10 +579,10 @@ LogicalResult convertVirtualToPhysicalMemRefs(
         SmallVector<Value> pinnedOperands =
             rewriteOperandsToPhysicalMemory(memoryInfo.operands, vm);
 
-        // A write makes any retained swap-space copy stale.
+        // A write makes the source of a loaded buffer stale.
         for (const torq_hl::AsyncAccess &access : memoryInfo.accesses) {
             if (bitEnumContainsAny(access.access, torq_hl::ArgAccessBitfield::Write)) {
-                vm.object(access.buffer).root().freeSwappedOutValue(rewriter, op->getLoc());
+                vm.object(access.buffer).root().setSourceLoad(nullptr);
             }
         }
         if (sourceLoad)

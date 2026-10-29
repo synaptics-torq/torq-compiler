@@ -246,8 +246,7 @@ class ResidentRanges {
 struct LramBuffer {
     // its alloc receives the address
     Value value;
-    // byte size, rounded up to a multiple of 8
-    int64_t size = 0;
+    int64_t bytes = 0;
     // lifetime [birth, death): the alloc's op and its dealloc's, or the op count
     // if it is never freed
     OpIdx birth = 0;
@@ -255,6 +254,32 @@ struct LramBuffer {
     // every op that has the buffer as an operand, and every [start_program, wait_program+1)
     // of an async program that accesses it
     ResidentRanges resident;
+    // ascending by op; an access through a view is an access of the buffer
+    struct Access {
+        OpIdx opIdx;
+        torq_hl::ArgAccessBitfield access;
+    };
+    SmallVector<Access> accesses;
+
+    // addresses are 8-byte aligned
+    int64_t alignedSize() const { return align_ceil((uint32_t)bytes, 8u); }
+
+    // Live contents: something reads them before the next whole overwrite.
+    bool contentsLiveAt(OpIdx opIdx) const {
+        const auto *next = llvm::partition_point(accesses, [&](const Access &access) {
+            return access.opIdx < opIdx;
+        });
+        return next != accesses.end() &&
+               bitEnumContainsAny(next->access, torq_hl::ArgAccessBitfield::Read);
+    }
+
+    // over [from, to)
+    bool writtenBetween(OpIdx from, OpIdx to) const {
+        return llvm::any_of(accesses, [&](const Access &access) {
+            return from <= access.opIdx && access.opIdx < to &&
+                   bitEnumContainsAny(access.access, torq_hl::ArgAccessBitfield::Write);
+        });
+    }
 };
 
 } // namespace
@@ -275,10 +300,11 @@ static SmallVector<LramBuffer> collectLramBuffers(FunctionOpInterface funcOp) {
             }
             LramBuffer buffer{
                 .value = alloc.getResult(),
-                .size = align_ceil((uint32_t)getEncodedTotalSizeBytes(alloc.getType()), 8u),
+                .bytes = getEncodedTotalSizeBytes(alloc.getType()),
                 .birth = (OpIdx)opIdx,
                 .death = opCount,
                 .resident = {},
+                .accesses = {},
             };
             allocToBuffer.insert({buffer.value, std::move(buffer)});
         }
@@ -289,6 +315,16 @@ static SmallVector<LramBuffer> collectLramBuffers(FunctionOpInterface funcOp) {
             }
         }
         else if (!isDerivedMemRefOperation(&op)) {
+            for (const auto &[root, access] :
+                 collectRootAccesses(&op, torq_hl::MemorySpace::Lram)) {
+                // Every LRAM memref is a body memref.alloc or a view of one: bindings
+                // and constants live in XRAM, the LRAM program slots are globals created
+                // after this pass, and views keep their source's memory space (a cross-space
+                // memory_space_cast is rejected when addresses are set).
+                auto it = allocToBuffer.find(root);
+                assert(it != allocToBuffer.end() && "LRAM root is not a body allocation");
+                it->second.accesses.push_back({(OpIdx)opIdx, access});
+            }
             // a view op does not force residency; the op that consumes the view does
             for (Value operand : op.getOperands()) {
                 if (!isa<MemRefType>(operand.getType())) {
@@ -359,7 +395,7 @@ class Occupancy {
 
     // Make `idx` resident; when no free range fits it, changes nothing and returns false.
     bool place(BufferIdx idx) {
-        int64_t offset = space_.allocate(buffers_[idx].size);
+        int64_t offset = space_.allocate(buffers_[idx].alignedSize());
         if (offset < 0) {
             return false;
         }
@@ -368,14 +404,14 @@ class Occupancy {
         if (birthOffsets_[idx] < 0) {
             birthOffsets_[idx] = offset;
         }
-        bytes_ += buffers_[idx].size;
+        bytes_ += buffers_[idx].alignedSize();
         return true;
     }
 
     void release(BufferIdx idx) {
-        space_.release(offsets_[idx], buffers_[idx].size);
+        space_.release(offsets_[idx], buffers_[idx].alignedSize());
         resident_.reset(idx);
-        bytes_ -= buffers_[idx].size;
+        bytes_ -= buffers_[idx].alignedSize();
     }
 
     SmallVector<int64_t> takeBirthOffsets() { return std::move(birthOffsets_); }
@@ -434,9 +470,11 @@ class PlacementSimulation {
     Occupancy occupancy_;
     SwapSchedule schedule_;
     PlacementFailure failure_;
+    // per buffer, the op of its last store, at which the swap copy matched its contents
+    SmallVector<std::optional<OpIdx>> copiedAt_;
 
     PlacementSimulation(ArrayRef<LramBuffer> buffers, int64_t usable, ArrayRef<Operation *> ops)
-        : buffers_(buffers), ops_(ops), occupancy_(buffers, usable) {
+        : buffers_(buffers), ops_(ops), occupancy_(buffers, usable), copiedAt_(buffers.size()) {
         for (auto [i, buffer] : llvm::enumerate(buffers_)) {
             events_.push({buffer.birth, EventKind::Birth, (BufferIdx)i});
             events_.push({buffer.death, EventKind::Death, (BufferIdx)i});
@@ -489,11 +527,18 @@ class PlacementSimulation {
 
 void PlacementSimulation::swapOut(BufferIdx idx, OpIdx opIdx) {
     occupancy_.release(idx);
-    schedule_[opIdx].push_back({Swap::Kind::Out, buffers_[idx].value});
+    const LramBuffer &buffer = buffers_[idx];
+    bool held = copiedAt_[idx] && !buffer.writtenBetween(*copiedAt_[idx], opIdx);
+    bool store = buffer.contentsLiveAt(opIdx) && !held;
+    if (store) {
+        copiedAt_[idx] = opIdx;
+    }
+    schedule_[opIdx].push_back({Swap::Kind::Out, buffer.value, -1, store});
 }
 
 void PlacementSimulation::scheduleSwapIn(BufferIdx idx, OpIdx opIdx) {
-    schedule_[opIdx].push_back({Swap::Kind::In, buffers_[idx].value, occupancy_.offset(idx)});
+    bool load = buffers_[idx].contentsLiveAt(opIdx);
+    schedule_[opIdx].push_back({Swap::Kind::In, buffers_[idx].value, occupancy_.offset(idx), load});
 }
 
 void PlacementSimulation::scheduleReload(BufferIdx idx, OpIdx opIdx) {
@@ -524,8 +569,8 @@ bool PlacementSimulation::compact(OpIdx opIdx, OpIdx pinnedFirstAt) {
         if (aFirst != bFirst) {
             return aFirst;
         }
-        if (buffers_[a].size != buffers_[b].size) {
-            return buffers_[a].size > buffers_[b].size;
+        if (buffers_[a].alignedSize() != buffers_[b].alignedSize()) {
+            return buffers_[a].alignedSize() > buffers_[b].alignedSize();
         }
         return a < b;
     });
@@ -550,7 +595,7 @@ void PlacementSimulation::recordFailure(BufferIdx idx, OpIdx opIdx, PlacementFai
     auto residents = occupancy_.residents();
     failure_.pinned.assign(residents.begin(), residents.end());
     failure_.op = opIdx >= 0 && opIdx < (OpIdx)ops_.size() ? ops_[opIdx] : nullptr;
-    failure_.bytes = buffers_[idx].size;
+    failure_.bytes = buffers_[idx].alignedSize();
     failure_.residentBytes = occupancy_.bytes();
     failure_.usableBytes = occupancy_.usable();
     LLVM_DEBUG({
@@ -569,13 +614,14 @@ void PlacementSimulation::recordFailure(BufferIdx idx, OpIdx opIdx, PlacementFai
             opDesc = " (op " + op->getName().getStringRef().str() + " at " + loc + ")";
         }
         llvm::dbgs() << "LRAM plan infeasible (" << failure_.causeName() << ") at op " << opIdx
-                     << opDesc << ": cannot place buffer " << idx << " (" << buffers_[idx].size
-                     << " bytes, " << buffers_[idx].value << "), resident " << occupancy_.bytes()
-                     << " of " << occupancy_.usable() << " bytes\n";
+                     << opDesc << ": cannot place buffer " << idx << " ("
+                     << buffers_[idx].alignedSize() << " bytes, " << buffers_[idx].value
+                     << "), resident " << occupancy_.bytes() << " of " << occupancy_.usable()
+                     << " bytes\n";
         for (BufferIdx pinned : residents) {
-            llvm::dbgs() << "  pinned buffer " << pinned << " size " << buffers_[pinned].size
-                         << " offset " << occupancy_.offset(pinned) << " ("
-                         << buffers_[pinned].value << ")\n";
+            llvm::dbgs() << "  pinned buffer " << pinned << " size "
+                         << buffers_[pinned].alignedSize() << " offset "
+                         << occupancy_.offset(pinned) << " (" << buffers_[pinned].value << ")\n";
         }
     });
 }
@@ -607,7 +653,7 @@ bool PlacementSimulation::spillVictim(BufferIdx idx, OpIdx opIdx, PlacementFailu
 }
 
 bool PlacementSimulation::place(BufferIdx idx, OpIdx opIdx) {
-    while (occupancy_.bytes() + buffers_[idx].size > occupancy_.usable()) {
+    while (occupancy_.bytes() + buffers_[idx].alignedSize() > occupancy_.usable()) {
         if (!spillVictim(idx, opIdx, PlacementFailure::Cause::BytePressure)) {
             return false;
         }
@@ -644,8 +690,8 @@ bool PlacementSimulation::sweep(ArrayRef<ForcedCompaction> forcedCompactions) {
             if (!place(event.buffer, event.opIdx)) {
                 return false;
             }
-            // the swap-outs place() scheduled at this op come first, so the walk frees the
-            // space before it reloads into it
+            // the swap-outs place() scheduled at this op come first, so
+            // convertVirtualToPhysicalMemRefs frees the space before it reloads into it
             if (event.kind == EventKind::Reload) {
                 scheduleSwapIn(event.buffer, event.opIdx);
             }
@@ -741,8 +787,8 @@ static std::optional<OpIdx> lastMovablePosition(
 ) {
     SmallVector<BufferIdx> obstacles(failure.pinned);
     llvm::sort(obstacles, [&](BufferIdx a, BufferIdx b) {
-        if (buffers[a].size != buffers[b].size) {
-            return buffers[a].size > buffers[b].size;
+        if (buffers[a].alignedSize() != buffers[b].alignedSize()) {
+            return buffers[a].alignedSize() > buffers[b].alignedSize();
         }
         return a < b;
     });
@@ -809,7 +855,17 @@ static std::optional<Placement> planPlacement(
     return std::nullopt;
 }
 
-// Bytes of the buffers that `swaps`, scheduled at one op, swap out and back in there.
+// The bytes `swap` moves: its buffer's when convertVirtualToPhysicalMemRefs emits the store
+// or load, else none.
+static int64_t transferredBytes(const Swap &swap) {
+    if (!swap.transfers)
+        return 0;
+    return getEncodedTotalSizeBytes(cast<MemRefType>(swap.buffer.getType()));
+}
+
+// Bytes of the buffers that `swaps`, scheduled at one op, swap out and back in there,
+// counted once per buffer. A buffer whose contents were dropped comes back without a
+// load, so it moved nothing.
 static int64_t bytesSwappedOutAndIn(ArrayRef<Swap> swaps) {
     llvm::DenseSet<Value> swappedOut;
     int64_t bytes = 0;
@@ -817,7 +873,7 @@ static int64_t bytesSwappedOutAndIn(ArrayRef<Swap> swaps) {
         if (swap.kind == Swap::Kind::Out)
             swappedOut.insert(swap.buffer);
         else if (swappedOut.contains(swap.buffer))
-            bytes += getEncodedTotalSizeBytes(cast<MemRefType>(swap.buffer.getType()));
+            bytes += transferredBytes(swap);
     }
     return bytes;
 }
@@ -1523,9 +1579,9 @@ std::optional<int64_t> lramSwapBytes(FunctionOpInterface funcOp) {
         return std::nullopt;
     int64_t bytes = 0;
     for (const auto &[opIdx, swaps] : placement->schedule) {
-        // one entry is one DMA, so a relocation counts its buffer out and back in
+        // a transferring entry is one DMA, so a relocation counts its buffer out and back in
         for (const Swap &swap : swaps) {
-            bytes += getEncodedTotalSizeBytes(cast<MemRefType>(swap.buffer.getType()));
+            bytes += transferredBytes(swap);
         }
     }
     return bytes;
