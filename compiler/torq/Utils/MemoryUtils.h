@@ -7,8 +7,6 @@
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHW/TorqHWOps.h"
 
-#include "llvm/ADT/MapVector.h"
-
 #include <optional>
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -63,15 +61,17 @@ OpOperand &getDerivedMemRefBase(Operation *op);
 // ViewLikeOpInterface ops (if any) in the reverse use-def chain.
 Value getViewBase(Value value);
 
-// The buffer accesses `op` may perform, normalized to AsyncAccess.
-SmallVector<torq_hl::AsyncAccess> collectBufferAccesses(Operation *op);
+// The buffer accesses `op` may perform in `memorySpace` (every space when nullopt),
+// normalized to AsyncAccess.
+SmallVector<torq_hl::AsyncAccess>
+getBufferAccesses(Operation *op, std::optional<torq_hl::MemorySpace> memorySpace);
 
 // How `op` accesses each root allocation in `memorySpace` (every space when nullopt), over
 // all of its accesses that resolve to it. An access through a view leaves the rest of the
 // root intact, so it counts as a read of the root as well; a root accessed as plain Write
 // is overwritten whole.
-llvm::MapVector<Value, torq_hl::ArgAccessBitfield>
-collectRootAccesses(Operation *op, std::optional<torq_hl::MemorySpace> memorySpace);
+SmallVector<torq_hl::AsyncAccess>
+getRootAccesses(Operation *op, std::optional<torq_hl::MemorySpace> memorySpace);
 
 // Returns the alignment possible with the bytes based on the type
 int getAlignmentByType(int bytes, mlir::Type type);

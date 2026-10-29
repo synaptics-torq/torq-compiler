@@ -245,7 +245,7 @@ class ResidentRanges {
 // One LRAM buffer to place.
 struct LramBuffer {
     // its alloc receives the address
-    Value value;
+    TypedValue<MemRefType> value;
     int64_t bytes = 0;
     // lifetime [birth, death): the alloc's op and its dealloc's, or the op count
     // if it is never freed
@@ -342,9 +342,8 @@ static SmallVector<LramBuffer> collectLramBuffers(FunctionOpInterface funcOp) {
             }
         }
         else if (!isDerivedMemRefOperation(&op)) {
-            for (const auto &[root, access] : collectRootAccesses(&op, std::nullopt)) {
-                if (getEncodingMemorySpace(cast<MemRefType>(root.getType())) !=
-                    torq_hl::MemorySpace::Lram) {
+            for (const auto &[access, root] : getRootAccesses(&op, std::nullopt)) {
+                if (getEncodingMemorySpace(root.getType()) != torq_hl::MemorySpace::Lram) {
                     if (bitEnumContainsAny(access, torq_hl::ArgAccessBitfield::Write)) {
                         lastSourceWrite[root] = (OpIdx)opIdx;
                     }
@@ -953,7 +952,7 @@ static std::optional<Placement> planPlacement(
 static int64_t transferredBytes(const Swap &swap) {
     if (!swap.transfers)
         return 0;
-    return getEncodedTotalSizeBytes(cast<MemRefType>(swap.buffer.getType()));
+    return getEncodedTotalSizeBytes(swap.buffer.getType());
 }
 
 // Bytes of the buffers that `swaps`, scheduled at one op, swap out and back in there,

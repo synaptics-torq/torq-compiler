@@ -346,11 +346,7 @@ collectOperationMemoryInfo(Operation *op, torq_hl::MemorySpace memorySpace) {
         }
     }
 
-    for (auto &access : collectBufferAccesses(op)) {
-        if (getEncodingMemorySpace(access.buffer.getType()) == memorySpace) {
-            info.accesses.push_back(access);
-        }
-    }
+    info.accesses = getBufferAccesses(op, memorySpace);
 
     for (auto result : op->getResults()) {
         auto type = dyn_cast<MemRefType>(result.getType());

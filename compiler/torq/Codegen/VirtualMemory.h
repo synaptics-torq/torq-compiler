@@ -17,7 +17,7 @@ namespace mlir::syna::torq {
 struct Swap {
     enum class Kind { Out, In };
     Kind kind;
-    Value buffer;
+    TypedValue<MemRefType> buffer;
     int64_t offset = -1;
     bool transfers = true;
     torq_hl::LoadOp fill;

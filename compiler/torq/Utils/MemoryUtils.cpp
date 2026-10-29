@@ -13,6 +13,8 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
+#include "llvm/ADT/DenseMap.h"
+
 namespace mlir::syna {
 
 int64_t getElementSizeBytes(ShapedType shapedType) {
@@ -383,11 +385,19 @@ void copyAddressAttributes(Operation *srcOp, Operation *dstOp) {
     }
 }
 
-SmallVector<torq_hl::AsyncAccess> collectBufferAccesses(Operation *op) {
+SmallVector<torq_hl::AsyncAccess>
+getBufferAccesses(Operation *op, std::optional<torq_hl::MemorySpace> memorySpace) {
+    auto inMemorySpace = [](Value buffer, std::optional<torq_hl::MemorySpace> memorySpace) {
+        auto space = getEncodingMemorySpace(cast<MemRefType>(buffer.getType()));
+        return space == memorySpace.value_or(space);
+    };
     SmallVector<torq_hl::AsyncAccess> accesses;
 
     if (auto asyncAccessOp = dyn_cast<torq_hl::AsyncAccessOpInterface>(op)) {
         asyncAccessOp.getAsyncAccesses(accesses);
+        llvm::erase_if(accesses, [&](const torq_hl::AsyncAccess &access) {
+            return !inMemorySpace(access.buffer, memorySpace);
+        });
         return accesses;
     }
 
@@ -405,7 +415,8 @@ SmallVector<torq_hl::AsyncAccess> collectBufferAccesses(Operation *op) {
             SetVector<Value> accessedValues;
             for (auto &effect : effects) {
                 Value value = effect.getValue();
-                if (value && isa<MemRefType>(value.getType())) {
+                if (value && isa<MemRefType>(value.getType()) &&
+                    inMemorySpace(value, memorySpace)) {
                     accessedValues.insert(value);
                 }
             }
@@ -421,7 +432,7 @@ SmallVector<torq_hl::AsyncAccess> collectBufferAccesses(Operation *op) {
 
     // no usable effect information: assume the op may read and write any operand
     for (auto operand : op->getOperands()) {
-        if (isa<MemRefType>(operand.getType())) {
+        if (isa<MemRefType>(operand.getType()) && inMemorySpace(operand, memorySpace)) {
             accesses.push_back(
                 {torq_hl::ArgAccessBitfield::Read | torq_hl::ArgAccessBitfield::Write,
                  cast<TypedValue<MemRefType>>(operand)}
@@ -431,22 +442,24 @@ SmallVector<torq_hl::AsyncAccess> collectBufferAccesses(Operation *op) {
     return accesses;
 }
 
-llvm::MapVector<Value, torq_hl::ArgAccessBitfield>
-collectRootAccesses(Operation *op, std::optional<torq_hl::MemorySpace> memorySpace) {
-    llvm::MapVector<Value, torq_hl::ArgAccessBitfield> rootAccesses;
-    for (auto &access : collectBufferAccesses(op)) {
-        auto space = getEncodingMemorySpace(access.buffer.getType());
-        if (space != memorySpace.value_or(space)) {
-            continue;
-        }
-        Value root = getViewBase(access.buffer);
+SmallVector<torq_hl::AsyncAccess>
+getRootAccesses(Operation *op, std::optional<torq_hl::MemorySpace> memorySpace) {
+    SmallVector<torq_hl::AsyncAccess> rootAccesses;
+    llvm::SmallDenseMap<Value, unsigned> indexOfRoot;
+    for (auto &access : getBufferAccesses(op, memorySpace)) {
+        // every view op that yields a memref takes a memref source, so the root is a memref
+        auto root = cast<TypedValue<MemRefType>>(getViewBase(access.buffer));
         auto rootAccess = access.access;
         if (access.buffer != root) {
             rootAccess = rootAccess | torq_hl::ArgAccessBitfield::Read;
         }
-        auto [it, inserted] = rootAccesses.try_emplace(root, rootAccess);
-        if (!inserted) {
-            it->second = it->second | rootAccess;
+        auto [it, inserted] = indexOfRoot.try_emplace(root, rootAccesses.size());
+        if (inserted) {
+            rootAccesses.push_back({rootAccess, root});
+        }
+        else {
+            auto &known = rootAccesses[it->second].access;
+            known = known | rootAccess;
         }
     }
     return rootAccesses;
