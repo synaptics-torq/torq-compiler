@@ -97,6 +97,9 @@ EasyKernel allows to express a kernel as a *sequential program* using these inst
 It's important to keep in mind that despite this illusion of sequentiality, during execution
 all the unit in a Slice will actually operate in *parallel*.
 
+For practical advice on writing, measuring and testing kernels, see
+[Kernel Development Details](kernel_dev_details.md).
+
 
 ### Tutorial
 

@@ -7,6 +7,7 @@ compiling_running.md
 design.md
 adding_ops.md
 kernel_dev.md
+kernel_dev_details.md
 add_pass.md
 tile_and_fuse.md
 prefetch_list_scheduler.md
