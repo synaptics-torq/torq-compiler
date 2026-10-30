@@ -412,12 +412,14 @@ void addNssPostAssignLramAddressesPasses(OpPassManager &pm) {
             funcPm.addPass(createPairDmaChannelsPass());
         }
 
+        // measure the actual NSS program sizes and assign their XRAM addresses
+        funcPm.addPass(createAssignNSSProgramsAddressesPass());
+
+        // after the NSS block sizes are measured, so that each code block load is profiled with
+        // the size it really transfers
         if (clEnableTorqProfiling) {
             funcPm.addPass(createProfilingPass());
         }
-
-        // measure the actual NSS program sizes and assign their XRAM addresses
-        funcPm.addPass(createAssignNSSProgramsAddressesPass());
 
         // compile NSS programs
         funcPm.addPass(createCompileNSSInvocationsPass());
