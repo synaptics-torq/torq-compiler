@@ -33,6 +33,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/LogicalResult.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/Threading.h"
 
 #include <algorithm>
@@ -1185,12 +1186,14 @@ static BoolAttr getTileFitProbeAttr(FunctionOpInterface funcOp) {
 constexpr int64_t kReservedLramBytes = HwInfo::nss_max_program_size * 2;
 
 // The LRAM a plan places into, out of a pool of `poolSize` (the whole LRAM when 0): past
-// the program slots.
+// the program slots, rounded down to 8 bytes. A tile-fit probe's reduced budget can give a
+// pool that isn't a multiple of 8, and buffers placed top-down from its end would then get
+// unaligned addresses.
 static int64_t usableLramBytes(int64_t poolSize) {
     if (poolSize <= 0) {
         poolSize = TorqHw::get().getLramSize();
     }
-    return poolSize - kReservedLramBytes;
+    return static_cast<int64_t>(llvm::alignDown(poolSize, 8)) - kReservedLramBytes;
 }
 
 std::optional<int64_t> lramSwapBytes(FunctionOpInterface funcOp, int64_t poolSize) {

@@ -1,3 +1,4 @@
+import re
 import subprocess
 from pathlib import Path
 
@@ -80,8 +81,23 @@ func.func @f() {
 """
 
 
-def assign_lram_addresses(torq_compiler, tmp_path, name, ir):
-    """Run torq-assign-lram-addresses with re-planning on `ir` and return the process."""
+# %big is 8 KB or more, so it is placed top-down, from the end of the usable LRAM.
+LARGE_BUFFER = """
+#lram = #torq_hl<enc mem_space = lram>
+func.func @f() {
+  %src = "torq_hl.map_binding"() <{binding_index = 0 : index, is_read_only = true, is_write_only = false, offset = 0 : index}> : () -> memref<16384xi8>
+  %out = "torq_hl.map_binding"() <{binding_index = 1 : index, is_read_only = false, is_write_only = true, offset = 0 : index}> : () -> memref<16384xi8>
+  %big = memref.alloc() : memref<16384xi8, #lram>
+  torq_hl.load %src : memref<16384xi8> to %big : memref<16384xi8, #lram> {element_size_bytes = 16384 : i64, input_strides_bytes = array<i64>, shape = array<i64>}
+  torq_hl.store %big : memref<16384xi8, #lram> to %out : memref<16384xi8> {element_size_bytes = 16384 : i64, output_strides_bytes = array<i64>, shape = array<i64>}
+  memref.dealloc %big : memref<16384xi8, #lram>
+  return
+}
+"""
+
+
+def assign_lram_addresses(torq_compiler, tmp_path, name, ir, options="replan=true"):
+    """Run torq-assign-lram-addresses with `options` on `ir` and return the process."""
     iree_opt = Path(torq_compiler.file_path).parent / "iree-opt"
     model = tmp_path / f"{name}.mlir"
     model.write_text(ir)
@@ -89,7 +105,7 @@ def assign_lram_addresses(torq_compiler, tmp_path, name, ir):
         str(iree_opt),
         str(model),
         "--torq-hw=SL2610",
-        "--pass-pipeline=builtin.module(func.func(torq-assign-lram-addresses{replan=true}))",
+        f"--pass-pipeline=builtin.module(func.func(torq-assign-lram-addresses{{{options}}}))",
     ]
     print("Running:", " ".join(cmd))
     return subprocess.run(cmd, capture_output=True, text=True)
@@ -122,3 +138,18 @@ def test_deferred_fill_waits_for_its_load(torq_compiler, tmp_path):
     # the fill now runs after both deaths
     second_dealloc = body.index("memref.dealloc", body.index("memref.dealloc") + 1)
     assert body.index(loads[0]) > second_dealloc, body
+
+
+@pytest.mark.ci
+def test_pool_not_a_multiple_of_8_keeps_addresses_aligned(torq_compiler, tmp_path):
+    """A tile-fit probe at a reduced budget can get a pool that is not a multiple of 8:
+    40% of SL2610's LRAM is 209715 bytes. A buffer placed top-down from the end of that
+    pool must still get an 8-byte aligned address."""
+    proc = assign_lram_addresses(
+        torq_compiler, tmp_path, "pool-not-multiple-of-8", LARGE_BUFFER,
+        options="replan=true lram-size=209715",
+    )
+    assert proc.returncode == 0, proc.stderr
+    addresses = [int(a) for a in re.findall(r"lram_address = (\d+)", proc.stdout)]
+    assert addresses, proc.stdout
+    assert all(a % 8 == 0 for a in addresses), addresses
