@@ -356,6 +356,25 @@ def SegmentNSSPrograms :
 
 }
 
+def OverlapNSSCodeLoads :
+    InterfacePass<"torq-overlap-nss-code-loads", "mlir::FunctionOpInterface"> {
+  let summary = "Load NSS program code while the program before it runs";
+  let description = [{
+    Runs after torq-segment-nss-programs. An NSS program block loads the code it runs next (the
+    next block of its program, or the first block of the next program) into the inactive code
+    area. When the block ends by waiting for a program, this moves those loads before that wait,
+    so the DMA runs while the program still runs. Only code loads move: the prefetch passes
+    schedule the data loads, before the code loads exist.
+  }];
+  let constructor =
+      "mlir::syna::torq::createOverlapNSSCodeLoadsPass()";
+
+  let dependentDialects = [
+        "syna::torq_hl::TorqHLDialect"
+    ];
+
+}
+
 def AssignNSSProgramsAddresses :
     InterfacePass<"torq-assign-nss-programs-addresses",
          "mlir::FunctionOpInterface"> {

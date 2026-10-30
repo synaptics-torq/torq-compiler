@@ -109,6 +109,7 @@ createLowerHostCopiesToNpuPass(int64_t lramSize = 0);
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createOutlineNSSProgramsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createSegmentNSSProgramsPass();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createOverlapNSSCodeLoadsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAssignNSSProgramsAddressesPass();
 

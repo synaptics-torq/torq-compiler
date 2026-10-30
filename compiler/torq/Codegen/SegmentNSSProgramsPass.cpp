@@ -99,11 +99,6 @@ static void appendLiveIns(Block *blk, SmallVectorImpl<Value> &liveIns) {
     }
 }
 
-static int64_t getBlockSize(Block *blk) {
-    // FIXME: we should compute the actual size to reduce the amount of data we DMA
-    return HwInfo::nss_max_program_size;
-}
-
 static FailureOr<torq_hl::LoadOp>
 getloadOfNextProgramOp(torq_hl::ProgramOp programOp, Value inactiveLramCodeArea) {
     torq_hl::LoadOp loadNextProgramOp = nullptr;
@@ -234,7 +229,8 @@ LogicalResult processProgramOp(torq_hl::ProgramOp programOp) {
         return failure();
     }
 
-    // Annotate the program with the block sizes and offsets
+    // Annotate the program with the block sizes and offsets. These are upper bounds:
+    // torq-assign-nss-programs-addresses measures the blocks and cuts the code loads to their size.
 
     Builder builder(programOp.getContext());
 

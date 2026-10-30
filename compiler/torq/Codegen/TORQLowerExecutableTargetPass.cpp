@@ -55,6 +55,11 @@ static llvm::cl::opt<bool> clEnableTorqProfiling(
     "torq-enable-profiling", llvm::cl::desc("enable torq profiling"), llvm::cl::init(false)
 );
 
+static llvm::cl::opt<bool> clEnableNssCodeLoadOverlap(
+    "torq-enable-nss-code-load-overlap",
+    llvm::cl::desc("Load NSS program code while the program before it runs"), llvm::cl::init(true)
+);
+
 // Off by default until the hardware gain is confirmed: the compile-time profile counts the overlap
 // as free (it does not model the shared bandwidth), and the prefetch list scheduler plans for one
 // DMA engine that runs loads and stores in turn.
@@ -392,6 +397,11 @@ void addNssPostAssignLramAddressesPasses(OpPassManager &pm) {
 
         // segment the NSS programs in small blocks that fit the NSS block size
         funcPm.addPass(createSegmentNSSProgramsPass());
+
+        // load the next NSS program code while the program before it runs
+        if (clEnableNssCodeLoadOverlap) {
+            funcPm.addPass(createOverlapNSSCodeLoadsPass());
+        }
 
         // annotate all create_invocation/wait_program operations with addresses/values based
         // on the execution flow
