@@ -147,6 +147,11 @@ table StartHostParams {
   // Read|Write. When absent (or sized differently from args) the runtime keeps
   // its original behaviour: read every argument in, write every one back.
   arg_accesses: [ArgAccess];
+  // Per-arg element size in bytes, aligned with args. The innermost stride is
+  // not the element size when the innermost dim is a unit or strided one (e.g.
+  // a column of a partial-sum buffer). When absent (or sized differently from
+  // args) the runtime infers the element size from the innermost stride.
+  element_sizes: [uint32];
 }
 
 // Action to wait for an host program to complete

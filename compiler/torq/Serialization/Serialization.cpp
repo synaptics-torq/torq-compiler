@@ -1021,10 +1021,10 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
                 }
                 auto sizesRef = flatbuffers_uint64_vec_end(_builder);
 
-                // Serialize per-arg strides (bytes), shapes, and ndims from the
-                // BufferAttr memref types which carry the actual XRAM layout
+                // Serialize per-arg strides (bytes), shapes, ndims and element sizes from
+                // the BufferAttr memref types which carry the actual XRAM layout
                 // (including strided subview information).
-                SmallVector<int64_t> allStrides, allShapes, allNdims;
+                SmallVector<int64_t> allStrides, allShapes, allNdims, allElementSizes;
                 for (auto arg : args) {
                     auto argValue = cast<torq_hl::BufferAttr>(arg);
                     auto memrefType = argValue.getMemrefType();
@@ -1032,10 +1032,12 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
                     allStrides.append(stridesBytes);
                     allShapes.append(SmallVector<int64_t>(memrefType.getShape()));
                     allNdims.push_back(memrefType.getRank());
+                    allElementSizes.push_back(getElementSizeBytes(memrefType));
                 }
                 auto stridesRef = createUI32Vector(ArrayRef<int64_t>(allStrides));
                 auto shapesRef = createUI32Vector(ArrayRef<int64_t>(allShapes));
                 auto ndimsRef = createUI32Vector(ArrayRef<int64_t>(allNdims));
+                auto elementSizesRef = createUI32Vector(ArrayRef<int64_t>(allElementSizes));
 
                 // Record how the program uses each argument so the runtime can skip the
                 // copies it does not need. Without access information the vector is left
@@ -1058,7 +1060,7 @@ Serializer::serializeRuntimeProgram(mlir::FunctionOpInterface funcOp) {
 
                 auto startHostParams = iree_hal_torq_StartHostParams_create(
                     _builder, programName, argsRef, sizesRef, stridesRef, shapesRef, ndimsRef,
-                    argAccessesRef
+                    argAccessesRef, elementSizesRef
                 );
 
                 params = iree_hal_torq_HostActionParams_as_StartHostParams(startHostParams);

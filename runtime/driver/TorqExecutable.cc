@@ -1263,35 +1263,47 @@ iree_status_t TorqExecutable::loadHostCode() {
 }
 
 // Compute the dense (contiguous) strides in bytes from shape and element size.
-// The element size is inferred from the innermost XRAM stride.
 static std::vector<uint64_t> computeDenseStridesBytes(
-    const uint32_t* xramStrides, const uint32_t* shape, int ndim) {
+    const uint32_t* shape, int ndim, uint64_t elementSize) {
   std::vector<uint64_t> dense(ndim);
   if (ndim == 0) return dense;
-  dense[ndim - 1] = xramStrides[ndim - 1]; // element size in bytes
+  dense[ndim - 1] = elementSize;
   for (int i = ndim - 2; i >= 0; i--) {
     dense[i] = dense[i + 1] * shape[i + 1];
   }
   return dense;
 }
 
+// Index past the outermost dim whose XRAM stride differs from the dense one:
+// the dims from there on are contiguous and can be copied as a single chunk.
+// The stride of a unit dim is never used, so it never breaks contiguity.
+static int contiguousSplitDim(const uint32_t* xramStrides,
+                              const std::vector<uint64_t>& denseStrides,
+                              const uint32_t* shape, int ndim) {
+  for (int i = ndim - 1; i >= 0; i--) {
+    if (shape[i] != 1 && xramStrides[i] != denseStrides[i]) {
+      return i + 1;
+    }
+  }
+  return 0;
+}
+
 // Check if any XRAM stride differs from the expected dense stride.
 static bool hasNonTrivialStrides(
-    const uint32_t* xramStrides, const uint32_t* shape, int ndim) {
-  auto dense = computeDenseStridesBytes(xramStrides, shape, ndim);
-  for (int i = 0; i < ndim; i++) {
-    if (xramStrides[i] != dense[i]) return true;
-  }
-  return false;
+    const uint32_t* xramStrides, const uint32_t* shape, int ndim,
+    uint64_t elementSize) {
+  auto dense = computeDenseStridesBytes(shape, ndim, elementSize);
+  return contiguousSplitDim(xramStrides, dense, shape, ndim) != 0;
 }
 
 static uint64_t computeStridedXramSpanBytes(
-    const uint32_t* xramStrides, const uint32_t* shape, int ndim) {
+    const uint32_t* xramStrides, const uint32_t* shape, int ndim,
+    uint64_t elementSize) {
   if (ndim <= 0) {
     return 0;
   }
 
-  uint64_t span = xramStrides[ndim - 1];
+  uint64_t span = elementSize;
   for (int i = 0; i < ndim; ++i) {
     if (shape[i] == 0) {
       return 0;
@@ -1307,22 +1319,13 @@ static uint64_t computeStridedXramSpanBytes(
 static void stridedXramRead(const TorqHw* torq, uint64_t baseAddress,
                             uint8_t* denseBuffer,
                             const uint32_t* xramStrides,
-                            const uint32_t* shape, int ndim) {
-  auto denseStrides = computeDenseStridesBytes(xramStrides, shape, ndim);
-
-  // Find the outermost dimension where xram stride != dense stride.
-  // All dimensions from splitDim onward are contiguous and can be copied as
-  // a single chunk.
-  int splitDim = 0;
-  for (int i = ndim - 1; i >= 0; i--) {
-    if (xramStrides[i] != denseStrides[i]) {
-      splitDim = i + 1;
-      break;
-    }
-  }
+                            const uint32_t* shape, int ndim,
+                            uint64_t elementSize) {
+  auto denseStrides = computeDenseStridesBytes(shape, ndim, elementSize);
+  int splitDim = contiguousSplitDim(xramStrides, denseStrides, shape, ndim);
 
   // Size of each contiguous chunk (product of inner dims * element size)
-  uint64_t chunkSize = xramStrides[ndim - 1]; // element size
+  uint64_t chunkSize = elementSize;
   for (int i = splitDim; i < ndim; i++) {
     chunkSize *= shape[i];
   }
@@ -1357,22 +1360,18 @@ static void stridedXramRead(const TorqHw* torq, uint64_t baseAddress,
 static void stridedXramWrite(TorqHw* torq, uint64_t baseAddress,
                              const uint8_t* denseBuffer,
                              const uint32_t* xramStrides,
-                             const uint32_t* shape, int ndim) {
-  auto denseStrides = computeDenseStridesBytes(xramStrides, shape, ndim);
+                             const uint32_t* shape, int ndim,
+                             uint64_t elementSize) {
+  auto denseStrides = computeDenseStridesBytes(shape, ndim, elementSize);
+  int splitDim = contiguousSplitDim(xramStrides, denseStrides, shape, ndim);
 
-  int splitDim = 0;
-  for (int i = ndim - 1; i >= 0; i--) {
-    if (xramStrides[i] != denseStrides[i]) {
-      splitDim = i + 1;
-      break;
-    }
-  }
-
-  uint64_t chunkSize = xramStrides[ndim - 1];
+  // Size of each contiguous chunk (product of inner dims * element size)
+  uint64_t chunkSize = elementSize;
   for (int i = splitDim; i < ndim; i++) {
     chunkSize *= shape[i];
   }
 
+  // Number of chunks (product of outer dims)
   uint64_t numChunks = 1;
   for (int i = 0; i < splitDim; i++) {
     numChunks *= shape[i];
@@ -1457,6 +1456,17 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
     return access;
   };
 
+  // Read optional per-arg element sizes. Executables built before the field
+  // existed carry none: infer the size from the innermost stride, as before.
+  auto elementSizes_fb = ns(StartHostParams_element_sizes(params));
+  bool hasElementSizes =
+      elementSizes_fb && (int)flatbuffers_uint32_vec_len(elementSizes_fb) == numArgs;
+
+  auto elementSizeAt = [&](int i, const uint32_t* argStrides, int ndim) -> uint64_t {
+    return hasElementSizes ? flatbuffers_uint32_vec_at(elementSizes_fb, i)
+                           : argStrides[ndim - 1];
+  };
+
   // Precompute per-arg offsets into the flattened strides/shapes arrays
   std::vector<int> argStrideOffsets(numArgs, 0);
   std::vector<int> argNdims(numArgs, 0);
@@ -1499,13 +1509,14 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
       if (hasStrideInfo && argNdims[i] > 0) {
         const uint32_t* argStrides = strides_fb + argStrideOffsets[i];
         const uint32_t* argShape = shapes_fb + argStrideOffsets[i];
-        if (hasNonTrivialStrides(argStrides, argShape, argNdims[i])) {
+        uint64_t elementSize = elementSizeAt(i, argStrides, argNdims[i]);
+        if (hasNonTrivialStrides(argStrides, argShape, argNdims[i], elementSize)) {
           strided = true;
           // a strided read only fills the referenced bytes, so the gaps between
           // them must keep looking like the zero-filled buffer they used to be
           memset(xramBuffer, 0, size);
           stridedXramRead(torq_.get(), xramAddress, xramBuffer,
-                          argStrides, argShape, argNdims[i]);
+                          argStrides, argShape, argNdims[i], elementSize);
         }
       }
       if (!strided && !torq_->readXram(xramAddress, size, xramBuffer)) {
@@ -1565,13 +1576,15 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
     if (!readOnly && hasStrideInfo && argNdims[i] > 0) {
       const uint32_t* argStrides = strides_fb + argStrideOffsets[i];
       const uint32_t* argShape = shapes_fb + argStrideOffsets[i];
-      if (hasNonTrivialStrides(argStrides, argShape, argNdims[i])) {
+      uint64_t elementSize = elementSizeAt(i, argStrides, argNdims[i]);
+      if (hasNonTrivialStrides(argStrides, argShape, argNdims[i], elementSize)) {
         strided = true;
-        xramWriteSize = computeStridedXramSpanBytes(argStrides, argShape, argNdims[i]);
+        xramWriteSize =
+            computeStridedXramSpanBytes(argStrides, argShape, argNdims[i], elementSize);
         invalidatePersistentInputCopiesForXramRange(
             static_cast<uint32_t>(xramAddress), xramWriteSize);
         stridedXramWrite(torq_.get(), xramAddress, xramBuffer,
-                         argStrides, argShape, argNdims[i]);
+                         argStrides, argShape, argNdims[i], elementSize);
       }
     }
     if (!readOnly && !strided) {
@@ -1857,7 +1870,8 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
     if (outputType == ns(BufferType_XRAM)) {
       const uint64_t outputSpan =
           rank == 0 ? ns(HostCopyParams_element_size_bytes(params))
-                    : computeStridedXramSpanBytes(outputStridesBytes, shape, rank);
+                    : computeStridedXramSpanBytes(outputStridesBytes, shape, rank,
+                                                  outputStridesBytes[rank - 1]);
       invalidatePersistentInputCopiesForXramRange(outputAddress, outputSpan);
     }
 
