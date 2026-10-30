@@ -13,8 +13,8 @@ see [Updating these pages](#updating-these-pages).
 ### Writing a kernel
 
 The aim of the EasyKernel is that a kernel reads like the computation it implements. Kernels in
-this style are `ElementWiseBinaryPattern.cpp`, `GatherPattern.cpp` and `ScatterPattern.cpp` in
-`compiler/torq/Conversions/TorqHLToTorqHW/`.
+this style are `ElementWiseBinaryPattern.cpp`, `ArgMaxPattern.cpp`, `GatherPattern.cpp` and
+`ScatterPattern.cpp` in `compiler/torq/Conversions/TorqHLToTorqHW/`.
 
 - **Start from the op's operands.** Create each tensor with `LData x(op.getX())` and shape the
   view with the `LData` methods (`fuse()`, `reshapeDim()`, `vectorize()`, `insertDim()`,
@@ -42,6 +42,9 @@ this style are `ElementWiseBinaryPattern.cpp`, `GatherPattern.cpp` and `ScatterP
   kernel needs in the op's `getKernelEncoding()` (`denseInnerDims`), not for a fully dense tensor.
 - **Don't erase unit dimensions** to save loops: a loop of one iteration costs nearly nothing. To
   give two tensors the same dimensions, insert a unit dimension (`insertDim(0, {1})`) instead.
+- **Drop the operands the kernel doesn't read**, and the constants the frontend creates for them:
+  each one costs a DMA. When porting a kernel, check that every operand of the `torq_hl` op is
+  still used; for example the argmax port left a `scale_bias` that was later removed.
 - **Keep slice task names stable** (`Slice slice("gather")`): they appear in profiles and
   dashboards.
 
@@ -71,7 +74,9 @@ breaks the compile.
 
 ### Measuring
 
-- The compile-time profile is deterministic and matches the simulator:
+- The compile-time profile is the cycle estimate of the NSS, DMA and slice operations, made by the
+  compiler. It is deterministic. The simulator gives no timing: the simulation timings in the
+  dashboard are these compile-time estimates. Get the profile with:
 
   ```
   torq-compile in.mlir -o out.vmfb --torq-hw=SL2610 --torq-enable-profiling \
@@ -79,10 +84,20 @@ breaks the compile.
   ```
 
   Add `--torq-disable-host --torq-disable-css` to keep every op on the NPU. Sum the `Slice`
-  events for the kernel time.
+  events for the kernel time. In pytest, `--torq-compile-time-profiling-output-dir=<dir>` keeps
+  the compile-time profile of each test.
+- The CSV values are cycles, although the columns say `us` (synaptics-torq/torq-compiler-dev#2782).
+- For the total time, take the end of the last event (the largest `timestamp + elapsed_time`):
+  DMA transfers and slice programs overlap, so the sum of the events is not a duration.
 - Compare **slice time** for kernel changes. On small tests DMA transfers dominate the total.
+- A change of one NSS operation (for example one DMA more or less) moves the boundaries of the
+  NSS program blocks, so the total can change by more than the operation itself. For example,
+  dropping one DMA made an argmax test 133 cycles slower on SL2610, until the block code loads
+  were moved to overlap the slice programs. The slice time doesn't change in that case.
 - When refactoring a kernel, compile the tests that reach it before and after the change and
   compare the profile CSVs: identical files mean identical slice programs and timings.
+- When many compiles run in parallel, a profile CSV sometimes comes out empty. Compile those tests
+  again one by one rather than counting them as 0.
 - `--debug-only=torq-easy-kernel` prints the tensors each instruction receives, as given and as
   the instruction sees them. Use it to check a view, or which path of a kernel a test takes.
 
