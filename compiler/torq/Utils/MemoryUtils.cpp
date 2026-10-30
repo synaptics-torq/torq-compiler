@@ -69,6 +69,27 @@ bool memRefHasDynamicOffset(MemRefType memRefType) {
     return false;
 }
 
+bool isContiguousRowMajor(MemRefType t) {
+    if (!t.hasStaticShape())
+        return false;
+    if (llvm::is_contained(t.getShape(), 0))
+        return true;
+    SmallVector<int64_t> strides;
+    int64_t offset;
+    if (failed(t.getStridesAndOffset(strides, offset)))
+        return false;
+    int64_t expected = 1;
+    ArrayRef<int64_t> shape = t.getShape();
+    for (int d = (int)shape.size() - 1; d >= 0; --d) {
+        if (shape[d] == 1)
+            continue;
+        if (strides[d] != expected)
+            return false;
+        expected *= shape[d];
+    }
+    return true;
+}
+
 int64_t getMemRefTypeOffsetBytes(MemRefType memRefType) {
     if (auto stridesAttr = mlir::dyn_cast_if_present<StridedLayoutAttr>(memRefType.getLayout())) {
 

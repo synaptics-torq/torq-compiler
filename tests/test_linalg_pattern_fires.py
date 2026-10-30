@@ -342,6 +342,113 @@ def run_optimize_pass_standalone(torq_compiler, tmp_path, module_text, pass_spec
 
 
 @pytest.mark.ci
+@pytest.mark.parametrize("variant", ["sum", "extended", "commuted", "square", "duplicate", "permuted", "nonzero_init", "buffer"])
+def test_generic_reduce_sum_host_routing(torq_compiler, tmp_path, variant):
+    module = """
+func.func @main(%a: tensor<2x3x8xf32>) -> tensor<2x3xf32> {
+  %c = arith.constant 0.0 : f32
+  %e = tensor.empty() : tensor<2x3xf32>
+  %f = linalg.fill ins(%c : f32) outs(%e : tensor<2x3xf32>) -> tensor<2x3xf32>
+  %r = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> (d0, d1)>], iterator_types = ["parallel", "parallel", "reduction"]} ins(%a : tensor<2x3x8xf32>) outs(%f : tensor<2x3xf32>) {
+  ^bb0(%in: f32, %init: f32):
+    %s = arith.addf %in, %init : f32
+    linalg.yield %s : f32
+  } -> tensor<2x3xf32>
+  return %r : tensor<2x3xf32>
+}
+"""
+    if variant == "extended":
+        module = module.replace("2x3x8xf32", "2x3x8xbf16").replace("%in: f32", "%in: bf16")
+        module = module.replace("%s = arith.addf %in", "%x = arith.extf %in : bf16 to f32\n    %s = arith.addf %x")
+    elif variant == "commuted":
+        module = module.replace("arith.addf %in, %init", "arith.addf %init, %in")
+    elif variant == "square":
+        module = module.replace("%s = arith.addf %in", "%x = arith.mulf %in, %in : f32\n    %s = arith.addf %x")
+    elif variant == "duplicate":
+        module = module.replace("arith.addf %in, %init", "arith.addf %in, %in")
+    elif variant == "permuted":
+        module = module.replace("-> (d0, d1)>", "-> (d1, d0)>").replace("2x3xf32", "3x2xf32")
+    elif variant == "nonzero_init":
+        module = module.replace("constant 0.0", "constant 1.0")
+    elif variant == "buffer":
+        module = """
+func.func @main(%a: memref<2x8xf32>, %out: memref<2xf32>) {
+  linalg.generic {indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0)>], iterator_types = ["parallel", "reduction"]} ins(%a : memref<2x8xf32>) outs(%out : memref<2xf32>) {
+  ^bb0(%in: f32, %init: f32):
+    %s = arith.addf %in, %init : f32
+    linalg.yield %s : f32
+  }
+  return
+}
+"""
+    out = run_optimize_pass_standalone(torq_compiler, tmp_path, module, "torq-mark-host-executor")
+    assert "linalg.generic" in out, out
+    if variant == "buffer":
+        return  # Host routing may see buffers; the lowering pass expects tensors.
+    supported = variant in {"sum", "extended", "commuted"}
+    assert ("#torq_hl.executor<host>" not in out) == supported, out
+    # The lowering must use the same structural checks as host routing.
+    out = run_optimize_pass_standalone(torq_compiler, tmp_path, module, "torq-linalg-to-torqhl-conversion")
+    assert ('"torq_hl.reduce"' in out) == supported, out
+
+
+@pytest.mark.ci
+@pytest.mark.parametrize("axis", [0, 1, 2])
+@pytest.mark.parametrize("body_op,identity", [("addf", "0.0"), ("maximumf", "0xFF800000")])
+def test_generic_keepdims_reduction(torq_compiler, tmp_path, axis, body_op, identity):
+    shape = [2, 3, 8]
+    shape[axis] = 1
+    output = "x".join(map(str, shape)) + "xf32"
+    dims = ["d0", "d1", "d2"]
+    dims[axis] = "0"
+    iterators = ["parallel"] * 3
+    iterators[axis] = "reduction"
+    iterator_types = ", ".join(f'"{it}"' for it in iterators)
+    module = f"""
+func.func @main(%a: tensor<2x3x8xf32>) -> tensor<{output}> {{
+  %c = arith.constant {identity} : f32
+  %e = tensor.empty() : tensor<{output}>
+  %f = linalg.fill ins(%c : f32) outs(%e : tensor<{output}>) -> tensor<{output}>
+  %r = linalg.generic {{indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>, affine_map<(d0, d1, d2) -> ({', '.join(dims)})>], iterator_types = [{iterator_types}]}} ins(%a : tensor<2x3x8xf32>) outs(%f : tensor<{output}>) {{
+  ^bb0(%in: f32, %init: f32):
+    %s = arith.{body_op} %in, %init : f32
+    linalg.yield %s : f32
+  }} -> tensor<{output}>
+  return %r : tensor<{output}>
+}}
+"""
+    out = run_optimize_pass_standalone(
+        torq_compiler, tmp_path, module,
+        "torq-optimize-linalg-for-torq,torq-linalg-to-torqhl-conversion",
+    )
+    assert '"torq_hl.reduce"' in out, out
+    assert "linalg.generic" not in out, out
+    assert f"-> tensor<{output}>" in out, out
+
+
+@pytest.mark.ci
+def test_keepdims_reduction_keeps_other_unit_dims(torq_compiler, tmp_path):
+    # Only the constant-zero output axis is dropped: the input and the batch of 1
+    # keep their shape.
+    module = """
+func.func @main(%a: tensor<1x4x7x7xf32>) -> tensor<1x4x7x1xf32> {
+  %c = arith.constant 0.0 : f32
+  %e = tensor.empty() : tensor<1x4x7x1xf32>
+  %f = linalg.fill ins(%c : f32) outs(%e : tensor<1x4x7x1xf32>) -> tensor<1x4x7x1xf32>
+  %r = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>, affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, 0)>], iterator_types = ["parallel", "parallel", "parallel", "reduction"]} ins(%a : tensor<1x4x7x7xf32>) outs(%f : tensor<1x4x7x1xf32>) {
+  ^bb0(%in: f32, %init: f32):
+    %s = arith.addf %in, %init : f32
+    linalg.yield %s : f32
+  } -> tensor<1x4x7x1xf32>
+  return %r : tensor<1x4x7x1xf32>
+}
+"""
+    out = run_optimize_pass_standalone(torq_compiler, tmp_path, module, "torq-optimize-linalg-for-torq")
+    assert "ins(%arg0 : tensor<1x4x7x7xf32>) outs(%collapsed : tensor<1x4x7xf32>)" in out, out
+    assert "tensor.expand_shape" in out and "into tensor<1x4x7x1xf32>" in out, out
+
+
+@pytest.mark.ci
 def test_fold_scalar_matmul_disable_patterns_label(torq_compiler, tmp_path):
     # Default mode (enable): both sub-patterns fire in the standalone pass.
     on = run_optimize_pass_standalone(
@@ -711,3 +818,26 @@ def test_decomposed_tanh_gelu_is_not_fused(torq_compiler, tmp_path, model_args):
     assert count_ops(before, "linalg.generic") >= 8, f"control: no decomposed chain:\n{before}"
     assert count_ops(after, "linalg.generic") > 1 and count_ops(after, "math.tanh") == 1, \
         f"the chain was fused:\n{after}"
+
+@pytest.mark.ci
+@pytest.mark.parametrize("shape", [[1, 2], [1, 8, 1, 207], [1, 8, 207, 207], [8, 300, 300], [8, 400, 400]])
+@pytest.mark.parametrize("convert_dtypes", [False, True])
+def test_softmax_raised_before_keepdims_folding(torq_compiler, tmp_path, shape, convert_dtypes):
+    model = helper.make_model(
+        helper.make_graph(
+            [helper.make_node("Softmax", ["x"], ["y"], axis=-1)],
+            "softmax",
+            [helper.make_tensor_value_info("x", TensorProto.BFLOAT16, shape)],
+            [helper.make_tensor_value_info("y", TensorProto.BFLOAT16, shape)],
+        ),
+        opset_imports=[helper.make_opsetid("", 22)],
+    )
+    flags = ["--torq-disable-host", "--torq-disable-css", "--torq-enable-profiling",
+             "--mlir-print-ir-before=torq-optimize-linalg-for-torq"]
+    if convert_dtypes:
+        flags += ["--torq-convert-dtypes", "--torq-convert-io-dtype"]
+    dump = dump_after(torq_compiler, tmp_path, model, "torq-optimize-linalg-for-torq", *flags)
+    before = "\n".join(ir_dumps(dump, "Before"))
+    after = "\n".join(ir_dumps(dump, "After"))
+    assert "linalg.generic" in before, before
+    assert "linalg.softmax" in after, after

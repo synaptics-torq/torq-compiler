@@ -581,88 +581,6 @@ static std::optional<StringRef> getUnsupportedReduceDimsReason(linalg::ReduceOp 
     return std::nullopt;
 }
 
-bool isTorqReduceSumOp(Operation *op, std::string &failReason) {
-    auto reduceOp = dyn_cast<linalg::ReduceOp>(op);
-    if (!reduceOp) {
-        failReason = "Not a linalg.reduce op";
-        return false;
-    }
-
-    // Only support single input
-    if (reduceOp.getInputs().size() != 1) {
-        failReason = "Reduce sum only supports exactly one input";
-        return false;
-    }
-
-    // Check input element type - bf16, f32, or integers
-    auto inputType = dyn_cast<RankedTensorType>(reduceOp.getInputs()[0].getType());
-    if (!inputType) {
-        failReason = "Input is not a ranked tensor";
-        return false;
-    }
-    auto inputElementType = inputType.getElementType();
-
-    // Support BF16, F32, or integer types.
-    // Both bf16 and f32 inputs are supported by the hardware kernel.
-    if (!inputElementType.isBF16() && !inputElementType.isF32() && !inputElementType.isInteger()) {
-        failReason = "Reduce sum only supports BF16, F32, or integer input types";
-        return false;
-    }
-
-    // Check bit width
-    if (inputElementType.getIntOrFloatBitWidth() != 8 &&
-        inputElementType.getIntOrFloatBitWidth() != 16 &&
-        inputElementType.getIntOrFloatBitWidth() != 32) {
-        failReason = "Reduce sum only supports 8, 16, or 32 bit element types";
-        return false;
-    }
-
-    // Check that it's a sum reduction (arith.addf or arith.addi in the body)
-    auto yieldOp = dyn_cast<linalg::YieldOp>(reduceOp.getBody()->getTerminator());
-    if (!yieldOp) {
-        failReason = "Expected linalg::YieldOp as the terminator";
-        return false;
-    }
-
-    auto reduceBodyOp = yieldOp.getOperand(0).getDefiningOp();
-    if (!isa_and_nonnull<arith::AddIOp>(reduceBodyOp) &&
-        !isa_and_nonnull<arith::AddFOp>(reduceBodyOp)) {
-        failReason = "Not a sum reduction (expected arith.addf or arith.addi)";
-        return false;
-    }
-
-    // Check output type - can be same as input or f32 (for bf16 input)
-    auto outputType = dyn_cast<RankedTensorType>(reduceOp->getResultTypes().front());
-    if (!outputType) {
-        failReason = "Output is not a ranked tensor";
-        return false;
-    }
-    auto outputElementType = outputType.getElementType();
-
-    // For bf16 input, output can be bf16 or f32
-    if (inputElementType.isBF16()) {
-        if (!outputElementType.isBF16() && !outputElementType.isF32()) {
-            failReason = "BF16 reduce sum output must be BF16 or F32";
-            return false;
-        }
-    }
-    else {
-        // For integer inputs, output must match input type
-        if (inputElementType != outputElementType) {
-            failReason = "Integer reduce sum output type must match input type";
-            return false;
-        }
-    }
-
-    // Multi-dimension reductions are lowered by ReduceOpConversion (collapse or chain).
-    if (auto reason = getUnsupportedReduceDimsReason(reduceOp)) {
-        failReason = ("Reduce sum: " + *reason).str();
-        return false;
-    }
-
-    return true;
-}
-
 namespace {
 
 // NOTE: this struct is duplicated below (TransposeOpConversionRewrite) as a OpRewritePattern.
@@ -1051,8 +969,10 @@ struct GenericReductionInfo {
     int64_t axis;
 };
 
-static FailureOr<GenericReductionInfo>
-getGenericReductionInfo(linalg::GenericOp srcOp, PatternRewriter &rewriter) {
+static FailureOr<GenericReductionInfo> getGenericReductionInfo(linalg::GenericOp srcOp) {
+    if (!srcOp.hasPureTensorSemantics()) {
+        return failure();
+    }
     if (srcOp.getNumReductionLoops() != 1) {
         return failure();
     }
@@ -1080,12 +1000,25 @@ getGenericReductionInfo(linalg::GenericOp srcOp, PatternRewriter &rewriter) {
 
     unsigned reductionLoopIdx = reductionDims[0];
 
-    AffineMap inMap = srcOp.getIndexingMapsArray()[0];
+    auto indexingMaps = srcOp.getIndexingMapsArray();
+    AffineMap inMap = indexingMaps[0];
 
-    auto reductionAxis = inMap.getResultPosition(rewriter.getAffineDimExpr(reductionLoopIdx));
+    auto reductionAxis =
+        inMap.getResultPosition(getAffineDimExpr(reductionLoopIdx, srcOp.getContext()));
 
     if (!reductionAxis) {
         return failure();
+    }
+
+    // The kernel reduces the input directly and preserves the order of the
+    // remaining axes; it cannot implement broadcasts or output permutations.
+    if (!inMap.isPermutation()) {
+        return failure();
+    }
+    for (AffineMap outMap : llvm::drop_begin(indexingMaps)) {
+        if (outMap != inMap.dropResult(*reductionAxis)) {
+            return failure();
+        }
     }
 
     GenericReductionInfo info;
@@ -1098,6 +1031,22 @@ getGenericReductionInfo(linalg::GenericOp srcOp, PatternRewriter &rewriter) {
         }
         auto opName = getReduceOpName(reduceBodyOp);
         if (failed(opName)) {
+            return failure();
+        }
+        // A matching terminator alone is insufficient: sum(x*x), for example,
+        // must not become sum(x). Only the bf16 -> f32 accumulator extension
+        // can be discarded by the hardware reduction.
+        Value input = srcOp.getBody()->getArgument(0);
+        Value accumulator = srcOp.getBody()->getArgument(i + 1);
+        Value lhs = reduceBodyOp->getOperand(0);
+        Value rhs = reduceBodyOp->getOperand(1);
+        if (lhs == accumulator)
+            std::swap(lhs, rhs);
+        if (auto ext = lhs.getDefiningOp<arith::ExtFOp>()) {
+            if (ext.getIn().getType().isBF16() && ext.getType().isF32())
+                lhs = ext.getIn();
+        }
+        if (lhs != input || rhs != accumulator) {
             return failure();
         }
         info.opNames.push_back(*opName);
@@ -1470,7 +1419,7 @@ struct GenericReductionConversion : public OpRewritePattern<linalg::GenericOp> {
     LogicalResult
     matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
 
-        auto info = getGenericReductionInfo(srcOp, rewriter);
+        auto info = getGenericReductionInfo(srcOp);
 
         if (failed(info)) {
             return rewriter.notifyMatchFailure(srcOp, "not a supported reduction generic");
@@ -3091,6 +3040,124 @@ struct TensorPadOpConversion : public OpRewritePattern<tensor::PadOp> {
 };
 
 } // namespace
+
+// Element types the hardware reduce accepts: bf16, f32 or 8/16/32-bit integer
+// input, and an output of the same type. Only a sum can accumulate bf16 into f32.
+static bool isSupportedReduceElementTypes(
+    StringRef opName, Type inputElementType, Type outputElementType, std::string &failReason
+) {
+    auto inputIntType = dyn_cast<IntegerType>(inputElementType);
+    bool inputOk =
+        inputElementType.isBF16() || inputElementType.isF32() ||
+        (inputIntType && (inputIntType.getWidth() == 8 || inputIntType.getWidth() == 16 ||
+                          inputIntType.getWidth() == 32));
+    bool outputOk = opName == "reduce_sum" && inputElementType.isBF16()
+                        ? (outputElementType.isBF16() || outputElementType.isF32())
+                        : (inputElementType == outputElementType);
+    if (!inputOk || !outputOk) {
+        failReason = "Element types not supported by the hardware reduce";
+        return false;
+    }
+    return true;
+}
+
+static bool isSumMaxOrMin(StringRef opName) {
+    return opName == "reduce_sum" || opName == "reduce_max" || opName == "reduce_min";
+}
+
+bool isTorqReduceOp(Operation *op, std::string &failReason) {
+    auto reduceOp = dyn_cast<linalg::ReduceOp>(op);
+    if (!reduceOp) {
+        failReason = "Not a linalg.reduce op";
+        return false;
+    }
+    if (reduceOp.getInputs().size() != 1) {
+        failReason = "Reduce only supports exactly one input";
+        return false;
+    }
+    auto inputType = dyn_cast<RankedTensorType>(reduceOp.getInputs()[0].getType());
+    auto outputType = dyn_cast<RankedTensorType>(reduceOp->getResultTypes().front());
+    if (!inputType || !outputType) {
+        failReason = "Input or output is not a ranked tensor";
+        return false;
+    }
+
+    auto yieldOp = dyn_cast<linalg::YieldOp>(reduceOp.getBody()->getTerminator());
+    Operation *reduceBodyOp = yieldOp ? yieldOp.getOperand(0).getDefiningOp() : nullptr;
+    FailureOr<std::string> opName =
+        reduceBodyOp ? getReduceOpName(reduceBodyOp) : FailureOr<std::string>(failure());
+    if (failed(opName) || !isSumMaxOrMin(*opName)) {
+        failReason = "Not a sum, max or min reduction";
+        return false;
+    }
+
+    Type outputElementType = outputType.getElementType();
+    if (!isSupportedReduceElementTypes(
+            *opName, inputType.getElementType(), outputElementType, failReason
+        )) {
+        return false;
+    }
+
+    // Multi-dimension reductions are lowered by ReduceOpConversion (collapse or chain).
+    if (auto reason = getUnsupportedReduceDimsReason(reduceOp)) {
+        failReason = ("Reduce: " + *reason).str();
+        return false;
+    }
+
+    // A max or min init (e.g. -inf) must fold into the kernel, or ReduceOpConversion
+    // fails and the op is left unlowered. Sums are kept on the NPU as before.
+    if (*opName != "reduce_sum" &&
+        failed(getReduceInit(reduceOp.getInits()[0], reduceBodyOp, outputElementType))) {
+        failReason = "init cannot be merged into the hardware reduce";
+        return false;
+    }
+
+    return true;
+}
+
+// Like isTorqReduceOp, for a linalg.generic reduce that GenericReductionConversion
+// lowers: single input, single reduction dim, and an init the kernel accepts.
+bool isTorqGenericReduceOp(Operation *op, std::string &failReason) {
+    auto genericOp = dyn_cast<linalg::GenericOp>(op);
+    if (!genericOp) {
+        failReason = "Not a linalg.generic op";
+        return false;
+    }
+
+    FailureOr<GenericReductionInfo> info = getGenericReductionInfo(genericOp);
+    if (failed(info)) {
+        failReason = "Not a supported reduction generic";
+        return false;
+    }
+    if (info->inits.size() != 1) {
+        failReason = "Generic reduce expects exactly one output";
+        return false;
+    }
+    StringRef opName = info->opNames.front();
+    if (!isSumMaxOrMin(opName)) {
+        failReason = "Not a sum, max or min reduction";
+        return false;
+    }
+
+    auto inputType = dyn_cast<RankedTensorType>(info->input.getType());
+    if (!inputType) {
+        failReason = "Input is not a ranked tensor";
+        return false;
+    }
+    Type outputElementType = info->resultTypes.front().getElementType();
+    if (!isSupportedReduceElementTypes(
+            opName, inputType.getElementType(), outputElementType, failReason
+        )) {
+        return false;
+    }
+
+    if (failed(getReduceInit(info->inits.front(), info->bodyOps.front(), outputElementType))) {
+        failReason = "init cannot be merged into the hardware reduce";
+        return false;
+    }
+
+    return true;
+}
 
 bool isIdentityReduceInit(Value init, Operation *combineOp) {
     FailureOr<ReduceInit> reduceInit = getReduceInit(init, combineOp, getElementTypeOrSelf(init));

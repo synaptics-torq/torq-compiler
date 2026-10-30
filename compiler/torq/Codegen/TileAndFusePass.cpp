@@ -14,6 +14,7 @@
 #include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/LayoutTransformUtils.h"
+#include "torq/Utils/ShapeUtils.h"
 #include "torq/Utils/TorqHw.h"
 #include "torq/Utils/TorqUtils.h"
 
@@ -3218,47 +3219,6 @@ static Operation *matchSingleCombineReduction(linalg::GenericOp op) {
         !llvm::all_of(combine->getOperands(), llvm::IsaPred<BlockArgument>))
         return nullptr;
     return combine;
-}
-
-// Split a keepdims output map into kept positions (AffineDimExpr) and dropped ones
-// (AffineConstantExpr(0) at a unit dim). Fails on any other result form, and when nothing is
-// dropped (the map is already a projected permutation) or nothing is kept.
-static LogicalResult splitKeepdimsOutputMap(
-    AffineMap outMap, RankedTensorType outType, SmallVector<int64_t> &keptPos,
-    SmallVector<AffineExpr> &keptExprs
-) {
-    for (int64_t i = 0; i < (int64_t)outMap.getNumResults(); ++i) {
-        AffineExpr e = outMap.getResult(i);
-        if (auto c = dyn_cast<AffineConstantExpr>(e)) {
-            if (c.getValue() != 0 || outType.getDimSize(i) != 1)
-                return failure();
-        }
-        else if (isa<AffineDimExpr>(e)) {
-            keptPos.push_back(i);
-            keptExprs.push_back(e);
-        }
-        else {
-            return failure();
-        }
-    }
-    if (keptExprs.empty() || (int64_t)keptExprs.size() == outType.getRank())
-        return failure();
-    return success();
-}
-
-// Reassociation between the keepdims shape and the reduced shape: each kept dim starts a group;
-// dropped unit dims join the current group (or the first, if they precede any kept dim), so every
-// group holds exactly one kept dim.
-static SmallVector<ReassociationIndices>
-keepdimsReassociation(ArrayRef<int64_t> keptPos, int64_t rank) {
-    SmallVector<ReassociationIndices> reassoc(keptPos.size());
-    int64_t g = -1;
-    for (int64_t i = 0; i < rank; ++i) {
-        if (llvm::is_contained(keptPos, i))
-            ++g;
-        reassoc[g < 0 ? 0 : g].push_back(i);
-    }
-    return reassoc;
 }
 
 // Elementwise extf/truncf cast built as a linalg.generic so it tiles with the fuse group; the

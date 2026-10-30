@@ -46,4 +46,17 @@ Value emitValuePreservingReshape(
     RankedTensorType dstTy
 );
 
+/// Split a keepdims output map into kept positions (AffineDimExpr) and dropped ones
+/// (AffineConstantExpr(0) at a unit dim). Fails on any other result form, and when nothing is
+/// dropped (the map is already a projected permutation) or nothing is kept.
+LogicalResult splitKeepdimsOutputMap(
+    AffineMap outMap, RankedTensorType outType, SmallVector<int64_t> &keptPos,
+    SmallVector<AffineExpr> &keptExprs
+);
+
+/// Reassociation between the keepdims shape and the reduced shape: each kept dim starts a group;
+/// dropped unit dims join the current group (or the first, if they precede any kept dim), so
+/// every group holds exactly one kept dim.
+SmallVector<ReassociationIndices> keepdimsReassociation(ArrayRef<int64_t> keptPos, int64_t rank);
+
 } // namespace mlir::syna::torq

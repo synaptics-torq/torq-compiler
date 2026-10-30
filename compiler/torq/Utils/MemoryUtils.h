@@ -84,6 +84,10 @@ int64_t getMemRefTypeOffsetBytes(MemRefType memRefType);
 // requires a compile-time-constant offset, so callers must reject these.
 bool memRefHasDynamicOffset(MemRefType memRefType);
 
+// True if the memref has a static shape and contiguous row-major layout.
+// A non-zero offset and arbitrary strides on size-one dimensions are allowed.
+bool isContiguousRowMajor(MemRefType memRefType);
+
 // Copy address attributes from an operation to another
 void copyAddressAttributes(Operation *srcOp, Operation *dstOp);
 

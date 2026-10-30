@@ -7,7 +7,10 @@
 #include "PassesDetail.h"
 #include "Patterns.h"
 
+#include "torq/Utils/ShapeUtils.h"
+
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/Tensor/Transforms/Transforms.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -21,6 +24,65 @@ namespace mlir::syna::torq {
 
 namespace {
 
+// Rewrite a keepdims reduction, whose output maps index unit axes with constant
+// zero (e.g. (d0,d1,d2,d3) -> (d0,d1,d2,0)), into one with projected-permutation
+// output maps plus a tensor.expand_shape back to the keepdims shape. Only those
+// output axes are dropped: the loops, the inputs and the other unit dims (such as
+// a batch of 1) are left as they are.
+void dropKeepdimsOutputAxes(IRRewriter &rewriter, linalg::GenericOp op) {
+    int64_t numInputs = op.getNumDpsInputs();
+    SmallVector<AffineMap> maps = op.getIndexingMapsArray();
+    SmallVector<std::optional<SmallVector<ReassociationIndices>>> reassocs;
+    SmallVector<Type> resultTypes;
+    for (auto [i, init] : llvm::enumerate(op.getOutputs())) {
+        AffineMap &map = maps[numInputs + i];
+        auto outType = cast<RankedTensorType>(init.getType());
+        if (map.isProjectedPermutation()) {
+            reassocs.push_back(std::nullopt);
+            resultTypes.push_back(outType);
+            continue;
+        }
+        SmallVector<int64_t> keptPos;
+        SmallVector<AffineExpr> keptExprs;
+        if (failed(splitKeepdimsOutputMap(map, outType, keptPos, keptExprs)))
+            return;
+        SmallVector<int64_t> reducedShape;
+        for (int64_t p : keptPos)
+            reducedShape.push_back(outType.getDimSize(p));
+        map = AffineMap::get(map.getNumDims(), 0, keptExprs, op.getContext());
+        reassocs.push_back(keepdimsReassociation(keptPos, outType.getRank()));
+        resultTypes.push_back(RankedTensorType::get(reducedShape, outType.getElementType()));
+    }
+
+    Location loc = op.getLoc();
+    rewriter.setInsertionPoint(op);
+    SmallVector<Value> inits;
+    for (auto [i, init] : llvm::enumerate(op.getOutputs())) {
+        Value newInit = init;
+        if (reassocs[i])
+            newInit = tensor::CollapseShapeOp::create(
+                rewriter, loc, cast<RankedTensorType>(resultTypes[i]), init, *reassocs[i]
+            );
+        inits.push_back(newInit);
+    }
+    auto newOp = linalg::GenericOp::create(
+        rewriter, loc, resultTypes, op.getInputs(), inits, maps, op.getIteratorTypesArray()
+    );
+    newOp->setDiscardableAttrs(op->getDiscardableAttrDictionary());
+    rewriter.inlineRegionBefore(op.getRegion(), newOp.getRegion(), newOp.getRegion().end());
+
+    SmallVector<Value> results;
+    for (auto [i, result] : llvm::enumerate(newOp.getResults())) {
+        Value newResult = result;
+        if (reassocs[i])
+            newResult = tensor::ExpandShapeOp::create(
+                rewriter, loc, op.getResult(i).getType(), result, *reassocs[i]
+            );
+        results.push_back(newResult);
+    }
+    rewriter.replaceOp(op, results);
+}
+
 class OptimizeLinalgForTorqPass
     : public impl::OptimizeLinalgForTorqBase<OptimizeLinalgForTorqPass> {
   public:
@@ -28,6 +90,8 @@ class OptimizeLinalgForTorqPass
 
         auto funcOp = getOperation();
         auto *ctx = funcOp.getContext();
+
+        IRRewriter rewriter(ctx);
 
         auto buildPatterns = [&]() {
             RewritePatternSet patterns(ctx);
@@ -87,6 +151,22 @@ class OptimizeLinalgForTorqPass
             return signalPassFailure();
         }
 
+        // Raise compound operations such as softmax before reshaping their reductions.
+        // Keep-dims reductions index unit output axes with constant zero.
+        // Normalize those axes before tiling and reduction matching, both of
+        // which require projected-permutation output maps.
+        funcOp.walk([&](linalg::GenericOp op) {
+            if (!op.hasPureTensorSemantics() || !op.getNumReductionLoops())
+                return;
+            auto maps = op.getIndexingMapsArray();
+            auto outputMaps = llvm::drop_begin(maps, op.getNumDpsInputs());
+            if (llvm::all_of(outputMaps, [](AffineMap map) {
+                    return map.isProjectedPermutation();
+                }))
+                return;
+            dropKeepdimsOutputAxes(rewriter, op);
+        });
+
         // The raise cannot match without an i32 matmul, so models without one skip the
         // round entirely. When it runs, it contains only the raise: the other groups
         // are already at fixpoint, and re-running them could rewrite the freshly
@@ -116,7 +196,6 @@ class OptimizeLinalgForTorqPass
             }
         }
 
-        IRRewriter rewriter(ctx);
         populateCastI32MulPatterns(funcOp, rewriter);
 
         // NOTE: Swish pattern optimization should happen in a separate pass

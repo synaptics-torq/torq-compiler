@@ -1,5 +1,6 @@
 import re
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -23,6 +24,47 @@ BASE_OPTIONS = [
     "--torq-disable-slices",
     "--torq-target-host-triple=native",
 ]
+
+
+@pytest.mark.ci
+@pytest.mark.parametrize("executor", ["host", "css"])
+@pytest.mark.parametrize("layout,contiguous", [
+    ("4x2xf32", True),
+    ("4x1x2xf32, strided<[2, 99, 1], offset: 3>", True),
+    ("1x4xf32, strided<[99, 1]>", True),
+    ("4x1xf32, strided<[1, 99]>", True),
+    ("f32", True),
+    ("0x2xf32, strided<[9, 5]>", True),
+    ("4xf32, strided<[2]>", False),
+    ("4x2xf32, strided<[4, 1]>", False),
+])
+def test_cpu_program_argument_layout(torq_compiler, tmp_path, executor, layout, contiguous):
+    memref = f"memref<{layout}>"
+    src = tmp_path / "argument_layout.mlir"
+    src.write_text(f"""
+func.func @main() {{
+  %arg = memref.alloc() {{xram_address = 64 : i64}} : {memref}
+  %program = torq_hl.program "cpu" : !torq_hl.program<{executor}> {{
+  ^bb0(%a: {memref}):
+    torq_hl.return
+  }}
+  %invocation = torq_hl.create_invocation "cpu" program (%program : !torq_hl.program<{executor}>) : !torq_hl.invocation<{executor}>
+  torq_hl.start_program %invocation : !torq_hl.invocation<{executor}> args(%arg : {memref})
+  return
+}}
+""")
+    result = subprocess.run(
+        [str(Path(torq_compiler.file_path).parent / "iree-opt"), str(src),
+         "--pass-pipeline=builtin.module(func.func(torq-resolve-invocation-arguments))"],
+        capture_output=True, text=True,
+    )
+    # The runtime copies strided host arguments to and from a dense buffer.
+    if contiguous or executor == "host":
+        assert result.returncode == 0, result.stderr
+        assert "invocation_args" in result.stdout, result.stdout
+    else:
+        assert result.returncode != 0
+        assert f"not statically contiguous, which the {executor} program argument ABI" in result.stderr, result.stderr
 
 
 def _latest_phase_with(phases_dir, needle):

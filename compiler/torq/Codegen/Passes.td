@@ -870,7 +870,8 @@ def MarkHostExecutor :
         "mlir::syna::torq::createMarkHostExecutorPass()";
 
     let dependentDialects = [
-        "linalg::LinalgDialect"
+        "linalg::LinalgDialect",
+        "syna::torq_hl::TorqHLDialect"
     ];
 }
 

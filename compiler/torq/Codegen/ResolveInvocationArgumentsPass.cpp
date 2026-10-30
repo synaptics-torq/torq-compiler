@@ -134,6 +134,21 @@ static LogicalResult updateCreateInvocation(
                        << argValue;
             }
 
+            // A CSS program receives each argument as a single base address and
+            // treats the data as contiguous: a strided memref (e.g. the
+            // partial-buffer column a reduction tile writes) would be read and
+            // written as if dense, silently corrupting the buffer. Fail loudly
+            // instead. Host programs get strided arguments copied to and from a
+            // dense buffer by the runtime.
+            if (executor == torq_hl::Executor::CSS && !isContiguousRowMajor(memRefArg.getType())) {
+                return startProgramOp.emitError()
+                       << "argument #" << idx << " is not statically contiguous, which the "
+                       << torq_hl::stringifyExecutor(executor)
+                       << " program argument ABI "
+                          "cannot address (it would read/write the data as contiguous): "
+                       << argValue;
+            }
+
             auto maybeStartAddress = resolver.getDataStartAddress(argValue);
 
             if (!maybeStartAddress) {

@@ -542,4 +542,38 @@ Value emitValuePreservingReshape(
     return tensor::ExpandShapeOp::create(rewriter, loc, dstTy, mid, *expandAssoc);
 }
 
+LogicalResult splitKeepdimsOutputMap(
+    AffineMap outMap, RankedTensorType outType, SmallVector<int64_t> &keptPos,
+    SmallVector<AffineExpr> &keptExprs
+) {
+    for (int64_t i = 0; i < (int64_t)outMap.getNumResults(); ++i) {
+        AffineExpr e = outMap.getResult(i);
+        if (auto c = dyn_cast<AffineConstantExpr>(e)) {
+            if (c.getValue() != 0 || outType.getDimSize(i) != 1)
+                return failure();
+        }
+        else if (isa<AffineDimExpr>(e)) {
+            keptPos.push_back(i);
+            keptExprs.push_back(e);
+        }
+        else {
+            return failure();
+        }
+    }
+    if (keptExprs.empty() || (int64_t)keptExprs.size() == outType.getRank())
+        return failure();
+    return success();
+}
+
+SmallVector<ReassociationIndices> keepdimsReassociation(ArrayRef<int64_t> keptPos, int64_t rank) {
+    SmallVector<ReassociationIndices> reassoc(keptPos.size());
+    int64_t g = -1;
+    for (int64_t i = 0; i < rank; ++i) {
+        if (llvm::is_contained(keptPos, i))
+            ++g;
+        reassoc[g < 0 ? 0 : g].push_back(i);
+    }
+    return reassoc;
+}
+
 } // namespace mlir::syna::torq

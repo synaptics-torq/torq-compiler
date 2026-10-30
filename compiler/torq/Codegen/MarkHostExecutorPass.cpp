@@ -61,14 +61,16 @@ class LinalgOpPattern : public OpInterfaceRewritePattern<linalg::LinalgOp> {
             return success();
         }
 
-        // Check for reduce sum BEFORE the f32 fallback logic.
-        // The f32 fallback at line ~75 returns failure() for any op without f32 operands,
-        // which would skip the reduce sum check if placed later. We check reduce sum
-        // explicitly here to ensure bf16 reduce ops are identified as hardware-supported
-        // (not just falling through as "no f32 operands").
+        // Check for hardware reduces BEFORE the f32 fallback logic, which marks
+        // every f32 op without a Torq kernel as host. Sum, max and min (f32
+        // included) run on the NPU.
         std::string failReason;
-        if (isTorqReduceSumOp(srcOp, failReason)) {
-            // Reduce sum is supported on hardware - do NOT mark as host.
+        if (isTorqReduceOp(srcOp, failReason)) {
+            return failure();
+        }
+        if (isTorqGenericReduceOp(srcOp, failReason)) {
+            // A generic-form reduce sum, max or min (f32 included) is likewise a
+            // hardware reduce: keep it on the NPU rather than in a host program.
             return failure();
         }
 

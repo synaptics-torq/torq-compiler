@@ -26,10 +26,15 @@ bool isTorqNegateOp(Operation *op, std::string &failReason);
 
 bool isLogicNotOp(Operation *op, std::string &failReason);
 
-// Check if the operation is a reduce sum that can execute on Torq.
-// Only supports bf16 input -> bf16/f32 output or integer types.
-// Does NOT support other reduce operations (max, min, etc.) - those are handled differently.
-bool isTorqReduceSumOp(Operation *op, std::string &failReason);
+// Check if the operation is a linalg.reduce sum, max or min that can execute on
+// Torq: bf16, f32 or 8/16/32-bit integer input with an output of the same type, or
+// a bf16 sum with f32 output.
+bool isTorqReduceOp(Operation *op, std::string &failReason);
+
+// Like isTorqReduceOp but for a linalg.generic form of a reduce sum, max or min
+// (single input, one reduction loop), the shape the reduction tiling pass produces
+// for its partial-reduction tiles.
+bool isTorqGenericReduceOp(Operation *op, std::string &failReason);
 
 // True if starting the accumulation of `combineOp` from the reduction init
 // `init` changes nothing: `init` is a splat of the identity of `combineOp` or a
