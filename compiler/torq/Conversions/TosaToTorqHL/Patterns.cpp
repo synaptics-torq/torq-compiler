@@ -99,13 +99,9 @@ struct ArgMaxOpConversion : public OpConversionPattern<tosa::ArgMaxOp> {
             axisVal = 1;
         }
 
-        auto axisAttr = rewriter.getI32IntegerAttr(axisVal);
-        const std::vector<APInt> bias = {APInt(32, 0)};
-        const std::vector<APInt> scale = {APInt(32, 1)};
-
         rewriter.replaceOpWithNewOp<syna::torq_hl::ArgMaxOp>(
-            srcOp, srcOp.getOutput().getType(), createInitTensor(srcOp, rewriter), axisAttr,
-            createIConst(rewriter, srcOp, interleave(bias, scale)), inputVal
+            srcOp, srcOp.getOutput().getType(), createInitTensor(srcOp, rewriter),
+            rewriter.getI32IntegerAttr(axisVal), inputVal
         );
 
         return success();

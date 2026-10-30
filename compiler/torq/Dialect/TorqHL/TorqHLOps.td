@@ -487,7 +487,6 @@ def TorqHL_ArgMaxOp: TorqHL_LayerOp<"argmax"> {
 
   let arguments = !con(commonArgs, (ins
     I32Attr:$axis,
-    TensorOrMemref:$scale_bias,
     TensorOrMemref:$input
   ));
 }
