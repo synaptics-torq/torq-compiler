@@ -31,7 +31,7 @@ pytest test_keras_ops.py -m "not pooling" -v                   # Everything exce
 
 ### Run Specific Test
 ```bash
-pytest test_keras_ops.py::test_keras_model[model050_mult_inp1x10x10x4_int8-cmodel] -v
+pytest "test_keras_ops.py::test_keras_model_torq[model050_mult_inp1x10x10x4_int8-sim-sl2610-v1]" -v
 ```
 
 ### List Tests Without Running
@@ -43,7 +43,7 @@ pytest test_keras_ops.py -m "depthwise and int8" --collect-only
 ## Available Markers
 
 **Operation Types:**
-`add_mul_sub`, `conv`, `conv_transpose`, `depthwise`, `fc`, `mean`, `pointwise`, `pooling`, `activation`, `softmax`, `transpose`
+one per family module in `tests/testdata/keras_ops/` (the module name): `add_mul_sub`, `conv`, `conv_transpose`, `depthwise`, `fc`, `mean`, `pointwise`, `pooling`, `resize`, `activation`, `softmax`, `transpose`, `emza70_conv2d`, `emza75_conv2d`, `mobilenetv2_conv2d`, `nnr301_conv2d`, `nnr301_convtranspose`, `audio_vision_depthwise`
 
 **Quantization:**
 `int8`, `int16`
@@ -52,3 +52,30 @@ View all markers:
 ```bash
 pytest --markers
 ```
+
+## Adding Test Cases
+
+The models are defined in `tests/testdata/keras_ops/<family>.py`; the module name is the marker of
+its cases. Each module has a `CASES` dict from a case name to a model builder, written with
+`torq.testing.keras_builder`:
+
+```python
+from torq.testing.keras_builder import conv2d, layers, sequential
+
+CASES = {
+    # one layer, built after tf.keras.utils.set_random_seed(42)
+    "maxpool_k3_s2_16x16x8": sequential((16, 16, 8), layers.MaxPooling2D(pool_size=3, strides=2)),
+    # a single Conv2D (with bias): shape, filters, kernel size, strides, padding
+    "conv_k3_s2_32x32x16": conv2d((32, 32, 16), 8, (3, 3), (2, 2), "same"),
+    # a sweep
+    **{f"conv_k{k}_s{s}_32x32x16": conv2d((32, 32, 16), 8, (k, k), (s, s))
+       for k in (1, 3, 5) for s in (1, 2)},
+}
+```
+
+Each case runs with int8 and int16 quantization, as `<case>_int8` and `<case>_int16`.
+`functional(shape, build)` builds functional-API models (see `add_mul_sub.py`). The optional
+`CONFIG` dict sets a case's quantizations, compiler options and comparison tolerances (see
+`tests/keras_ops_models.py`). Cases that must not run at all are listed in
+`keras_known_failures.py`; expected failures go in `test_keras_ops-xfails.txt`.
+
