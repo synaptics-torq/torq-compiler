@@ -9,9 +9,28 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Transforms/DialectConversion.h"
 
+namespace mlir::linalg {
+class Conv1DNcwFcwOp;
+}
+
 namespace mlir::syna::torq {
 
 void populateOptimizeConv1DPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
+
+// Shared claim predicate for the single-output-point conv1d GEMM form
+// (window == whole input, dilation 1, all-zero init, no bias input):
+// DecomposeConvsForHardwarePass lowers it to linalg.matmul
+// (SinglePointConv1DtoMatmulPattern).  The conv1d->conv2d promotion must
+// bail exactly where this pattern claims, no wider and no narrower: a
+// single-output-point conv it does not claim (say, a bias folded into the
+// init) must still be promoted, or nothing lowers it.
+bool isSinglePointConv1dMatmulCandidate(linalg::Conv1DNcwFcwOp op);
+
+// Registers the conv1d->conv2d promotion patterns for strides in
+// [minStride, maxStride]; see the pattern for what the range means.
+void populateConv1dPromotionPatterns(
+    MLIRContext *ctx, RewritePatternSet &patterns, int64_t minStride, int64_t maxStride
+);
 
 void populateOptimizeElementwiseBinaryOpPatterns(MLIRContext *context, RewritePatternSet &patterns);
 

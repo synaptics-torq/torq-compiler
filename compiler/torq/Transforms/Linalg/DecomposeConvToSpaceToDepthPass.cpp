@@ -23,7 +23,15 @@
 // a pure loss: the S2D transpose lowers to a real runtime slice task, and the
 // non-(2,1) stride-2/pad combinations are either mis-computed or rejected by
 // the HW lowering, so those axes must be folded.
-// The pattern fires only when at least one axis requires decomposition.
+// The pattern fires only when at least one axis requires decomposition, and
+// only when the fold is not beaten by the alternative: if the conv would
+// take DecomposeConvsForHardwarePass' residue split instead, that form is
+// cheaper when it moves fewer bytes ((N+2)*I + W + (4N-2)*O versus the
+// fold's 3*I + W*(E/k) + O - the zero-padded kernel) - in practice tiny
+// inputs with large F*C - and it has a bf16/f16 output (f32 merge adds
+// fall to the host under the default f32 fallback; quantized chains risk
+// the channel-sliced per-channel-rescale CSS cliff).  See
+// residueSplitCheaperThanS2dFold.
 //
 // PRECONDITIONS (per axis, independently for H and W):
 //   - kDim % b == 0  AND  stride % b == 0  AND  inputDim % b == 0
@@ -62,6 +70,8 @@
 
 #include "PassesDetail.h"
 
+#include "Patterns.h"
+
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
@@ -76,7 +86,11 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+
+#include <cmath>
+#include <limits>
 
 #define DEBUG_TYPE "torq-decompose-conv-to-space-to-depth"
 
@@ -85,6 +99,72 @@ namespace mlir::syna::torq {
 //===----------------------------------------------------------------------===//
 // Helpers
 //===----------------------------------------------------------------------===//
+
+/// Strategy override for the S2D gate (A/B testing; "auto" runs the cost
+/// comparison in residueSplitCheaperThanS2dFold).
+static llvm::cl::opt<std::string> clS2DStrategy(
+    "torq-s2d-strategy",
+    llvm::cl::desc("Strategy for large-stride/large-kernel convs: auto "
+                   "(default cost gate), fold (space-to-depth with the "
+                   "zero-padded kernel), or split (the DecomposeConvs "
+                   "residue split)"),
+    llvm::cl::init("auto"), llvm::cl::Hidden
+);
+
+/// Cost comparison of the S2D fold against the residue split
+/// (rewriteNoPadStride in DecomposeConvsForHardwarePass) that the conv would
+/// take if this pattern bails.  Both forms stream the weight once, so the
+/// differences are the input and output traffic:
+///   fold:  the input is transposed into channels (2*inBytes) and read by
+///          the conv (inBytes); the zero-padded kernel inflates the weight
+///          stream to weightBytes * paddedWeightRatio; one padded output
+///          write (outBytes).
+///   split: N windowed gathers of the input (N*inBytes) plus the
+///          materialized thinned inputs (inBytes) plus the conv reads
+///          (inBytes); the thinned kernels partition the original taps
+///          (weightBytes, no padding); and (4N-2)*outBytes of output
+///          traffic (N sub-conv writes + the zero fill + 3*(N-1) merge-add
+///          read/read/write).
+/// The split is cheaper only when the padded-weight inflation outweighs its
+/// extra input/output traffic - tiny inputs with large F*C.  It is only a
+/// clean all-NSS alternative for bf16/f16 outputs: f32 merge adds fall to
+/// the host (--torq-fallback-f32-to-host is the default), and quantized
+/// chains risk the channel-sliced per-channel-rescale CSS cliff.  Measured
+/// A/B: the fold wins or ties on every corpus shape (the cmodel
+/// additionally over-weights the fold's input transpose, so the fold's
+/// measured margin is conservative).
+static bool residueSplitCheaperThanS2dFold(
+    int64_t inBytes, int64_t weightBytes, int64_t outBytes, int64_t residueCount,
+    double paddedWeightRatio, Type outElem, bool stride1SubConvs, int64_t outElems
+) {
+    if (clS2DStrategy == "fold")
+        return false;
+    if (clS2DStrategy == "split")
+        return true;
+    if (!outElem || (!outElem.isBF16() && !outElem.isF16()))
+        return false;
+    // Small all-stride-1 splits of a promoted conv1d (unit spatial axis) hit
+    // the byte model's fixed-cost blind spot: the byte terms are small
+    // (hundreds of bytes) and the compile-time estimate is dominated by the
+    // per-program/per-DMA fixed costs, where the fold's C-inflated conv plus
+    // input S2D transpose plus padded-output extract loses to the split's
+    // small stride-1 sub-convs plus merge adds.  Measured on the
+    // sweepconv-bf16 corpus on both sim chips: the 1D all-stride-1 small
+    // cases (sweepconv-bf16-10/11/18) are estimate-cheaper split, the 2D
+    // case (sweepconv-bf16-1) and the stride-2-sub-conv cases
+    // (sweepconv-bf16-17/19) fold; in the 2D case the split's sub-convs
+    // repeat the full 2D kernel per residue class, which the fixed-cost
+    // saving does not cover.  cmodel is equal in this regime
+    // (startup-floor dominated), so the split is not a cmodel regression.
+    // Large outputs stay on the byte model, where the split's (4N-2) merge
+    // traffic eventually outweighs the fixed costs.
+    if (stride1SubConvs && outElems <= 4096)
+        return true;
+    int64_t foldCost = 3 * inBytes + (int64_t)llround(weightBytes * paddedWeightRatio) + outBytes;
+    int64_t splitCost =
+        (residueCount + 2) * inBytes + weightBytes + (4 * residueCount - 2) * outBytes;
+    return splitCost < foldCost;
+}
 
 /// Chooses the largest block size `b` that can be folded into channels.
 /// A valid `b` must divide the kernel size, stride, and input size, and after
@@ -320,6 +400,55 @@ struct DecomposeConvWithSpaceToDepthPattern : public OpRewritePattern<linalg::Co
         bool widthPad = pW != W;
         bool heightPad = pH != H;
 
+        // Cost gate: compare the fold against the residue split the conv
+        // would take if we bail (rewriteNoPadStride in
+        // DecomposeConvsForHardwarePass).  Per-axis thinning factor of the
+        // split: stride/2 when the thinned kernel fits the stride-2 cap,
+        // else the full stride (axes with stride 1 never split).  The fold's
+        // input padding (up to a multiple of the block) and padded output
+        // are charged at their actual sizes.
+        {
+            int64_t residueCount = 1;
+            // Whether every split axis keeps the full stride (sub-convs are
+            // all stride-1) or thins to stride 2 (the thinned kernel fits the
+            // stride-2 cap).
+            bool stride1SubConvs = true;
+            for (int d = 0; d < 2; ++d) {
+                int64_t s = d == 0 ? sH : sW;
+                int64_t k = d == 0 ? kH : kW;
+                int64_t cap = d == 0 ? HwInfo::nss_max_kernel_height : HwInfo::nss_max_kernel_width;
+                bool thinned = s % 2 == 0 && (k - 1) / (s / 2) + 1 <= cap;
+                residueCount *= thinned ? s / 2 : s;
+                if (s > 1 && thinned)
+                    stride1SubConvs = false;
+            }
+            double paddedWeightRatio = 1.0;
+            if (bH > 1)
+                paddedWeightRatio *= (double)align_ceil(kH, sH) / (double)kH;
+            if (bW > 1)
+                paddedWeightRatio *= (double)align_ceil(kW, sW) / (double)kW;
+            // Padded conv output per axis: a folded axis convolves the
+            // block-padded input with the stride-aligned (zero-padded)
+            // kernel; a non-folded axis keeps its native geometry.
+            int64_t newOH = (pH - (bH > 1 ? align_ceil(kH, sH) : kH)) / sH + 1;
+            int64_t newOW = (pW - (bW > 1 ? align_ceil(kW, sW) : kW)) / sW + 1;
+            int64_t inB = inShape[0] * inShape[1] * pH * pW;
+            int64_t wtB = fltShape[0] * inShape[1] * kH * kW;
+            int64_t outB = outputType.getShape()[0] * outputType.getShape()[1] * newOH * newOW;
+            int64_t e = cast<RankedTensorType>(inputType).getElementTypeBitWidth() / 8;
+            int64_t outElems = 1;
+            for (int64_t d : outputType.getShape())
+                outElems *= d;
+            if (residueSplitCheaperThanS2dFold(
+                    inB * e, wtB * e, outB * e, residueCount, paddedWeightRatio,
+                    outputType.getElementType(),
+                    stride1SubConvs && ((kW == 1 && sW == 1) || (kH == 1 && sH == 1)), outElems
+                ))
+                return rewriter.notifyMatchFailure(
+                    convOp, "residue split is cheaper than the S2D fold (cost gate)"
+                );
+        }
+
         LLVM_DEBUG(
             llvm::dbgs() << "[S2D] Decomposing conv: kH=" << kH << " kW=" << kW << " sH=" << sH
                          << " sW=" << sW << " -> bH=" << bH << " bW=" << bW << "\n"
@@ -487,6 +616,19 @@ struct DecomposeConvToSpaceToDepthPass
         MLIRContext *ctx = func->getContext();
 
         RewritePatternSet patterns(ctx);
+
+        // Promote out-of-range conv1ds (stride > 2) to their conv2d form
+        // (unit W extent) so the S2D pattern below can fold the large stride
+        // into channels — a single in-limits conv instead of the
+        // residue-class split + full-tensor add chain that
+        // DecomposeConvsForHardwarePass would emit (32 sub-convs + 31 adds
+        // for a stride-64 conv, which is catastrophic for runtime). In-range
+        // conv1ds (stride <= 2) are left alone and keep their promotion in
+        // OptimizeLinalgForTorqPass.
+        populateConv1dPromotionPatterns(
+            ctx, patterns, /*minStride=*/3, /*maxStride=*/std::numeric_limits<int64_t>::max()
+        );
+
         patterns.add<DecomposeConvWithSpaceToDepthPattern>(ctx);
 
         if (failed(applyPatternsGreedily(func, std::move(patterns))))

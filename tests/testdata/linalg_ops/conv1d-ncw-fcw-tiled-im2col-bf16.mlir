@@ -1,11 +1,11 @@
-// Regression: large multi-channel Conv1D whose im2col unfold does not fit in LRAM.
-// Compiled NSS-only (--torq-disable-host --torq-disable-css by the linalg_ops harness).
+// Regression: large multi-channel Conv1D (C=128, W=2000), compiled NSS-only
+// (--torq-disable-host --torq-disable-css by the linalg_ops harness).
 //
-// C*W = 128*2000 = 256000 bf16 elements (~512 KB) exceeds the SL2610 tiling budget, so the
-// matmul im2col path cannot emit a single LRAM-resident torq_hl.im2col. Conv1DNcwFcwToLinalgMatmul
-// tiles the im2col + matmul along the output width instead: each block slices the input window
-// it reads, runs a small torq_hl.im2col + matmul on the NPU, and writes its rows into the result.
-// This must stay on NSS with no host fallback (torq_hl.im2col is not tileable on its own).
+// Historically this shape overflowed the im2col LRAM budget and the old
+// conv1d->matmul lowering had to tile the unfold along the output width. That
+// lowering is gone: the conv1d now promotes to conv2d (unit H extent, 7x1
+// kernel, stride 1), which is within the hardware limits and lowers through
+// the 2D conv path.
 //
 // Filter is a function argument (not an embedded constant) to keep the test small.
 #map = affine_map<(d0, d1, d2) -> (d0, d1, d2)>

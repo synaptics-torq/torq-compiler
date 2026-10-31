@@ -42,7 +42,6 @@ typedef OpPattern<torq_hl::ZeroPointBiasTableOp> ZeroPointBiasTablePattern;
 typedef OpPattern<torq_hl::ZeroPointCorrectOp> ZeroPointCorrectPattern;
 typedef OpPattern<torq_hl::MixedQuantMatMulOp> MixedQuantMatMulPattern;
 typedef OpPattern<torq_hl::GatherOp> GatherPattern;
-typedef OpPattern<torq_hl::Im2ColOp> Im2ColPattern;
 typedef OpPattern<torq_hl::IdentityOp> IdentityPattern;
 typedef OpPattern<torq_hl::ConvertOp> ConvertPattern;
 typedef OpPattern<torq_hl::MulOp> MulPattern;

@@ -209,9 +209,9 @@ def test_relocation_free_search_keeps_output_channels(torq_compiler, tmp_path):
     assert default == disabled
 
 
-# encoder_bf16_layer_Conv_2 on SR200: 7 tiles of 192 columns relocate a buffer. The
-# smallest relocation-free tile has 157 columns, and 160 also avoids the relocation.
-ALIGNMENT_MODEL = MODELS_DIR / "torch_ops" / "encoder_bf16_layer_Conv_2-sim-sl2610-v1.mlir"
+# A bf16 3x3 stride-2 stem conv (1x3x224x224 to 32 channels) on SR200: 16-row tiles of its
+# 112 output rows relocate a buffer, and the relocation-free tile has 12 rows.
+ALIGNMENT_MODEL = MODELS_DIR / "tiling" / "conv3x3-s2-1x3x224x224-to-32-bf16.mlir"
 
 
 @pytest.mark.ci
@@ -223,9 +223,9 @@ def test_relocation_free_search_keeps_alignment(torq_compiler, tmp_path):
         ALIGNMENT_MODEL,
         SR200_HW,
         ["--torq-probe-avoid-relocation=false"],
-        1249,
+        112,
     )
-    default = tile_loop_step(torq_compiler, tmp_path, ALIGNMENT_MODEL, SR200_HW, [], 1249)
+    default = tile_loop_step(torq_compiler, tmp_path, ALIGNMENT_MODEL, SR200_HW, [], 112)
     # Without this, the test would pass even if the search stopped changing the tile.
     assert default != disabled, "the tile no longer relocates, so this test proves nothing"
     assert default % 4 == 0, f"tile of {default} columns is not a multiple of 4"
@@ -233,7 +233,7 @@ def test_relocation_free_search_keeps_alignment(torq_compiler, tmp_path):
 
 # The tanh GELU on 1x4096x64 bf16 on SR200: the largest tile that fits, 456 rows, spills a buffer
 # computed in the tile, which 344-row tiles avoid. Only elementwise groups count spills: the
-# probe of encoder_bf16_layer_Conv_2 on SR200 also spills a computed buffer, and keeps its tile.
+# conv of SPILL_CONV_MODEL also spills a computed buffer, and keeps its tile.
 SPILL_MODEL = MODELS_DIR / "tiling" / "gelu-tanh-1x4096x64-bf16.mlir"
 
 
@@ -255,18 +255,23 @@ def test_probe_avoids_spilling_computed_buffers(torq_compiler, tmp_path):
     assert default < spilling
 
 
+# A bf16 3x3 stride-2 conv (1x64x56x56 to 128 channels) on SR200: its 4-row tiles of the 28
+# output rows spill a buffer computed in the tile. Counting that spill would cut the tile to 2 rows.
+SPILL_CONV_MODEL = MODELS_DIR / "tiling" / "conv3x3-s2-1x64x56x56-to-128-bf16.mlir"
+
+
 @pytest.mark.ci
 def test_probe_keeps_spills_of_non_elementwise_groups(torq_compiler, tmp_path):
     """A conv must keep its tile when it spills: a smaller tile reads its weights again."""
     disabled = tile_loop_step(
         torq_compiler,
         tmp_path,
-        ALIGNMENT_MODEL,
+        SPILL_CONV_MODEL,
         SR200_HW,
         ["--torq-probe-avoid-spills=false"],
-        1249,
+        28,
     )
-    default = tile_loop_step(torq_compiler, tmp_path, ALIGNMENT_MODEL, SR200_HW, [], 1249)
+    default = tile_loop_step(torq_compiler, tmp_path, SPILL_CONV_MODEL, SR200_HW, [], 28)
     assert default == disabled
 
 

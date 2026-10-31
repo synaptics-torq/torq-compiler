@@ -64,7 +64,6 @@ void ConvertSliceProgramToTorqHwPass::runOnOperation() {
     patterns.add<ZeroPointCorrectPattern>(ctx);
     patterns.add<MixedQuantMatMulPattern>(ctx);
     patterns.add<GatherPattern>(ctx);
-    patterns.add<Im2ColPattern>(ctx);
     patterns.add<IdentityPattern>(ctx);
     patterns.add<TablePattern>(ctx);
     patterns.add<ArgMaxPattern>(ctx);

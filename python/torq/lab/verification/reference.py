@@ -482,6 +482,45 @@ def _parse_conv_params(mlir_model_file):
     raise ValueError(f"no linalg.conv_1d/conv_2d found in {mlir_model_file}")
 
 
+def _parse_const_filter(mlir_model_file):
+    """Parse the constant filter of a single-conv MLIR file (one-input form).
+
+    Returns the filter as an fp32 array shaped as the file's constant
+    ([F, C, K, K] for conv_2d, [F, C, K] for conv_1d), rounded through the
+    file's element type (bf16/f16) like the compiler does.
+    """
+    text = Path(str(mlir_model_file)).read_text()
+    m = re.search(
+        r"linalg\.conv_\d[a-z_0-9]* \{[^}]*\} ins\([^,]+, \S+ : (tensor<[^>]+>), (tensor<[^>]+>)\)",
+        text,
+        re.S,
+    )
+    if not m:
+        raise ValueError(f"no single-conv ins() with a typed filter in {mlir_model_file}")
+    filt_type = m.group(2)
+    mc = re.search(r"arith\.constant (dense<[^>]*>) : " + re.escape(filt_type), text)
+    if not mc:
+        raise ValueError(f"no arith.constant matching filter type {filt_type} in {mlir_model_file}")
+    dense = mc.group(1)
+    shape_str = re.match(r"tensor<([^>]+)>", filt_type).group(1)
+    dims = shape_str.split("x")[:-1]
+    shape = tuple(int(d) for d in dims)
+    elem = shape_str.split("x")[-1]
+    inner = dense[len("dense<") : -1].strip()
+    if inner.startswith("["):
+        vals = [float(v) for v in inner.strip("[]").split(",")]
+    else:
+        n = 1
+        for d in dims:
+            n *= int(d)
+        vals = [float(inner)] * n
+    arr = np.array(vals, dtype=np.float32)
+    np_dtype = {"bf16": "bfloat16", "f16": "float16"}.get(elem)
+    if np_dtype is not None:
+        arr = arr.astype(getattr(ml_dtypes, np_dtype)).astype(np.float32)
+    return arr.reshape(shape)
+
+
 def _numpy_conv(x, w, strides, dilations):
     """Valid (unpadded) conv1d/conv2d with fp32 accumulation (matches the TORQ NPU).
 

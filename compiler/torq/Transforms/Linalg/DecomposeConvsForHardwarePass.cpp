@@ -27,7 +27,12 @@
 // fixed point by the greedy driver, so compositions such as dilated +
 // strided + oversized kernels decompose completely:
 //
-// 1. rewriteDilatedConv (dilate_conv): fires when any dilation > 1.  With
+// 1. rewriteDilatedConv (dilate_conv): fires when any dilation > 1, except
+//    when the conv keeps the native weight-dilation path
+//    (useNativeDilatedConv: constant filter, expanded kernel within the
+//    caps, strides in {1, 2}, and a conv2d/dwconv2d whose output element
+//    type is integer or f32 - bf16/f16 outputs take the residue split, and
+//    named 1-D/3-D convs have no native path at all).  With
 //    rstride = stride/gcd(stride, dilation) and
 //    rdilation = dilation/gcd(stride, dilation), the output positions split
 //    into residue classes; for each offset o in {0, stride, ...,
@@ -65,6 +70,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Passes.h"
+#include "Patterns.h"
 
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Utils/ConversionUtils.h"
@@ -105,6 +111,16 @@ static llvm::cl::opt<int64_t> clMaxDepthwiseKernelDim(
                    "hardware for 1D depthwise convolutions; larger kernels "
                    "are decomposed"),
     llvm::cl::init(1024), llvm::cl::Hidden
+);
+
+/// Strategy override for the dilated-conv gate (A/B testing; "auto" runs
+/// the cost/availability gate in useNativeDilatedConv).
+static llvm::cl::opt<std::string> clDilatedConvStrategy(
+    "torq-dilated-conv-strategy",
+    llvm::cl::desc("Strategy for dilated convs that fit the native "
+                   "weight-dilation limits: auto (default gate), native "
+                   "(zero-interleaved weight), or decompose (residue split)"),
+    llvm::cl::init("auto"), llvm::cl::Hidden
 );
 
 /// Extract the named conv index attributes (strides/dilations, stored as
@@ -286,6 +302,98 @@ static void axisKernelCaps(
     }
 }
 
+/// True when the conv could run as a single native conv with the dilation
+/// materialized into the weights (the conversion path zero-interleaves the
+/// constant filter and runs one conv): every stride is in {1, 2}, the
+/// dilation-expanded kernel fits the per-axis cap on every axis, and the
+/// filter is a compile-time constant (the native weight-dilation fold
+/// requires a constant weight; with a runtime weight the conv falls to the
+/// CSS generic even when the expanded kernel fits).  Mirrors the limits of
+/// getDilatedWts / expandWeightsForDilation in
+/// Conversions/LinalgToTorqHL/Conv2DPattern.cpp.
+template <typename ConvOpT>
+static bool fitsAfterWeightDilation(const ConvInfo &info, int64_t maxKernelDim) {
+    constexpr int64_t S = ConvOpTrait<ConvOpT>::sdim;
+    if (!isConstantLikeProducer(info.filter))
+        return false;
+    SmallVector<int64_t> capS1, capS2;
+    axisKernelCaps(info, maxKernelDim, capS1, capS2);
+    for (int64_t d = 0; d < S; ++d) {
+        if (info.strides[d] != 1 && info.strides[d] != 2)
+            return false;
+        int64_t expanded = info.kernel[d] + (info.kernel[d] - 1) * (info.dilations[d] - 1);
+        if (expanded > (info.strides[d] == 1 ? capS1[d] : capS2[d]))
+            return false;
+    }
+    return true;
+}
+
+/// Pick the strategy for a dilated conv (useNativeDilatedConv true => keep
+/// the conv for the native zero-interleaved-weight path; false => rewriteDilatedConv
+/// residue split).
+///
+/// The native form zero-interleaves the filter (E = k + (k-1)(d-1) taps, up
+/// to 2.5x the real MACs and weight stream) and keeps the epilogue fused
+/// into the conv; the residue form runs one sub-conv per residue class over
+/// dilation-thinned inputs (no zero taps) and merges them with
+/// insert_slice, which strands the epilogue behind the merge.
+///
+/// Measured A/B on both sim chips (C 2..64, spatial 16..80000, bf16, f32
+/// and int8 outputs):
+///   - bf16/f16 outputs: the residue form is equal or 1.6-7.8x faster in
+///     cmodel (the zero MACs inflate every channel tile and the
+///     zero-padded weight inflates the binary ~3x) and stays all-NSS (the
+///     bias add runs as an ek program).  On the small end (output bytes x
+///     inC below ~1MB) the split's per-program/per-DMA fixed costs
+///     dominate the compile-time estimate and the native form wins there
+///     instead (measured on the sweepconv-bf16 corpus plus dilated probes
+///     on both sim chips; cmodel is equal in that regime, so the native
+///     pick is not a cmodel regression).
+///   - f32 outputs: the residue epilogue (bias add / truncf) is a
+///     standalone f32 linalg op, which --torq-fallback-f32-to-host (the
+///     default) routes to the CSS host; the native form fuses it into the
+///     conv and stays 0 CSS.
+///   - integer (quantized) outputs: when the tiler channel-slices the group
+///     (large F), the per-channel rescale table is IV-sliced and the
+///     stranded tail falls to CSS (2.7x binary, 5.9-15x
+///     cmodel); the native form keeps 0 CSS.
+/// Named 1-D and 3-D convs have no native path at all: the conv1d->conv2d
+/// promotion refuses dilations and no pattern takes a named dilated conv1d,
+/// so bailing there strands the conv on the CSS host.  They always
+/// decompose.
+// Small-end crossover of the bf16/f16 rule (output bytes x inC): measured
+// native below (sweepconv-bf16-20: 4.5KB, C4 64x64 probe: 115KB), residue
+// split above (C16 64x64 probe: 1.8MB, 51% estimate win there); cmodel
+// equal in the below regime.
+static constexpr int64_t kNativeDilatedSmallOutBytesTimesInC = 1 << 20;
+
+template <typename ConvOpT>
+static bool useNativeDilatedConv(const ConvInfo &info, int64_t maxKernelDim) {
+    if (clDilatedConvStrategy == "decompose")
+        return false;
+    if (!fitsAfterWeightDilation<ConvOpT>(info, maxKernelDim))
+        return false;
+    if (clDilatedConvStrategy == "native")
+        return true;
+    if (std::is_same_v<ConvOpT, linalg::Conv1DNcwFcwOp> ||
+        std::is_same_v<ConvOpT, linalg::Conv3DNcdhwFcdhwOp> ||
+        std::is_same_v<ConvOpT, linalg::DepthwiseConv1DNcwCwOp> ||
+        std::is_same_v<ConvOpT, linalg::DepthwiseConv3DNcdhwCdhwOp>)
+        return false; // no native lowering for named 1-D/3-D convs
+    if (isa<IntegerType>(info.elemType))
+        return true; // quantized: avoid the channel-sliced CSS cliff
+    if (info.elemType.isF32())
+        return true; // f32 residue epilogue would fall to the host
+    // bf16/f16: native in the fixed-cost regime, residue split once the
+    // output*channel work outweighs the split's merge traffic and the zero
+    // taps stop inflating the estimate.
+    int64_t outBytes = info.batch * info.outC;
+    for (int64_t d : info.out)
+        outBytes *= d;
+    outBytes *= info.elemType.getIntOrFloatBitWidth() / 8;
+    return outBytes * info.inC < kNativeDilatedSmallOutBytesTimesInC;
+}
+
 /// True when the conv image carries backward padding (border zeros in
 /// memory): a tensor.pad, or a fill written by tensor.insert_slice, fed
 /// through any number of extract_slice ops.  Such convs are the EK path's
@@ -309,12 +417,15 @@ static bool imageHasBackwardPadding(Value image) {
 //===----------------------------------------------------------------------===////
 
 template <typename ConvOpT>
-static LogicalResult
-rewriteDilatedConv(ConvOpT op, PatternRewriter &rewriter, const ConvInfo &info) {
+static LogicalResult rewriteDilatedConv(
+    ConvOpT op, PatternRewriter &rewriter, const ConvInfo &info, int64_t maxKernelDim
+) {
 
     constexpr int64_t S = ConvOpTrait<ConvOpT>::sdim;
     if (llvm::all_of(info.dilations, [](int64_t d) { return d == 1; }))
         return failure();
+    if (useNativeDilatedConv<ConvOpT>(info, maxKernelDim))
+        return failure(); // the native weight-dilation path takes this conv
     LLVM_DEBUG(llvm::dbgs() << "[DecomposeConvs] decomposing dilated conv: " << op << "\n");
 
     SmallVector<int64_t> rstride(S), rdilation(S), count(S);
@@ -345,10 +456,21 @@ rewriteDilatedConv(ConvOpT op, PatternRewriter &rewriter, const ConvInfo &info) 
             // Kernel placements in the thinned slice; each maps to one
             // original output at off/stride + q * rdilation.
             int64_t outDim = (lattice - info.kernel[d]) / rstride[d] + 1;
+            // Clamp to the conv's actual output extent: the residue class's
+            // positions are outOffD + q * outStride, and a truncated (non-max
+            // valid) output stops the class short of the thinned slice's
+            // full placement range.  Without this the insert_slice below
+            // runs out of bounds (verified in the linalg shape rule).
+            int64_t outOffD = off / info.strides[d];
+            if (outOffD >= info.out[d]) {
+                skip = true;
+                break;
+            }
+            outDim = std::min(outDim, (info.out[d] - 1 - outOffD) / rdilation[d] + 1);
             inSize[d] = (outDim - 1) * rstride[d] + info.kernel[d];
             inOff[d] = off;
             inStride[d] = info.dilations[d];
-            outOff[d] = off / info.strides[d];
+            outOff[d] = outOffD;
             outSize[d] = outDim;
             outStride[d] = rdilation[d];
         }
@@ -665,7 +787,22 @@ class DecomposeConvForHardwarePattern : public OpRewritePattern<ConvOpT> {
         if (imageHasBackwardPadding(info.input) &&
             !paddedImageDecompositionSafe<ConvOpT>(info, maxKernelDim))
             return rewriter.notifyMatchFailure(op, "image has backward padding (EK path)");
-        if (succeeded(rewriteDilatedConv<ConvOpT>(op, rewriter, info)))
+        // A large-stride (s > 2) undilated conv1d is not decomposed here: the
+        // stride split accumulates its sub-convs through elementwise adds,
+        // which does not fit the small-LRAM single-slice targets.
+        // DecomposeConvToSpaceToDepthPass (always run before this pass) takes
+        // these instead: it promotes them to stride-[s,1] conv2d, S2D-folds
+        // the divisible ones into a single in-limits conv, and lets the prime
+        // stride/kernel combos fall through to this pass' conv2d pattern as a
+        // residue split. A single-output-point conv (window == whole input)
+        // takes SinglePointConv1DtoMatmulPattern below. Dilated conv1ds keep
+        // the decomposition: the dilation rewrite emits disjoint slices (no
+        // accumulation).
+        if (ConvOpTrait<ConvOpT>::depthwise == false && info.strides.size() == 1 &&
+            info.strides[0] > 2 && info.dilations[0] == 1) {
+            return rewriter.notifyMatchFailure(op, "large-stride conv1d (S2D territory)");
+        }
+        if (succeeded(rewriteDilatedConv<ConvOpT>(op, rewriter, info, maxKernelDim)))
             return success();
         if (succeeded(rewriteNoPadStride<ConvOpT>(op, rewriter, info, maxKernelDim)))
             return success();
@@ -697,16 +834,10 @@ struct SinglePointConv1DtoMatmulPattern : public OpRewritePattern<linalg::Conv1D
         if (!infoOr)
             return rewriter.notifyMatchFailure(op, "not a static conv1d");
         const ConvInfo &info = *infoOr;
-        if (op.getNumDpsInputs() != 2)
-            return rewriter.notifyMatchFailure(op, "biased conv1d stays on the conv path");
-        if (info.out[0] != 1)
-            return rewriter.notifyMatchFailure(op, "output has more than one point");
-        if (info.dilations[0] != 1 || info.activ[0] != info.kernel[0])
+        if (!isSinglePointConv1dMatmulCandidate(op))
             return rewriter.notifyMatchFailure(
-                op, "window does not cover the whole input (pad or dilation)"
+                op, "not the single-output-point zero-init GEMM form"
             );
-        if (!isAllZerosTensor(info.init))
-            return rewriter.notifyMatchFailure(op, "init is not all zeros");
 
         int64_t N = info.batch, C = info.inC, O = info.outC, kL = info.kernel[0];
         auto filterTy = cast<RankedTensorType>(info.filter.getType());

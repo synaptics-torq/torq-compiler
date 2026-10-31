@@ -51,6 +51,20 @@ def comparison_config_for_instancenorm(request):
 
 
 @pytest.fixture
+def comparison_config_for_encoder_stride64(request):
+    """Comparison config for the stride-64 conv1d (audio-encoder layer).
+
+    The S2D fold accumulates this conv's products in a different order than
+    the llvm-cpu f32 reference, leaving a few near-cancellation outputs
+    (~3.5e-5) ~1 bf16 ULP off the reference, beyond the default relative
+    fp_max_tol.  Measured on sim-sl2610: 9/359712 differ (max relative 0.016).
+    The small allowed_wrong fraction covers them without masking a real
+    regression (which would affect thousands of elements).
+    """
+    return {"allowed_wrong": 1e-4}
+
+
+@pytest.fixture
 def comparison_config_for_qdq_dequant(request):
     """int8 QDQ dequant zp regression (deq_min_i8, qdq_min_i8): residual is bf16 MulOp rounding."""
     return {"fp_max_tol": 0.2, "allowed_wrong": 0.06}
@@ -178,6 +192,9 @@ def case_config(request, runtime_hw_type, chip_config):
         # dispatch (bf16 interfaces); the NSS elementwise path needs bf16, so
         # demote the cone back (3.10 decomposed in bf16 directly).
         extra_args["torq_compiler_options"] = ["--torq-convert-dtypes"]
+
+    if "encoder_bf16_layer_Conv_2" in request.param.data.name:
+        extra_args["comparison_config"] = "comparison_config_for_encoder_stride64"
 
     # Force the bf16-stash LayerNormalization (bert shape) onto the NSS/slice
     # path: the model carries stash_type=BFLOAT16 so torch-mlir decomposes it

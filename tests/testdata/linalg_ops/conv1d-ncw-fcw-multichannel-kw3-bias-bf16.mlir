@@ -1,6 +1,7 @@
-// Native multi-channel Conv1D (C=48, F=48, Kw=3), NSS-only. Covers bias-fold-into-reduce with a
-// runtime-arg filter, so the fp32 bias add never materializes (the im2col path forces a host
-// fallback here; C=1 case is conv1d-ncw-fcw-bias-bf16.mlir).
+// Multi-channel Conv1D (C=48, F=48, Kw=3), NSS-only. The conv1d promotes to conv2d
+// (unit H extent) with a runtime-arg filter; the per-channel f32 bias folds into the
+// conv2d lowering, so the fp32 bias add never materializes (C=1 case is
+// conv1d-ncw-fcw-bias-bf16.mlir).
 #map = affine_map<(d0) -> (d0)>
 #map1 = affine_map<(d0, d1, d2) -> (d0, d1, d2)>
 module {

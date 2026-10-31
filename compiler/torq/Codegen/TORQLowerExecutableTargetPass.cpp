@@ -444,6 +444,20 @@ void addNssPasses(OpPassManager &pm) {
 void addSlicePassesUpToTileAndFuse(OpPassManager &pm) {
     auto &funcPm = pm.nest<func::FuncOp>();
 
+    // Decompose out-of-limits named convs that are already in NCHW/NCW form
+    // (this catches every conv1d, which has no NHWC variant) before
+    // OptimizeLinalgForTorq runs: the in-range conv1d sub-convs it produces
+    // then flow through the conv1d->conv2d conversion, so no named conv1d
+    // reaches tiling.
+    //
+    // DecomposeConvToSpaceToDepthPass runs first: for an out-of-limits conv2d
+    // whose kernel and stride share a common divisor it shrinks the conv into
+    // a single in-limits conv via SpaceToDepth, which is cheaper than the
+    // slice-and-add decomposition; everything else bails and falls through to
+    // DecomposeConvsForHardwarePass.
+    funcPm.addPass(createDecomposeConvToSpaceToDepthPass());
+    funcPm.addPass(createDecomposeConvsForHardwarePass());
+
     // optimize linalg ops for torq
     // this pass use some tags from tile-and-fuse mark pass
     funcPm.addPass(createOptimizeLinalgForTorqPass());
@@ -457,7 +471,14 @@ void addSlicePassesUpToTileAndFuse(OpPassManager &pm) {
     // Convert NHWC conv/pool/depthwise NHWC to NCHW
     funcPm.addPass(createConvertNhwcOpToNchwPass());
     funcPm.addPass(createCanonicalizerPass());
+
+    // Second decomposition round: catches convs that only reached NCHW/NCW
+    // named form after the NHWC->NCHW conversion (or standardization) above.
+    // Same ordering as the first round: SpaceToDepth first for the divisible
+    // cases, then the exhaustive decomposition for everything else.
     funcPm.addPass(createDecomposeConvToSpaceToDepthPass());
+    funcPm.addPass(createDecomposeConvsForHardwarePass());
+    funcPm.addPass(createCanonicalizerPass());
 
     if (clEnableTransposeOptimization) {
         funcPm.addPass(createOptimizeTransposeLayoutPass());

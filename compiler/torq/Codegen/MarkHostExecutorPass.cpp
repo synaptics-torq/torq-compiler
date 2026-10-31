@@ -50,17 +50,6 @@ class LinalgOpPattern : public OpInterfaceRewritePattern<linalg::LinalgOp> {
             return failure();
         }
 
-        // The conv1d matmul lowering emits a torq.im2col generic only when its gather
-        // result is too large to stay LRAM-resident on the NPU; run it on the host. The
-        // generic is bf16, so the f32 fallback below would not catch it. Under NSS-only
-        // this pass already bailed above, so the small-conv gather form stays on the NPU.
-        if (srcOp->hasAttr("torq.im2col")) {
-            rewriter.modifyOpInPlace(srcOp, [&]() {
-                setTargetExecutorAttr(srcOp, torq_hl::Executor::Host);
-            });
-            return success();
-        }
-
         // Check for hardware reduces BEFORE the f32 fallback logic, which marks
         // every f32 op without a Torq kernel as host. Sum, max and min (f32
         // included) run on the NPU.

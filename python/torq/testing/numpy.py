@@ -24,6 +24,7 @@ from torq.lab.verification.reference import (  # noqa: F401
     numpy_instance_norm,
     numpy_reduce_mean,
     _parse_conv_params,
+    _parse_const_filter,
     _numpy_conv,
 )
 
@@ -104,11 +105,14 @@ def numpy_conv_reference_results(input_data, mlir_io_spec, mlir_model_file):
     from .iree import get_dtype
 
     data = input_data.data if hasattr(input_data, "data") else input_data
-    assert len(data) == 2
+    assert len(data) in (1, 2)
     assert len(mlir_io_spec.outputs) == 1
     output_dtype = get_dtype(mlir_io_spec.outputs[0].fmt)
     strides, dilations = _parse_conv_params(mlir_model_file)
-    result = _numpy_conv(data[0], data[1], strides, dilations)
+    if len(data) == 2:
+        result = _numpy_conv(data[0], data[1], strides, dilations)
+    else:
+        result = _numpy_conv(data[0], _parse_const_filter(mlir_model_file), strides, dilations)
     return [result.astype(output_dtype)]
 
 

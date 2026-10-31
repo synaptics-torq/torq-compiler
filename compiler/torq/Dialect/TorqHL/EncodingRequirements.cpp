@@ -502,8 +502,6 @@ KernelEncoding GatherOp::getKernelEncoding() {
     return encoding;
 }
 
-KernelEncoding Im2ColOp::getKernelEncoding() { return getDenseEncoding(); }
-
 KernelEncoding AvgPool2DOp::getKernelEncoding() { return {{}, {{}, 64}}; }
 
 KernelEncoding ConvertOp::getKernelEncoding() { return getDenseEncoding(); }

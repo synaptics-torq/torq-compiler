@@ -1,7 +1,9 @@
 // Regression for the integer bias / requant path in
 // Conv1DMatmulToTorqHlFCPattern (compiler/torq/Conversions/LinalgToTorqHL/
-// Conv1DMatmulPattern.cpp). The IR shape below mirrors the output of
-// Conv1DNcwFcwToLinalgMatmulPattern for an int8 pointwise Conv1D:
+// Conv1DMatmulPattern.cpp): a rank-2 matmul with the transpose/expand +
+// bias/requant epilogue. (This shape used to be produced by the int8
+// conv1d->matmul lowering, which has been removed; the matmul is now given
+// directly.)
 //
 //   matmul [Ow, K] x [K, F] -> [Ow, F]            (i8 x i8 -> i32)
 //   linalg.transpose [1, 0]                       -> [F, Ow]

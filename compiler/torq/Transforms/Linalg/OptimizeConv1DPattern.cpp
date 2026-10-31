@@ -9,6 +9,7 @@
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
+#include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
 #include "torq/Utils/TorqUtils.h"
@@ -73,296 +74,276 @@ static bool isPlainTruncfF32ToBF16(linalg::GenericOp op) {
            body.getTerminator()->getOperand(0) == truncf.getResult();
 }
 
-// Emit the im2col unfold ([Ow, C*Kw]) as an affine-map linalg.generic marked torq.im2col.
-// Used when the NDL im2col op is too large to stay LRAM-resident: MarkHostExecutorPass routes
-// the marked generic to the host (torq_hl.im2col is not tileable).
-static Value emitIm2Col(
-    PatternRewriter &rewriter, Location loc, Value input, int64_t C, int64_t W, int64_t Kw,
-    int64_t Ow, int64_t stride, int64_t dilation, RankedTensorType unfoldedType
-) {
-    auto elemType = unfoldedType.getElementType();
-
-    // Collapse [N,C,W] -> [C,W] so the indexing map is rank-2 with no constant dims (constant
-    // dims get folded by canonicalization, causing an operand-rank vs map-result-rank mismatch
-    // later).
-    auto collapsedInputType = RankedTensorType::get({C, W}, elemType);
-    auto collapsedInput = tensor::CollapseShapeOp::create(
-        rewriter, loc, collapsedInputType, input, ArrayRef<ReassociationIndices>{{0, 1}, {2}}
-    );
-    // if (stride == 1 && dilation == 1) {
-    //     return collapsedInput.getResult();
-    // }
-
-    // (d0=Ow, d1=C*Kw) -> (d1/Kw, d0*stride + (d1%Kw)*dilation)
-    auto unfoldedInit = tensor::EmptyOp::create(rewriter, loc, unfoldedType.getShape(), elemType);
-
-    auto [d0, d1] = std::make_tuple(rewriter.getAffineDimExpr(0), rewriter.getAffineDimExpr(1));
-    auto [KwExpr, strideExpr, dilationExpr] = std::make_tuple(
-        rewriter.getAffineConstantExpr(Kw), rewriter.getAffineConstantExpr(stride),
-        rewriter.getAffineConstantExpr(dilation)
-    );
-
-    auto outputIndexMap = AffineMap::getMultiDimIdentityMap(2, rewriter.getContext());
-    // (d0=Ow, d1=C*Kw) -> (d1/Kw, d0*stride + (d1%Kw)*dilation)
-    auto inputIndexMap = AffineMap::get(
-        2, 0, {d1.floorDiv(KwExpr), d1 % KwExpr * dilationExpr + d0 * strideExpr},
-        rewriter.getContext()
-    );
-    SmallVector<utils::IteratorType> iteratorTypes(2, utils::IteratorType::parallel);
-
-    auto im2col = linalg::GenericOp::create(
-        rewriter, loc, TypeRange{unfoldedType}, ValueRange{collapsedInput.getResult()},
-        ValueRange{unfoldedInit}, ArrayRef<AffineMap>{inputIndexMap, outputIndexMap}, iteratorTypes,
-        [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange blockArgs) {
-            linalg::YieldOp::create(nestedBuilder, nestedLoc, blockArgs[0]);
-        }
-    );
-
-    return im2col.getResult(0);
+/// Reassociation for a tensor::expand_shape that appends a unit extent
+/// after the last dimension of a rank-`rank` tensor: {d0}, {d1}, ...,
+/// {d_{rank-2}}, {d_{rank-1}, d_rank}.
+static SmallVector<ReassociationIndices> appendUnitDimReassociation(int64_t rank) {
+    SmallVector<ReassociationIndices> reassoc;
+    reassoc.reserve(rank);
+    for (int64_t i = 0; i + 1 < rank; ++i)
+        reassoc.push_back({i});
+    reassoc.push_back({rank - 1, rank});
+    return reassoc;
 }
 
-/// Optimization pattern for linalg.conv_1d operation.
-struct Conv1DNcwFcwToLinalgMatmulPattern : public OpRewritePattern<linalg::Conv1DNcwFcwOp> {
-    using OpRewritePattern::OpRewritePattern;
+/// The same tensor type with a unit extent appended after the last dimension.
+static RankedTensorType appendUnitDimType(RankedTensorType type) {
+    SmallVector<int64_t> shape(type.getShape().begin(), type.getShape().end());
+    shape.push_back(1);
+    return RankedTensorType::get(shape, type.getElementType());
+}
 
-    LogicalResult
-    matchAndRewrite(linalg::Conv1DNcwFcwOp convOp, PatternRewriter &rewriter) const override {
+/// Maps a 1D convolution op to the 2D op it promotes to (the added spatial
+/// extent is set to 1) and to the 1D filter rank ([F,C,W] for the regular
+/// conv, [C,W] for the depthwise one).
+
+template <typename Conv1DOp> struct Conv1DPromotionTrait;
+
+template <> struct Conv1DPromotionTrait<linalg::Conv1DNcwFcwOp> {
+    using Conv2DOp = linalg::Conv2DNchwFchwOp;
+    static constexpr int64_t filterRank = 3;
+    static constexpr bool isDepthwise = false;
+};
+template <> struct Conv1DPromotionTrait<linalg::DepthwiseConv1DNcwCwOp> {
+    using Conv2DOp = linalg::DepthwiseConv2DNchwChwOp;
+    static constexpr int64_t filterRank = 2;
+    static constexpr bool isDepthwise = true;
+};
+
+/// Shared claim predicate: a single-output-point regular conv1d (window ==
+/// whole input, dilation 1) with an all-zero init and no bias input is a
+/// GEMM, which DecomposeConvsForHardwarePass lowers to linalg.matmul
+/// (SinglePointConv1DtoMatmulPattern).
+bool isSinglePointConv1dMatmulCandidate(linalg::Conv1DNcwFcwOp op) {
+    if (op.getNumDpsInputs() != 2)
+        return false; // a bias input keeps the conv on the conv path
+    auto inTy = dyn_cast<RankedTensorType>(op.getInputs()[0].getType());
+    auto fltTy = dyn_cast<RankedTensorType>(op.getInputs()[1].getType());
+    auto outTy = dyn_cast<RankedTensorType>(op.getOutputs()[0].getType());
+    if (!inTy || !fltTy || !outTy || !inTy.hasStaticShape() || !fltTy.hasStaticShape() ||
+        !outTy.hasStaticShape())
+        return false; // not a static conv1d
+    if (outTy.getShape()[2] != 1)
+        return false; // output has more than one point
+    if (op.getDilations().getValues<int64_t>()[0] != 1)
+        return false;
+    if (inTy.getShape()[2] != fltTy.getShape()[2])
+        return false; // window does not cover the whole input (pad or dilation)
+    return isAllZerosTensor(op.getOutputs()[0]);
+}
+
+/// Promotes a 1D convolution to its 2D counterpart with the added spatial
+/// extent set to 1.  One shared body for the regular and depthwise 1D
+/// convs, parameterized like ConvOpTrait in DecomposeConvsForHardwarePass.cpp.
+///
+/// The 2D op then lowers through the established conv2d path, where a
+/// depthwise conv with a unit extent takes the 1D-depthwise lowering and may
+/// carry large kernels on the live axis.
+template <typename Conv1DOp>
+struct Conv1DtoConv2DPromotionPattern : public OpRewritePattern<Conv1DOp> {
+    using Conv2DOp = typename Conv1DPromotionTrait<Conv1DOp>::Conv2DOp;
+
+    // Strides outside [minStride, maxStride] are not promoted.  The defaults
+    // keep the HW-legal promotion range [1, 2]; the S2D pass registers
+    // (minStride = 3, maxStride = large) so that only out-of-range conv1ds are
+    // promoted early, for its stride-into-channels fold — everything below
+    // keeps its existing promotion path in OptimizeLinalgForTorqPass.
+    const int64_t minStride;
+    const int64_t maxStride;
+
+    Conv1DtoConv2DPromotionPattern(
+        MLIRContext *context, int64_t minStride = 1, int64_t maxStride = 2
+    )
+        : OpRewritePattern<Conv1DOp>(context), minStride(minStride), maxStride(maxStride) {}
+
+    LogicalResult matchAndRewrite(Conv1DOp convOp, PatternRewriter &rewriter) const override {
         auto loc = convOp.getLoc();
 
-        // Extract tensors and shapes
-        Value input = convOp.getInputs()[0];   // Input tensor [N,C,W]
-        Value filter = convOp.getInputs()[1];  // Filter tensor [F,C,Kw]
-        Value output = convOp.getOutputs()[0]; // Output tensor [N,F,Ow]
+        Value input = convOp.getInputs()[0];
+        Value filter = convOp.getInputs()[1];
+        Value output = convOp.getOutputs()[0];
 
         auto inputType = cast<RankedTensorType>(input.getType());
         auto filterType = cast<RankedTensorType>(filter.getType());
         auto outputType = cast<RankedTensorType>(output.getType());
+        auto strides = convOp.getStrides().template getValues<int64_t>();
+        auto dilations = convOp.getDilations().template getValues<int64_t>();
 
-        // Extract dimensions
-        ArrayRef<int64_t> inputShape = inputType.getShape();
-        ArrayRef<int64_t> filterShape = filterType.getShape();
-        ArrayRef<int64_t> outputShape = outputType.getShape();
-
-        if (inputShape.size() != 3 || filterShape.size() != 3 || outputShape.size() != 3) {
-            return rewriter.notifyMatchFailure(convOp, "Expected 3D tensors for Conv1D");
+        if (inputType.getRank() != 3 || outputType.getRank() != 3 ||
+            filterType.getRank() != Conv1DPromotionTrait<Conv1DOp>::filterRank) {
+            return rewriter.notifyMatchFailure(convOp, "unexpected rank");
         }
-
-        if (!isAllZerosTensor(output)) {
-            return rewriter.notifyMatchFailure(convOp, "init is not all zeros");
-        }
-
-        // Extract convolution parameters
-        SmallVector<int64_t> strides = llvm::to_vector<4>(
-            llvm::map_range(convOp.getStrides(), [](APInt v) { return v.getSExtValue(); })
-        );
-        SmallVector<int64_t> dilations = llvm::to_vector<4>(
-            llvm::map_range(convOp.getDilations(), [](APInt v) { return v.getSExtValue(); })
-        );
-
-        int64_t N = inputShape[0];       // Batch size
-        int64_t C = inputShape[1];       // Input channels
-        int64_t F = filterShape[0];      // Output channels/filters
-        int64_t Kw = filterShape[2];     // Kernel width
-        int64_t Ow = outputShape[2];     // Output width
-        int64_t stride = strides[0];     // Stride value
-        int64_t dilation = dilations[0]; // Dilation value
-
-        if (stride <= 2 && dilation == 1) {
-            return rewriter.notifyMatchFailure(convOp, "Converting to Conv2d is better");
-        }
-        // Steps 1-3: im2col (unfold input patches into [Ow, C*Kw]) + matmul -> [Ow, F].
-        //
-        // The unfold is torq_hl.im2col (affine NDL window read -> unfolded buffer). The op is not
-        // tileable, so when the full unfold does not fit in LRAM we tile im2col + matmul along
-        // the output width. Only a pathological conv whose single-column unfold still overflows
-        // LRAM falls back to an affine-map generic marked torq.im2col on the host.
-        auto elemType = inputType.getElementType();
-        auto outputElemType = outputType.getElementType();
-        int64_t W = inputShape[2];
-
-        // Filter: [F, C, Kw] -> [F, C*Kw] -> transpose -> [C*Kw, F].
-        auto reshapedFilterType = RankedTensorType::get({F, C * Kw}, filterType.getElementType());
-        auto reshapedFilter = tensor::CollapseShapeOp::create(
-            rewriter, loc, reshapedFilterType, filter, ArrayRef<ReassociationIndices>{{0}, {1, 2}}
-        );
-        // Transpose filter [F, K] -> [K, F] so the matmul is im2col[Ow,K] x filterT[K,F] -> [Ow,F].
-        // The transpose folds into the constant weight at canonicalization time.
-        auto transposedFilterInit = tensor::EmptyOp::create(
-            rewriter, loc, ArrayRef<int64_t>{C * Kw, F}, filterType.getElementType()
-        );
-        Value transposedFilter = linalg::TransposeOp::create(
-                                     rewriter, loc, reshapedFilter.getResult(),
-                                     transposedFilterInit, ArrayRef<int64_t>{1, 0}
-        )
-                                     .getResults()[0];
-
-        // [Ow, C*Kw] x [C*Kw, F] -> [Ow, F]; accumulate into the output element type (f32).
-        auto emitMatmul = [&](Value unfolded) -> Value {
-            auto matmulResultType = RankedTensorType::get({Ow, F}, outputElemType);
-            auto matmulInit = linalg::FillOp::create(
-                rewriter, loc, createZeroConstant(rewriter, loc, outputElemType),
-                tensor::EmptyOp::create(rewriter, loc, ArrayRef<int64_t>{Ow, F}, outputElemType)
-                    .getResult()
-            );
-            return linalg::MatmulOp::create(
-                       rewriter, loc, TypeRange{matmulResultType},
-                       ValueRange{unfolded, transposedFilter}, ValueRange{matmulInit.getResult(0)}
-            )
-                .getResults()[0];
-        };
-
-        auto unfoldedType = RankedTensorType::get({Ow, C * Kw}, elemType);
-
-        Value matmulResult = emitMatmul(
-            emitIm2Col(rewriter, loc, input, C, W, Kw, Ow, stride, dilation, unfoldedType)
-        );
-        // Transpose [Ow, F] -> [F, Ow] so Conv1DMatmulToTorqHlFCPattern detects the transpose
-        // and correctly emits is_batch_scaled=false (per-output-channel bias on OC=F).
-        auto transposedMatmulInit =
-            tensor::EmptyOp::create(rewriter, loc, ArrayRef<int64_t>{F, Ow}, outputElemType);
-        Value transposedMatmul =
-            linalg::TransposeOp::create(
-                rewriter, loc, matmulResult, transposedMatmulInit, ArrayRef<int64_t>{1, 0}
-            )
-                .getResults()[0];
-
-        // Step 4: expand [F, Ow] -> [N, F, Ow]
-        if (N == 1) {
-            SmallVector<int64_t> expandedShape = {N, F, Ow};
-            auto expandedType = RankedTensorType::get(expandedShape, outputElemType);
-            auto expandedResult = tensor::ExpandShapeOp::create(
-                rewriter, loc, expandedType, transposedMatmul,
-                ArrayRef<ReassociationIndices>{{0, 1}, {2}}
-            );
-
-            rewriter.replaceOp(convOp, expandedResult.getResult());
-        }
-        else {
+        if (strides[0] < minStride || strides[0] > maxStride || dilations[0] > 1) {
             return rewriter.notifyMatchFailure(
-                convOp, "Batched Conv1D not supported in this pattern"
+                convOp, "stride outside promotion range or dilation > 1"
             );
+        }
+
+        // A single-output-point regular conv1d is a GEMM (the stride selects
+        // tap 0); DecomposeConvsForHardwarePass lowers it to a matmul for the
+        // fully-connected kernel, which beats both the S2D stride-into-channels
+        // fold (C-inflated conv) and the residue split.  Bail exactly where
+        // that pattern claims (isSinglePointConv1dMatmulCandidate): a
+        // single-output-point conv it does not claim (a bias folded into the
+        // init, say) must still be promoted, or nothing lowers it.
+        if (!Conv1DPromotionTrait<Conv1DOp>::isDepthwise &&
+            isSinglePointConv1dMatmulCandidate(cast<linalg::Conv1DNcwFcwOp>(convOp))) {
+            return rewriter.notifyMatchFailure(
+                convOp, "single-output-point conv1d is matmul territory"
+            );
+        }
+
+        // Append the unit extent: [N,C,W] -> [N,C,W,1], filter likewise.
+        auto expandedInput = tensor::ExpandShapeOp::create(
+                                 rewriter, loc, appendUnitDimType(inputType), input,
+                                 appendUnitDimReassociation(inputType.getRank())
+        )
+                                 .getResult();
+        auto expandedFilter = tensor::ExpandShapeOp::create(
+                                  rewriter, loc, appendUnitDimType(filterType), filter,
+                                  appendUnitDimReassociation(filterType.getRank())
+        )
+                                  .getResult();
+        auto expandedOutput = tensor::ExpandShapeOp::create(
+                                  rewriter, loc, appendUnitDimType(outputType), output,
+                                  appendUnitDimReassociation(outputType.getRank())
+        )
+                                  .getResult();
+
+        // 1D strides/dilations to 2D (unit on the added dimension).
+        SmallVector<int64_t> strides2d = {strides[0], 1};
+        SmallVector<int64_t> dilations2d = {dilations[0], 1};
+        auto attrType = RankedTensorType::get({2}, rewriter.getIntegerType(64));
+        auto stridesAttr2d = DenseIntElementsAttr::get(attrType, strides2d);
+        auto dilationsAttr2d = DenseIntElementsAttr::get(attrType, dilations2d);
+
+        auto conv2d = Conv2DOp::create(
+            rewriter, loc, expandedOutput.getType(), ValueRange{expandedInput, expandedFilter},
+            ValueRange{expandedOutput}, stridesAttr2d, dilationsAttr2d
+        );
+
+        // Re-emit an f32->bf16 truncf that immediately consumed the 1D conv
+        // result; the original generic is dropped below once the collapse is
+        // wired up.
+        auto conv2dResult = conv2d.getResult(0);
+        auto currentResult = conv2dResult;
+
+        linalg::GenericOp truncfGenericOp = nullptr;
+        auto conv1dResult = convOp.getResult(0);
+        if (conv1dResult.hasOneUse()) {
+            auto userOp = conv1dResult.use_begin()->getOwner();
+            auto genericOp = llvm::dyn_cast<linalg::GenericOp>(userOp);
+            // Only a plain truncf is re-emitted; any other user (e.g. a clamp fused
+            // with the truncf) keeps reading the collapsed conv2d result.
+            if (genericOp && isPlainTruncfF32ToBF16(genericOp)) {
+                currentResult = emitTruncfToBF16(rewriter, loc, conv2dResult);
+                truncfGenericOp = genericOp;
+            }
+        }
+
+        // Collapse the unit extent back off: [N,F,Ow,1] -> [N,F,Ow].
+        auto collapsedResultType = RankedTensorType::get(
+            SmallVector<int64_t>(outputType.getShape().begin(), outputType.getShape().end()),
+            cast<RankedTensorType>(currentResult.getType()).getElementType()
+        );
+        auto collapsedResult =
+            tensor::CollapseShapeOp::create(
+                rewriter, loc, collapsedResultType, currentResult, appendUnitDimReassociation(3)
+            )
+                .getResult();
+
+        rewriter.replaceOp(convOp, collapsedResult);
+
+        if (truncfGenericOp) {
+            truncfGenericOp->replaceAllUsesWith(ValueRange{collapsedResult});
+            rewriter.eraseOp(truncfGenericOp);
         }
 
         return success();
     }
 };
 
-struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1DNcwFcwOp> {
-    using OpRewritePattern::OpRewritePattern;
+/// Re-encodes a W-live 1D depthwise conv (unit image H extent and unit kH) into
+/// the H-live orientation ([N,C,1,W] -> [N,C,W,1], weight [C,1,KW] -> [C,KW,1])
+/// when the dedicated 1D depthwise lowering cannot handle its channels. That
+/// lowering packs the weight channels into fixed blocks of 16 (bf16) or 32
+/// (other) and requires the channel count to be a multiple of the block size,
+/// while the tall-kernel EK path taken by the H-live conv has no such
+/// requirement. The swap is exact: a 1D depthwise conv is unchanged under a
+/// spatial axis swap (strides and dilations swap with it).
+struct DepthwiseConv2DWLiveToHLivePattern
+    : public OpRewritePattern<linalg::DepthwiseConv2DNchwChwOp> {
+    using OpRewritePattern<linalg::DepthwiseConv2DNchwChwOp>::OpRewritePattern;
 
-    LogicalResult
-    matchAndRewrite(linalg::Conv1DNcwFcwOp convOp, PatternRewriter &rewriter) const override {
+    LogicalResult matchAndRewrite(
+        linalg::DepthwiseConv2DNchwChwOp convOp, PatternRewriter &rewriter
+    ) const override {
         auto loc = convOp.getLoc();
 
-        // Get operands
-        Value input = convOp.getInputs()[0];
-        Value filter = convOp.getInputs()[1];
-        Value output = convOp.getOutputs()[0];
+        auto imageType = cast<RankedTensorType>(convOp.getInputs()[0].getType());
+        auto weightType = cast<RankedTensorType>(convOp.getInputs()[1].getType());
+        auto outputType = cast<RankedTensorType>(convOp.getOutputs()[0].getType());
+        auto strides = convOp.getStrides().template getValues<int64_t>();
+        auto dilations = convOp.getDilations().template getValues<int64_t>();
 
-        // Get attributes
-        auto stridesAttr = convOp.getStrides();
-        auto dilationsAttr = convOp.getDilations();
+        if (imageType.getRank() != 4 || weightType.getRank() != 3 || outputType.getRank() != 4)
+            return rewriter.notifyMatchFailure(convOp, "unexpected rank");
+        // Only re-orient the degenerate W-live encoding [N,C,1,W] (weight
+        // [C,1,KW]), and only when the kernel exceeds the 2D cap: smaller
+        // kernels lower fine in place.
+        if (imageType.getShape()[2] != 1 || weightType.getShape()[1] != 1 ||
+            weightType.getShape()[2] <= HwInfo::nss_max_kernel_width)
+            return rewriter.notifyMatchFailure(convOp, "not a wide W-live conv");
+        // The dedicated 1D lowering (and the H-live path) expect stride-1,
+        // dilation-1 convs; the decomposition pass guarantees that for the
+        // chunks this pattern sees.
+        if (strides[0] != 1 || strides[1] != 1 || dilations[0] != 1 || dilations[1] != 1)
+            return rewriter.notifyMatchFailure(convOp, "stride/dilation not 1");
+        // The dedicated 1D lowering is selected for bf16 images and fails
+        // when the channels do not fit its fixed packing blocks; that is the
+        // exact case this rewrite rescues.
+        if (!imageType.getElementType().isBF16())
+            return rewriter.notifyMatchFailure(convOp, "image not bf16");
+        const int64_t ch = imageType.getShape()[1];
+        const int64_t inner = weightType.getElementType().isBF16() ? 16 : 32;
+        if (ch % inner == 0)
+            return rewriter.notifyMatchFailure(convOp, "channels fit 1D packing");
 
-        // Get types and shapes
-        auto inputType = cast<RankedTensorType>(input.getType());
-        auto filterType = cast<RankedTensorType>(filter.getType());
-        auto outputType = cast<RankedTensorType>(output.getType());
+        SmallVector<int64_t> dataPerm = {0, 1, 3, 2};
+        SmallVector<int64_t> weightPerm = {0, 2, 1};
 
-        if (stridesAttr.getValues<int64_t>()[0] > 2 || dilationsAttr.getValues<int64_t>()[0] > 1) {
-            return rewriter.notifyMatchFailure(convOp, "strides/dilations must be 1D");
-        }
+        auto permuteType = [](RankedTensorType type, ArrayRef<int64_t> perm) {
+            SmallVector<int64_t> shape(perm.size());
+            for (size_t i = 0; i < perm.size(); ++i)
+                shape[i] = type.getShape()[perm[i]];
+            return RankedTensorType::get(shape, type.getElementType());
+        };
+        auto transpose = [&](Value value, ArrayRef<int64_t> perm) -> Value {
+            auto type = cast<RankedTensorType>(value.getType());
+            auto transposedType = permuteType(type, perm);
+            auto init =
+                tensor::EmptyOp::create(
+                    rewriter, loc, transposedType.getShape(), transposedType.getElementType()
+                )
+                    .getResult();
+            return linalg::TransposeOp::create(rewriter, loc, value, init, perm).getResult()[0];
+        };
 
-        // Add extra dimension (1) to input as W: [N,C,W] -> [N,C,W,1]
-        // Need to use proper reassociation indices
-        SmallVector<ReassociationIndices> inputReassoc = {{0}, {1}, {2, 3}};
-        auto expandedInputType = RankedTensorType::get(
-            {inputType.getShape()[0], inputType.getShape()[1], inputType.getShape()[2], 1},
-            inputType.getElementType()
-        );
-
-        auto expandedInput =
-            tensor::ExpandShapeOp::create(rewriter, loc, expandedInputType, input, inputReassoc);
-
-        // Add extra dimension (1) to filter: [F,C,W] -> [F,C,W,1]
-        SmallVector<ReassociationIndices> filterReassoc = {{0}, {1}, {2, 3}};
-        auto expandedFilterType = RankedTensorType::get(
-            {filterType.getShape()[0], filterType.getShape()[1], filterType.getShape()[2], 1},
-            filterType.getElementType()
-        );
-
-        auto expandedFilter =
-            tensor::ExpandShapeOp::create(rewriter, loc, expandedFilterType, filter, filterReassoc);
-
-        // Add extra dimension (1) to output: [N,F,W] -> [N,F,W,1]
-        SmallVector<ReassociationIndices> outputReassoc = {{0}, {1}, {2, 3}};
-        auto expandedOutputType = RankedTensorType::get(
-            {outputType.getShape()[0], outputType.getShape()[1], outputType.getShape()[2], 1},
-            outputType.getElementType()
-        );
-
-        auto expandedOutput =
-            tensor::ExpandShapeOp::create(rewriter, loc, expandedOutputType, output, outputReassoc);
-
-        // Convert 1D strides/dilations to 2D (add 1 as width dimension)
-        SmallVector<int64_t> strides2d = {stridesAttr.getValues<int64_t>()[0]};
-        strides2d.push_back(1);
-        SmallVector<int64_t> dilations2d = {dilationsAttr.getValues<int64_t>()[0]};
-        dilations2d.push_back(1);
-
+        SmallVector<int64_t> strides2d = {strides[1], strides[0]};
+        SmallVector<int64_t> dilations2d = {dilations[1], dilations[0]};
         auto attrType = RankedTensorType::get({2}, rewriter.getIntegerType(64));
-        auto stridesAttr2d = DenseIntElementsAttr::get(attrType, strides2d);
-        auto dilationsAttr2d = DenseIntElementsAttr::get(attrType, dilations2d);
-
-        auto conv2d = linalg::Conv2DNchwFchwOp::create(
-            rewriter, loc, expandedOutput.getType(), ValueRange{expandedInput, expandedFilter},
-            ValueRange{expandedOutput}, stridesAttr2d, dilationsAttr2d
+        auto conv2d = linalg::DepthwiseConv2DNchwChwOp::create(
+            rewriter, loc, permuteType(outputType, dataPerm),
+            ValueRange{
+                transpose(convOp.getInputs()[0], dataPerm),
+                transpose(convOp.getInputs()[1], weightPerm)
+            },
+            ValueRange{transpose(convOp.getOutputs()[0], dataPerm)},
+            DenseIntElementsAttr::get(attrType, strides2d),
+            DenseIntElementsAttr::get(attrType, dilations2d)
         );
 
-        // check if there is linalg.genericOp does truncf for the conv1d result, if so, we need to
-        // create a new linalg.genericOp to do the truncf for new conv2d result, and remove the
-        // old one
-
-        auto conv2dResult = conv2d.getResult(0);
-        auto currentResult = conv2dResult;
-
-        linalg::GenericOp truncfGenericOp = nullptr;
-
-        auto conv1dResult = convOp.getResult(0);
-
-        // if convOp has only one use
-        if (conv1dResult.hasOneUse()) {
-            auto userOp = conv1dResult.use_begin()->getOwner();
-            // Only a plain truncf is re-emitted; any other user (e.g. a clamp fused
-            // with the truncf) keeps reading the collapsed conv2d result.
-            auto genericOp = llvm::dyn_cast<linalg::GenericOp>(userOp);
-            if (genericOp && isPlainTruncfF32ToBF16(genericOp)) {
-                // Re-emit the conv1d's f32->bf16 truncf on the new conv2d result; the
-                // original generic is dropped below once the collapse is wired up.
-                currentResult = emitTruncfToBF16(rewriter, loc, conv2dResult);
-                truncfGenericOp = genericOp;
-            }
-        }
-
-        // Collapsing the width dimension ([N,F,Ow,1] -> [N,F,Ow])
-        // Create a new reassociation indices for collapsing the last dimension
-        SmallVector<ReassociationIndices> collapseReassoc = {{0}, {1}, {2, 3}};
-        auto collapsedResultType = RankedTensorType::get(
-            {outputType.getShape()[0], outputType.getShape()[1], outputType.getShape()[2]},
-            cast<RankedTensorType>(currentResult.getType()).getElementType()
-        );
-
-        auto collapsedResult = tensor::CollapseShapeOp::create(
-            rewriter, loc, collapsedResultType, currentResult, collapseReassoc
-        );
-
-        rewriter.replaceOp(convOp, collapsedResult.getResult());
-
-        if (truncfGenericOp) {
-            currentResult = collapsedResult.getResult();
-            truncfGenericOp->replaceAllUsesWith(ValueRange{currentResult});
-            rewriter.eraseOp(truncfGenericOp);
-        }
-
+        rewriter.replaceOp(convOp, transpose(conv2d.getResult(0), dataPerm));
         return success();
     }
 };
@@ -376,7 +357,7 @@ struct Conv1DNcwFcwToLinalgConv2DPattern : public OpRewritePattern<linalg::Conv1
 /// The crop drops the extra ConvTranspose columns and may also absorb a downstream slice the
 /// compiler folded in here, so it can shrink the width by more than one element. That slice
 /// between the conv result and the bias add stops the bias/truncf from fusing into the conv
-/// epilogue (matmul or conv2d), leaving an fp32 add with no NPU lowering that is illegal
+/// epilogue (matmul or native conv1d), leaving an fp32 add with no NPU lowering that is illegal
 /// under --torq-disable-host. Slicing commutes with positional elementwise ops, so moving it
 /// below the add/truncf makes the conv->add->truncf chain contiguous again for the downstream
 /// epilogue fusion.
@@ -540,28 +521,33 @@ struct SinkExtractSliceThroughElementwisePattern : public OpRewritePattern<linal
     }
 };
 
+// Registers the conv1d->conv2d promotion patterns for strides in
+// [minStride, maxStride]; see the pattern for what the range means.
+void populateConv1dPromotionPatterns(
+    MLIRContext *context, RewritePatternSet &patterns, int64_t minStride, int64_t maxStride
+) {
+    patterns.insert<Conv1DtoConv2DPromotionPattern<linalg::Conv1DNcwFcwOp>>(
+        context, minStride, maxStride
+    );
+    patterns.insert<Conv1DtoConv2DPromotionPattern<linalg::DepthwiseConv1DNcwCwOp>>(
+        context, minStride, maxStride
+    );
+}
+
 void populateOptimizeConv1DPatterns(MLIRContext *context, RewritePatternSet &patterns) {
     // Move the ConvTranspose trailing-column slice below its elementwise bias/truncf epilogue
-    // so the bias fuses into the conv.
+    // so the bias fuses into the conv (needed for the native conv1d path).
     patterns.insert<SinkExtractSliceThroughElementwisePattern>(context);
 
-    // Conv1d lowering strategy. Three algorithms were tried:
-    //   1. rank-4 conv2d form (height-1 conv2d; stride <= 2, dilation 1): the common
-    //      case; carries a conv bias in the init.
-    //   2. im2col + matmul (fully-connected form): what the conv2d form cannot express --
-    //      stride >= 3 or dilation > 1, with an all-zero init. The im2col unfold is
-    //      torq_hl.im2col (NDL window read); when it does not fit LRAM, im2col + matmul
-    //      are tiled along the output width, and only a pathological conv whose
-    //      single-column unfold still overflows LRAM falls back to a host-marked generic.
-    //   3. native 5D linalg.generic with the kernel dim preserved, lowered to
-    //      torq_hl.conv1d, with Ow-tiling to fit LRAM and the per-channel bias folded
-    //      into the following reduce (FoldConvBiasIntoReducePattern). It matched bf16
-    //      data/weights only and was an NPU-only escape hatch for the convs (2) bails on
-    //      (e.g. biased convs); gated behind --torq-convert-conv1d-to-generic since
-    //      54c9058d and never enabled by any test, script or model, so it is removed,
-    //      along with its consumer pattern and the now-creatorless torq_hl.conv1d op.
-    patterns.insert<Conv1DNcwFcwToLinalgMatmulPattern>(context);
-    patterns.insert<Conv1DNcwFcwToLinalgConv2DPattern>(context);
+    // Default conv1d lowering: promote 1D convs to their 2D counterparts with
+    // the added spatial extent set to 1, so they flow through the established
+    // conv2d path. By the time this pass runs,
+    // DecomposeConvsForHardwarePass has already rewritten out-of-limits convs
+    // to in-limits ones. Wide W-live 1D depthwise convs whose channels do not
+    // fit the dedicated 1D lowering's fixed packing blocks are re-encoded into
+    // the H-live orientation by DepthwiseConv2DWLiveToHLivePattern.
+    populateConv1dPromotionPatterns(context, patterns, /*minStride=*/1, /*maxStride=*/2);
+    patterns.insert<DepthwiseConv2DWLiveToHLivePattern>(context);
 }
 
 } // namespace mlir::syna::torq
