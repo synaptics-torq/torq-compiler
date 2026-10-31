@@ -1,27 +1,20 @@
-"""Sub operator fixtures built with ONNX GraphSurgeon."""
+"""Sub operator fixtures built with torq.testing.onnx_builder."""
 
 from functools import partial
 
 import numpy as np
-import onnx
-import onnx_graphsurgeon as gs
+
+from torq.testing.onnx_builder import I32, OnnxGraph
 
 KIND = "onnx"
 
 
-def _make_sub(input_0_shape, input_1_shape) -> onnx.ModelProto:
-    input_0 = gs.Variable("input_0", dtype=np.int32, shape=input_0_shape)
-    input_1 = gs.Variable("input_1", dtype=np.int32, shape=input_1_shape)
-    output = gs.Variable(
-        "output", dtype=np.int32, shape=np.broadcast_shapes(input_0_shape, input_1_shape)
-    )
-    graph = gs.Graph(
-        nodes=[gs.Node("Sub", inputs=[input_0, input_1], outputs=[output])],
-        inputs=[input_0, input_1],
-        outputs=[output],
-        opset=19,
-    )
-    return gs.export_onnx(graph, ir_version=10)
+def _make_sub(input_0_shape, input_1_shape):
+    g = OnnxGraph(opset=19)
+    a = g.input("input_0", I32, input_0_shape)
+    b = g.input("input_1", I32, input_1_shape)
+    shape = np.broadcast_shapes(input_0_shape, input_1_shape)
+    return g.export(g.op("Sub", a, b, dtype=I32, shape=shape))
 
 
 CASES = {

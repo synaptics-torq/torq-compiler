@@ -1,10 +1,8 @@
-"""Max Pool operator fixtures built with ONNX GraphSurgeon."""
+"""Max Pool operator fixtures built with torq.testing.onnx_builder."""
 
 from functools import partial
 
-import ml_dtypes
-import onnx
-import onnx_graphsurgeon as gs
+from torq.testing.onnx_builder import BF16, OnnxGraph
 
 KIND = "onnx"
 
@@ -19,9 +17,7 @@ def _make_max_pool(
     explicit_defaults=True,
     ceil_mode=None,
     opset=23
-) -> onnx.ModelProto:
-    x = gs.Variable("x", dtype=ml_dtypes.bfloat16, shape=input_shape)
-    output = gs.Variable("output", dtype=ml_dtypes.bfloat16, shape=output_shape)
+):
     attrs = {}
     if explicit_defaults:
         attrs.update(ceil_mode=0, dilations=[1, 1])
@@ -31,13 +27,9 @@ def _make_max_pool(
     if explicit_defaults or ceil_mode is not None:
         attrs["pads"] = list(pads)
     attrs["strides"] = list(strides)
-    graph = gs.Graph(
-        nodes=[gs.Node("MaxPool", inputs=[x], outputs=[output], attrs=attrs)],
-        inputs=[x],
-        outputs=[output],
-        opset=opset,
-    )
-    return gs.export_onnx(graph, ir_version=10)
+    g = OnnxGraph(opset)
+    x = g.input("x", BF16, input_shape)
+    return g.export(g.op("MaxPool", x, dtype=BF16, shape=output_shape, **attrs))
 
 
 CASES = {

@@ -1,24 +1,17 @@
-"""Transpose operator fixtures built with ONNX GraphSurgeon."""
+"""Transpose operator fixtures built with torq.testing.onnx_builder."""
 
 from functools import partial
 
-import ml_dtypes
-import onnx
-import onnx_graphsurgeon as gs
+from torq.testing.onnx_builder import BF16, OnnxGraph
 
 KIND = "onnx"
 
 
-def _make_transpose(input_shape, perm) -> onnx.ModelProto:
-    x = gs.Variable("x", dtype=ml_dtypes.bfloat16, shape=input_shape)
-    output = gs.Variable("output", dtype=ml_dtypes.bfloat16, shape=[input_shape[i] for i in perm])
-    graph = gs.Graph(
-        nodes=[gs.Node("Transpose", inputs=[x], outputs=[output], attrs={"perm": perm})],
-        inputs=[x],
-        outputs=[output],
-        opset=22,
-    )
-    return gs.export_onnx(graph, ir_version=10)
+def _make_transpose(input_shape, perm):
+    g = OnnxGraph(opset=22)
+    x = g.input("x", BF16, input_shape)
+    shape = [input_shape[i] for i in perm]
+    return g.export(g.op("Transpose", x, perm=perm, dtype=BF16, shape=shape))
 
 
 CASES = {

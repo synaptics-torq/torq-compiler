@@ -1,31 +1,16 @@
-"""Concat operator fixtures built with ONNX GraphSurgeon."""
+"""Concat operator fixtures built with torq.testing.onnx_builder."""
 
-import numpy as np
-import onnx
-import onnx_graphsurgeon as gs
+from torq.testing.onnx_builder import F32, OnnxGraph
 
 KIND = "onnx"
 
 
-def make_concat_axis_2_3x3x2_i8() -> onnx.ModelProto:
-    input_0 = gs.Variable("input_0", dtype=np.float32, shape=[3, 3, 1])
-    input_1 = gs.Variable("input_1", dtype=np.float32, shape=[3, 3, 1])
-    output = gs.Variable("output", dtype=np.float32, shape=[3, 3, 2])
-    cast = gs.Variable("cast")
-    cast_2 = gs.Variable("cast_2")
-    concat = gs.Variable("concat")
-    graph = gs.Graph(
-        nodes=[
-            gs.Node("Cast", inputs=[input_0], outputs=[cast], attrs={"to": 3}),
-            gs.Node("Cast", inputs=[input_1], outputs=[cast_2], attrs={"to": 3}),
-            gs.Node("Concat", inputs=[cast, cast_2], outputs=[concat], attrs={"axis": 2}),
-            gs.Node("Cast", inputs=[concat], outputs=[output], attrs={"to": 1}),
-        ],
-        inputs=[input_0, input_1],
-        outputs=[output],
-        opset=22,
-    )
-    return gs.export_onnx(graph, ir_version=10)
+def make_concat_axis_2_3x3x2_i8():
+    g = OnnxGraph(opset=22)
+    a = g.input("input_0", F32, [3, 3, 1])
+    b = g.input("input_1", F32, [3, 3, 1])
+    concat = g.op("Concat", g.op("Cast", a, to=3), g.op("Cast", b, to=3), axis=2)
+    return g.export(g.op("Cast", concat, to=1, dtype=F32, shape=[3, 3, 2]))
 
 
 CASES = {

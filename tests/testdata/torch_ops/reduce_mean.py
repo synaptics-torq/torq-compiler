@@ -1,30 +1,19 @@
-"""Reduce Mean operator fixtures built with ONNX GraphSurgeon."""
+"""Reduce Mean operator fixtures built with torq.testing.onnx_builder."""
 
 from functools import partial
 
-import ml_dtypes
-import numpy as np
-import onnx
-import onnx_graphsurgeon as gs
+from torq.testing.onnx_builder import BF16, I64, OnnxGraph, typed
 
 KIND = "onnx"
 
 
-def _make_reduce_mean(
-    input_shape, output_shape, axes, *, reshape=False, **attrs
-) -> onnx.ModelProto:
-    x = gs.Variable("x", dtype=ml_dtypes.bfloat16, shape=input_shape)
-    output = gs.Variable("output", dtype=ml_dtypes.bfloat16, shape=output_shape)
-    axes = gs.Constant("reducemean_constant", np.array(axes, dtype=np.int64))
-    reduced = gs.Variable("reducemean") if reshape else output
-    nodes = [gs.Node("ReduceMean", inputs=[x, axes], outputs=[reduced], attrs=attrs)]
+def _make_reduce_mean(input_shape, output_shape, axes, *, reshape=False, **attrs):
+    g = OnnxGraph(opset=22)
+    x = g.input("x", BF16, input_shape)
+    y = g.op("ReduceMean", x, g.const(axes, I64), **attrs)
     if reshape:
-        shape = gs.Constant("shape", np.array(output_shape, dtype=np.int64))
-        nodes.append(
-            gs.Node("Reshape", inputs=[reduced, shape], outputs=[output], attrs={"allowzero": 1})
-        )
-    graph = gs.Graph(nodes=nodes, inputs=[x], outputs=[output], opset=22)
-    return gs.export_onnx(graph, ir_version=10)
+        y = g.op("Reshape", y, g.const(output_shape, I64), allowzero=1)
+    return g.export(typed(y, BF16, output_shape))
 
 
 CASES = {
@@ -49,4 +38,25 @@ CASES = {
     "reducemean_wide_kept_dims_bf16": partial(
         _make_reduce_mean, [1, 640, 3, 608], [1, 640, 608], [2], keepdims=0, noop_with_empty_axes=0
     ),
+}
+
+# The NPU accumulates reductions in fp32, while the llvm-cpu reference accumulates in bf16. For
+# large reductions, or small ones over large inputs that cancel, the reference is the inaccurate
+# side, so these cases use an fp32-accumulated numpy reference.
+CONFIG = {
+    "reducemean": {"comparison": {"fp_max_tol": 0.31, "fp_avg_tol": 0.03}},
+    "reducemean-reshape": {"comparison": {"fp_max_tol": 0.31, "fp_avg_tol": 0.03}},
+    "reducemean-tiling": {
+        "comparison": {"fp_max_tol": 0.091},
+        "reference": "numpy_reducemean_reference_results",
+    },
+    # LRAM-limit regression pinned to the no-slicing path used for real models (the sliced path
+    # splits the reduction across slices and has an unrelated numeric mismatch at this width).
+    "reducemean_wide_kept_dims_bf16": {
+        "compiler_options": [
+            "--torq-disable-slicing", "--torq-disable-host", "--torq-disable-css",
+        ],
+        "comparison": {"fp_max_tol": 0.06, "fp_avg_tol": 0.02},
+        "reference": "numpy_reducemean_reference_results",
+    },
 }

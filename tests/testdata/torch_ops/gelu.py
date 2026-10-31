@@ -1,28 +1,19 @@
-"""Gelu operator fixtures built with ONNX GraphSurgeon."""
+"""Gelu operator fixtures built with torq.testing.onnx_builder."""
 
-import ml_dtypes
 import numpy as np
-import onnx
-import onnx_graphsurgeon as gs
+
+from torq.testing.onnx_builder import BF16, OnnxGraph
 
 KIND = "onnx"
 
 
-def make_gelu_gemma() -> onnx.ModelProto:
-    x = gs.Variable("x", dtype=ml_dtypes.bfloat16, shape=[1, 1024, 64])
-    output = gs.Variable("output", dtype=ml_dtypes.bfloat16, shape=[1, 1024, 64])
-    graph = gs.Graph(
-        nodes=[
-            gs.Node("Gelu", inputs=[x], outputs=[output], attrs={"approximate": "tanh"}),
-        ],
-        inputs=[x],
-        outputs=[output],
-        opset=22,
-    )
-    return gs.export_onnx(graph, ir_version=10)
+def make_gelu_gemma():
+    g = OnnxGraph(opset=22)
+    x = g.input("x", BF16, [1, 1024, 64])
+    return g.export(g.op("Gelu", x, approximate="tanh", dtype=BF16, shape=[1, 1024, 64]))
 
 
-def make_erf_mlp_dup_lram_load_bf16() -> onnx.ModelProto:
+def make_erf_mlp_dup_lram_load_bf16():
     """PP-OCR MLP regression for duplicate GELU operand loads in LRAM.
 
     At [1,192,3,608], two identical loads need 705,544 B; merging them needs
@@ -31,61 +22,42 @@ def make_erf_mlp_dup_lram_load_bf16() -> onnx.ModelProto:
     Preserve the ONNX Div/Erf/Add/Mul/Mul layout and bf16-exact splat weights:
     torch.export changes the layout and does not reproduce this failure.
     """
-    x = gs.Variable("x", dtype=ml_dtypes.bfloat16, shape=[1, 96, 3, 608])
-    convolved = gs.Variable("convolved", dtype=ml_dtypes.bfloat16, shape=[1, 192, 3, 608])
-    divided = gs.Variable("divided", dtype=ml_dtypes.bfloat16, shape=[1, 192, 3, 608])
-    erf = gs.Variable("erf", dtype=ml_dtypes.bfloat16, shape=[1, 192, 3, 608])
-    shifted = gs.Variable("shifted", dtype=ml_dtypes.bfloat16, shape=[1, 192, 3, 608])
-    product = gs.Variable("product", dtype=ml_dtypes.bfloat16, shape=[1, 192, 3, 608])
-    gelu = gs.Variable("gelu", dtype=ml_dtypes.bfloat16, shape=[1, 192, 3, 608])
-    output = gs.Variable("output", dtype=ml_dtypes.bfloat16, shape=[1, 160, 3, 608])
-    sqrt_two = gs.Constant("sqrt_two", np.full([], 1.4140625, dtype=ml_dtypes.bfloat16))
-    one = gs.Constant("one", np.full([], 1.0, dtype=ml_dtypes.bfloat16))
-    half = gs.Constant("half", np.full([], 0.5, dtype=ml_dtypes.bfloat16))
-    weights1 = gs.Constant("weights1", np.full([192, 96, 1, 1], 0.0625, dtype=ml_dtypes.bfloat16))
-    bias1 = gs.Constant("bias1", np.full([192], 0.125, dtype=ml_dtypes.bfloat16))
-    weights2 = gs.Constant("weights2", np.full([160, 192, 1, 1], -0.03125, dtype=ml_dtypes.bfloat16))
-    bias2 = gs.Constant("bias2", np.full([160], 0.09375, dtype=ml_dtypes.bfloat16))
-    graph = gs.Graph(
-        nodes=[
-            gs.Node(
-                "Conv",
-                inputs=[x, weights1, bias1],
-                outputs=[convolved],
-                attrs={
-                    "dilations": [1, 1],
-                    "group": 1,
-                    "kernel_shape": [1, 1],
-                    "pads": [0, 0, 0, 0],
-                    "strides": [1, 1],
-                },
-            ),
-            gs.Node("Div", inputs=[convolved, sqrt_two], outputs=[divided]),
-            gs.Node("Erf", inputs=[divided], outputs=[erf]),
-            gs.Node("Add", inputs=[erf, one], outputs=[shifted]),
-            gs.Node("Mul", inputs=[convolved, shifted], outputs=[product]),
-            gs.Node("Mul", inputs=[product, half], outputs=[gelu]),
-            gs.Node(
-                "Conv",
-                inputs=[gelu, weights2, bias2],
-                outputs=[output],
-                attrs={
-                    "dilations": [1, 1],
-                    "group": 1,
-                    "kernel_shape": [1, 1],
-                    "pads": [0, 0, 0, 0],
-                    "strides": [1, 1],
-                },
-            ),
-        ],
-        inputs=[x],
-        outputs=[output],
-        opset=22,
-    )
-    return gs.export_onnx(graph, ir_version=10)
+    g = OnnxGraph(opset=22)
+    x = g.input("x", BF16, [1, 96, 3, 608])
+    hidden = {"dtype": BF16, "shape": [1, 192, 3, 608]}
+
+    def conv1x1(x, weight, bias, out_channels, **kwargs):
+        weights = g.const(np.full([out_channels, x.shape[1], 1, 1], weight), BF16)
+        return g.op("Conv", x, weights, g.const(np.full([out_channels], bias), BF16),
+                    dilations=[1, 1], group=1, kernel_shape=[1, 1], pads=[0, 0, 0, 0],
+                    strides=[1, 1], **kwargs)
+
+    convolved = conv1x1(x, 0.0625, 0.125, 192, **hidden)
+    erf = g.op("Erf", g.op("Div", convolved, g.const(1.4140625, BF16), **hidden), **hidden)
+    shifted = g.op("Add", erf, g.const(1.0, BF16), **hidden)
+    product = g.op("Mul", convolved, shifted, **hidden)
+    gelu = g.op("Mul", product, g.const(0.5, BF16), **hidden)
+    return g.export(conv1x1(gelu, -0.03125, 0.09375, 160, dtype=BF16, shape=[1, 160, 3, 608]))
 
 
 CASES = {
     "erf_mlp_dup_lram_load_bf16": make_erf_mlp_dup_lram_load_bf16,
     "gelu-gemma": make_gelu_gemma,
+}
+
+CONFIG = {
+    # LRAM-limit regression pinned to the no-slicing path used for real models (the sliced path
+    # fails this shape for an unrelated reason: an LRAM fragmentation failure).
+    "erf_mlp_dup_lram_load_bf16": {
+        "compiler_options": [
+            "--torq-disable-slicing", "--torq-disable-host", "--torq-disable-css",
+        ],
+        "comparison": {
+            "fp_max_tol": 0.2, "fp_avg_tol": 0.03,
+            "use_abs_tol_gate": 1.0, "fp_abs_tol_frac": 0.001,
+        },
+    },
+    # GELU can produce tiny values in the far negative tail, where the true result is already
+    # effectively zero. Observed: expected -1.611188e-7, observed -0.0.
+    "gelu-gemma": {"comparison": {"epsilon": 2e-5}, "reference": "numpy_gelu_reference_results"},
 }

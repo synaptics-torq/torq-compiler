@@ -1,4 +1,20 @@
-"""Shared Torch operator builders for numeric and compiler regression tests."""
+"""Shared Torch operator builders for numeric and compiler regression tests.
+
+Every .py file in a torch_ops group directory is a family module. The collector reads its
+module-level literals without importing it:
+
+- KIND: "onnx" (builders return an onnx.ModelProto) or "torch" (builders return an nn.Module).
+- CASES: {case_stem: builder}, where builder is a function of the module or a
+  functools.partial of one. Stems starting with "disable" are skipped.
+- IO (torch only): {case_stem: [[shape, dtype], ...]}, the example inputs of torch.export.
+- CONFIG (optional): {case_stem: {key: value}}, the settings of cases that need more than the
+  defaults of test_torch_ops.py:
+  - compiler_options: torq-compile flags, replacing the group default;
+  - comparison: comparison tolerances (torq.testing.comparison keys);
+  - reference: the name of the reference-results fixture;
+  - input_range: [low, high] of the random inputs;
+  - sim_runtime_timeout: runtime timeout in seconds on the simulator.
+"""
 
 import ast
 import hashlib
@@ -34,15 +50,18 @@ def _group_dirs():
     return dirs
 
 
+_CONFIG_KEYS = {"compiler_options", "comparison", "reference", "input_range", "sim_runtime_timeout"}
+
+
 def _parse_family_module(path: Path):
     """Lightweight AST scan of a builder module (no import at collection time).
 
-    Returns (kind, {stem: builder_funcname}, {stem: io_spec}) or None.
+    Returns (kind, {stem: builder_funcname}, {stem: io_spec}, {stem: config}) or None.
     """
     try:
         tree = ast.parse(path.read_text())
     except SyntaxError as e:
-        raise ValueError(f"bad builder module {path}: {e}")
+        raise ValueError(f"bad builder module {path}: {e}") from e
     metadata = {
         node.targets[0].id: node.value
         for node in tree.body
@@ -72,9 +91,15 @@ def _parse_family_module(path: Path):
         ios = ast.literal_eval(metadata["IO"]) if "IO" in metadata else {}
         if not isinstance(ios, dict) or (kind == "torch" and cases.keys() - ios.keys()):
             raise ValueError("torch builders require IO for every case")
+        configs = ast.literal_eval(metadata["CONFIG"]) if "CONFIG" in metadata else {}
+        if (not isinstance(configs, dict) or configs.keys() - cases.keys()
+                or any(not isinstance(c, dict) or c.keys() - _CONFIG_KEYS
+                       for c in configs.values())):
+            raise ValueError("CONFIG must map case stems to dicts with keys in "
+                             + ", ".join(sorted(_CONFIG_KEYS)))
     except (ValueError, TypeError) as e:
         raise ValueError(f"bad builder metadata in {path}: {e}") from e
-    return kind, cases, ios
+    return kind, cases, ios, configs
 
 
 def _import_module(module_id: str, path: Path):
@@ -111,7 +136,7 @@ def _family_cases():
                 raise ValueError(
                     f"{f} is not a valid family module: expected module-level "
                     "KIND = 'onnx'|'torch' and CASES = {case_stem: builder_fn}")
-            kind, builders, ios = parsed
+            kind, builders, ios, configs = parsed
             src_hash = hashlib.sha256(f.read_bytes()).hexdigest()[:16]
             mod_id = f"torch_ops_gen_{root_name}_{d.name}_{f.stem}"
             for stem, func in sorted(builders.items()):
@@ -129,6 +154,7 @@ def _family_cases():
                     "builder": f"{mod_id}.{func}",
                     "src_hash": src_hash,
                     "io": ios.get(stem),
+                    "config": configs.get(stem, {}),
                 }))
     return cases
 

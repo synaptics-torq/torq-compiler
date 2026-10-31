@@ -1,79 +1,43 @@
-"""Broadcast operator fixtures built with ONNX GraphSurgeon."""
+"""Broadcast operator fixtures built with torq.testing.onnx_builder."""
 
-import ml_dtypes
-import numpy as np
-import onnx
-import onnx_graphsurgeon as gs
+from torq.testing.onnx_builder import BF16, I64, OnnxGraph
 
 KIND = "onnx"
 
 
-def make_collapse_issue_moonshine() -> onnx.ModelProto:
-    input_0 = gs.Variable("input_0", dtype=ml_dtypes.bfloat16, shape=[1, 1, 8, 36])
-    input_1 = gs.Variable("input_1", dtype=ml_dtypes.bfloat16, shape=[1, 1, 8, 36])
-    input_2 = gs.Variable("input_2", dtype=ml_dtypes.bfloat16, shape=[1, 1, 8, 36])
-    input_3 = gs.Variable("input_3", dtype=ml_dtypes.bfloat16, shape=[1, 1, 1, 32])
-    input_4 = gs.Variable("input_4", dtype=ml_dtypes.bfloat16, shape=[1, 1, 32])
-    output_0 = gs.Variable("output_0", dtype=ml_dtypes.bfloat16, shape=[1, 1, 8, 32])
-    output_1 = gs.Variable("output_1", dtype=ml_dtypes.bfloat16, shape=[1, 8, 1, 4])
-    output_2 = gs.Variable("output_2", dtype=ml_dtypes.bfloat16, shape=[1, 8, 1, 32])
-    output_3 = gs.Variable("output_3", dtype=ml_dtypes.bfloat16, shape=[1, 8, 1, 4])
-    output_4 = gs.Variable("output_4", dtype=ml_dtypes.bfloat16, shape=[1, 8, 1, 32])
-    output_5 = gs.Variable("output_5", dtype=ml_dtypes.bfloat16, shape=[1, 8, 30, 36])
-    output_6 = gs.Variable("output_6", dtype=ml_dtypes.bfloat16, shape=[1, 1, 1, 32])
-    output_7 = gs.Variable("output_7", dtype=ml_dtypes.bfloat16, shape=[1, 1, 1, 32])
-    feature_axis = gs.Constant("feature_axis", np.full([1], 3, dtype=np.int64))
-    tail_start = gs.Constant("tail_start", np.full([1], 32, dtype=np.int64))
-    tail_end = gs.Constant("tail_end", np.full([1], 9223372036854775807, dtype=np.int64))
-    broadcast_shape = gs.Constant("broadcast_shape", np.array([1, 8, 30, 36], dtype=np.int64))
-    unit_axis = gs.Constant("unit_axis", np.full([1], 1, dtype=np.int64))
-    prefix_start = gs.Constant("prefix_start", np.full([1], 0, dtype=np.int64))
-    tail = gs.Variable("tail")
-    prefix = gs.Variable("prefix")
-    transposed_1 = gs.Variable("transposed_1")
-    transposed_0 = gs.Variable("transposed_0")
-    graph = gs.Graph(
-        nodes=[
-            gs.Node("Unsqueeze", inputs=[input_4, unit_axis], outputs=[output_6]),
-            gs.Node(
-                "Slice",
-                inputs=[input_2, tail_start, tail_end, feature_axis, unit_axis],
-                outputs=[tail],
-            ),
-            gs.Node(
-                "Slice",
-                inputs=[input_2, prefix_start, tail_start, feature_axis, unit_axis],
-                outputs=[prefix],
-            ),
-            gs.Node(
-                "Transpose", inputs=[input_1], outputs=[transposed_1], attrs={"perm": [0, 2, 1, 3]}
-            ),
-            gs.Node(
-                "Transpose", inputs=[input_0], outputs=[transposed_0], attrs={"perm": [0, 2, 1, 3]}
-            ),
-            gs.Node(
-                "Transpose", inputs=[input_3], outputs=[output_7], attrs={"perm": [0, 2, 1, 3]}
-            ),
-            gs.Node("Transpose", inputs=[tail], outputs=[output_3], attrs={"perm": [0, 2, 1, 3]}),
-            gs.Node("Transpose", inputs=[prefix], outputs=[output_2], attrs={"perm": [0, 2, 1, 3]}),
-            gs.Node(
-                "Slice",
-                inputs=[transposed_1, prefix_start, tail_start, feature_axis, unit_axis],
-                outputs=[output_4],
-            ),
-            gs.Node(
-                "Slice",
-                inputs=[transposed_1, tail_start, tail_end, feature_axis, unit_axis],
-                outputs=[output_1],
-            ),
-            gs.Node("Expand", inputs=[transposed_0, broadcast_shape], outputs=[output_5]),
-            gs.Node("Mul", inputs=[prefix, output_7], outputs=[output_0]),
-        ],
-        inputs=[input_0, input_1, input_2, input_3, input_4],
-        outputs=[output_0, output_1, output_2, output_3, output_4, output_5, output_6, output_7],
-        opset=22,
+def make_collapse_issue_moonshine():
+    g = OnnxGraph(opset=22)
+    x0 = g.input("input_0", BF16, [1, 1, 8, 36])
+    x1 = g.input("input_1", BF16, [1, 1, 8, 36])
+    x2 = g.input("input_2", BF16, [1, 1, 8, 36])
+    x3 = g.input("input_3", BF16, [1, 1, 1, 32])
+    x4 = g.input("input_4", BF16, [1, 1, 32])
+    feature_axis, unit_axis = g.const([3], I64), g.const([1], I64)
+    prefix_start, tail_start = g.const([0], I64), g.const([32], I64)
+    tail_end = g.const([9223372036854775807], I64)
+
+    def prefix(x, **kwargs):
+        return g.op("Slice", x, prefix_start, tail_start, feature_axis, unit_axis, **kwargs)
+
+    def tail(x, **kwargs):
+        return g.op("Slice", x, tail_start, tail_end, feature_axis, unit_axis, **kwargs)
+
+    def transpose(x, **kwargs):
+        return g.op("Transpose", x, perm=[0, 2, 1, 3], **kwargs)
+
+    t0, t1 = transpose(x0), transpose(x1)
+    t3 = transpose(x3, dtype=BF16, shape=[1, 1, 1, 32])
+    p2 = prefix(x2)
+    return g.export(
+        g.op("Mul", p2, t3, dtype=BF16, shape=[1, 1, 8, 32]),
+        tail(t1, dtype=BF16, shape=[1, 8, 1, 4]),
+        transpose(p2, dtype=BF16, shape=[1, 8, 1, 32]),
+        transpose(tail(x2), dtype=BF16, shape=[1, 8, 1, 4]),
+        prefix(t1, dtype=BF16, shape=[1, 8, 1, 32]),
+        g.op("Expand", t0, g.const([1, 8, 30, 36], I64), dtype=BF16, shape=[1, 8, 30, 36]),
+        g.op("Unsqueeze", x4, unit_axis, dtype=BF16, shape=[1, 1, 1, 32]),
+        t3,
     )
-    return gs.export_onnx(graph, ir_version=10)
 
 
 CASES = {

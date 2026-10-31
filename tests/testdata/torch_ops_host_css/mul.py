@@ -1,27 +1,22 @@
-"""Mul operator fixtures built with ONNX GraphSurgeon."""
+"""Mul operator fixtures built with torq.testing.onnx_builder."""
 
-import numpy as np
-import onnx
-import onnx_graphsurgeon as gs
+from torq.testing.onnx_builder import I64, OnnxGraph
 
 KIND = "onnx"
 
 
-def make_mul_i64_scalar() -> onnx.ModelProto:
-    input_0 = gs.Variable("input_0", dtype=np.int64, shape=[2])
-    input_1 = gs.Variable("input_1", dtype=np.int64, shape=[])
-    output = gs.Variable("output", dtype=np.int64, shape=[2])
-    graph = gs.Graph(
-        nodes=[
-            gs.Node("Mul", inputs=[input_0, input_1], outputs=[output]),
-        ],
-        inputs=[input_0, input_1],
-        outputs=[output],
-        opset=18,
-    )
-    return gs.export_onnx(graph, ir_version=10)
+def make_mul_i64_scalar():
+    g = OnnxGraph(opset=18)
+    a = g.input("input_0", I64, [2])
+    b = g.input("input_1", I64, [])
+    return g.export(g.op("Mul", a, b, dtype=I64, shape=[2]))
 
 
 CASES = {
     "mul-i64-scalar": make_mul_i64_scalar,
+}
+
+CONFIG = {
+    # The i64 scalar mul must run on the host, without slice lowering.
+    "mul-i64-scalar": {"compiler_options": ["--torq-disable-slices", "--torq-disable-css"]},
 }

@@ -1,54 +1,28 @@
-"""Global average pool operator fixtures built with ONNX GraphSurgeon."""
+"""Global average pool operator fixtures built with torq.testing.onnx_builder."""
 
-import ml_dtypes
-import numpy as np
-import onnx
-import onnx_graphsurgeon as gs
+from torq.testing.onnx_builder import BF16, I8, OnnxGraph
 
 KIND = "onnx"
 
 
-def make_GlobalAveragePool() -> onnx.ModelProto:
-    x = gs.Variable("x", dtype=ml_dtypes.bfloat16, shape=[1, 2560, 8, 8])
-    output = gs.Variable("output", dtype=ml_dtypes.bfloat16, shape=[1, 2560, 1, 1])
-    graph = gs.Graph(
-        nodes=[
-            gs.Node("GlobalAveragePool", inputs=[x], outputs=[output]),
-        ],
-        inputs=[x],
-        outputs=[output],
-        opset=18,
-    )
-    return gs.export_onnx(graph, ir_version=10)
+def make_GlobalAveragePool():
+    g = OnnxGraph(opset=18)
+    x = g.input("x", BF16, [1, 2560, 8, 8])
+    return g.export(g.op("GlobalAveragePool", x, dtype=BF16, shape=[1, 2560, 1, 1]))
 
 
-def make_quant_globalAvgPool() -> onnx.ModelProto:
-    x = gs.Variable("x", dtype=np.int8, shape=[1, 512, 7, 7])
-    output = gs.Variable("output", dtype=np.int8, shape=[1, 512, 1, 1])
-    zero_point = gs.Constant("zero_point", np.full([], 0, dtype=np.int8))
-    scale = gs.Constant("scale", np.full([], 0.007843106053769588, dtype=np.float32))
-    zero_point_2 = gs.Constant("zero_point_2", np.full([], -5, dtype=np.int8))
-    scale_2 = gs.Constant("scale_2", np.full([], 0.002344646258279681, dtype=np.float32))
-    dequantizelinear = gs.Variable("dequantizelinear")
-    globalaveragepool = gs.Variable("globalaveragepool")
-    graph = gs.Graph(
-        nodes=[
-            gs.Node("DequantizeLinear", inputs=[x, scale, zero_point], outputs=[dequantizelinear]),
-            gs.Node("GlobalAveragePool", inputs=[dequantizelinear], outputs=[globalaveragepool]),
-            gs.Node(
-                "QuantizeLinear",
-                inputs=[globalaveragepool, scale_2, zero_point_2],
-                outputs=[output],
-            ),
-        ],
-        inputs=[x],
-        outputs=[output],
-        opset=18,
-    )
-    return gs.export_onnx(graph, ir_version=10)
+def make_quant_globalAvgPool():
+    g = OnnxGraph(opset=18)
+    x = g.input("x", I8, [1, 512, 7, 7])
+    pooled = g.op("GlobalAveragePool", g.dequantize(x, 0.007843106053769588, 0))
+    return g.export(g.quantize(pooled, 0.002344646258279681, -5, dtype=I8, shape=[1, 512, 1, 1]))
 
 
 CASES = {
     "GlobalAveragePool": make_GlobalAveragePool,
     "quant-globalAvgPool": make_quant_globalAvgPool,
+}
+
+CONFIG = {
+    "GlobalAveragePool": {"reference": "numpy_global_average_pool_reference_results"},
 }

@@ -1,26 +1,19 @@
-"""Expand operator fixtures built with ONNX GraphSurgeon."""
+"""Expand operator fixtures built with torq.testing.onnx_builder."""
 
 from functools import partial
 
-import ml_dtypes
 import numpy as np
-import onnx
-import onnx_graphsurgeon as gs
+
+from torq.testing.onnx_builder import BF16, I64, OnnxGraph
 
 KIND = "onnx"
 
 
-def _make_expand(input_shape, *, dtype=ml_dtypes.bfloat16) -> onnx.ModelProto:
-    x = gs.Variable("x", dtype=dtype, shape=input_shape)
-    output = gs.Variable("output", dtype=dtype, shape=[1, 8, 30, 36])
-    shape = gs.Constant("shape", np.array([1, 8, 30, 36], dtype=np.int64))
-    graph = gs.Graph(
-        nodes=[gs.Node("Expand", inputs=[x, shape], outputs=[output])],
-        inputs=[x],
-        outputs=[output],
-        opset=22,
-    )
-    return gs.export_onnx(graph, ir_version=10)
+def _make_expand(input_shape, *, dtype=BF16):
+    g = OnnxGraph(opset=22)
+    x = g.input("x", dtype, input_shape)
+    shape = [1, 8, 30, 36]
+    return g.export(g.op("Expand", x, g.const(shape, I64), dtype=dtype, shape=shape))
 
 
 CASES = {

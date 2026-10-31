@@ -16,7 +16,7 @@ from torq.lab.model_tools.extraction.onnx.decoder_components import extract_repr
 from torq.testing.versioned_fixtures import versioned_hashable_object_fixture, versioned_cached_data_fixture
 
 
-# see test_torch_ops.py::comparison_config_for_gelu()
+# see the gelu-gemma CONFIG in tests/testdata/torch_ops/gelu.py
 @pytest.fixture
 def comparison_config_for_gelu(request):
     # Gelu outputs near zero amplify bf16 rounding into large relative error; a

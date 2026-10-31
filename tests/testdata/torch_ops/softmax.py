@@ -1,24 +1,16 @@
-"""Softmax operator fixtures built with ONNX GraphSurgeon."""
+"""Softmax operator fixtures built with torq.testing.onnx_builder."""
 
 from functools import partial
 
-import ml_dtypes
-import onnx
-import onnx_graphsurgeon as gs
+from torq.testing.onnx_builder import BF16, OnnxGraph
 
 KIND = "onnx"
 
 
-def _make_softmax(shape, **attrs) -> onnx.ModelProto:
-    x = gs.Variable("x", dtype=ml_dtypes.bfloat16, shape=shape)
-    output = gs.Variable("output", dtype=ml_dtypes.bfloat16, shape=shape)
-    graph = gs.Graph(
-        nodes=[gs.Node("Softmax", inputs=[x], outputs=[output], attrs=attrs)],
-        inputs=[x],
-        outputs=[output],
-        opset=22,
-    )
-    return gs.export_onnx(graph, ir_version=10)
+def _make_softmax(shape, **attrs):
+    g = OnnxGraph(opset=22)
+    x = g.input("x", BF16, shape)
+    return g.export(g.op("Softmax", x, dtype=BF16, shape=shape, **attrs))
 
 
 CASES = {

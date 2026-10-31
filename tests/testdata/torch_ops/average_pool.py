@@ -1,37 +1,23 @@
-"""Average pool operator fixtures built with ONNX GraphSurgeon."""
+"""Average pool operator fixtures built with torq.testing.onnx_builder."""
 
-import ml_dtypes
-import onnx
-import onnx_graphsurgeon as gs
+from torq.testing.onnx_builder import BF16, OnnxGraph
 
 KIND = "onnx"
 
 
-def make_localavgpool() -> onnx.ModelProto:
-    x = gs.Variable("x", dtype=ml_dtypes.bfloat16, shape=[1, 192, 35, 35])
-    output = gs.Variable("output", dtype=ml_dtypes.bfloat16, shape=[1, 192, 35, 35])
-    graph = gs.Graph(
-        nodes=[
-            gs.Node(
-                "AveragePool",
-                inputs=[x],
-                outputs=[output],
-                attrs={
-                    "ceil_mode": 0,
-                    "count_include_pad": 1,
-                    "kernel_shape": [3, 3],
-                    "pads": [1, 1, 1, 1],
-                    "strides": [1, 1],
-                },
-            ),
-        ],
-        inputs=[x],
-        outputs=[output],
-        opset=18,
-    )
-    return gs.export_onnx(graph, ir_version=10)
+def make_localavgpool():
+    g = OnnxGraph(opset=18)
+    shape = [1, 192, 35, 35]
+    x = g.input("x", BF16, shape)
+    y = g.op("AveragePool", x, ceil_mode=0, count_include_pad=1, kernel_shape=[3, 3],
+             pads=[1, 1, 1, 1], strides=[1, 1], dtype=BF16, shape=shape)
+    return g.export(y)
 
 
 CASES = {
     "localavgpool": make_localavgpool,
+}
+
+CONFIG = {
+    "localavgpool": {"comparison": {"fp_avg_tol": 0.2, "fp_max_tol": 1.004}},
 }

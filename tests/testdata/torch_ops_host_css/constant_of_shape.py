@@ -1,31 +1,14 @@
-"""Constant of shape operator fixtures built with ONNX GraphSurgeon."""
+"""Constant of shape operator fixtures built with torq.testing.onnx_builder."""
 
-import numpy as np
-import onnx
-import onnx_graphsurgeon as gs
+from torq.testing.onnx_builder import I64, OnnxGraph
 
 KIND = "onnx"
 
 
-def make_constantshape() -> onnx.ModelProto:
-    output = gs.Variable("output", dtype=np.int64, shape=[2])
-    constantofshape_constant = gs.Constant(
-        "constantofshape_constant", np.full([1], 2, dtype=np.int64)
-    )
-    graph = gs.Graph(
-        nodes=[
-            gs.Node(
-                "ConstantOfShape",
-                inputs=[constantofshape_constant],
-                outputs=[output],
-                attrs={"value": gs.Constant("value", np.full([1], 1, dtype=np.int64))},
-            ),
-        ],
-        inputs=[],
-        outputs=[output],
-        opset=18,
-    )
-    return gs.export_onnx(graph, ir_version=10)
+def make_constantshape():
+    g = OnnxGraph(opset=18)
+    y = g.op("ConstantOfShape", g.const([2], I64), value=g.const([1], I64), dtype=I64, shape=[2])
+    return g.export(y)
 
 
 CASES = {

@@ -1,32 +1,23 @@
-"""Gather operator fixtures built with ONNX GraphSurgeon."""
+"""Gather operator fixtures built with torq.testing.onnx_builder."""
 
 from functools import partial
 
-import ml_dtypes
-import numpy as np
-import onnx
-import onnx_graphsurgeon as gs
+from torq.testing.onnx_builder import BF16, I64, OnnxGraph
 
 KIND = "onnx"
 
 
 def _make_gather(
     input_shape, output_shape, *, indices=None, index_shape=None, axis=0, opset=22
-) -> onnx.ModelProto:
-    dynamic = indices is None
-    x = gs.Variable("input_0" if dynamic else "x", dtype=ml_dtypes.bfloat16, shape=input_shape)
-    output = gs.Variable("output", dtype=ml_dtypes.bfloat16, shape=output_shape)
-    if dynamic:
-        indices = gs.Variable("input_1", dtype=np.int64, shape=index_shape)
+):
+    g = OnnxGraph(opset)
+    if indices is None:
+        x = g.input("input_0", BF16, input_shape)
+        indices = g.input("input_1", I64, index_shape)
     else:
-        indices = gs.Constant("indices", np.array(indices, dtype=np.int64))
-    graph = gs.Graph(
-        nodes=[gs.Node("Gather", inputs=[x, indices], outputs=[output], attrs={"axis": axis})],
-        inputs=[x, indices] if dynamic else [x],
-        outputs=[output],
-        opset=opset,
-    )
-    return gs.export_onnx(graph, ir_version=10)
+        x = g.input("x", BF16, input_shape)
+        indices = g.const(indices, I64)
+    return g.export(g.op("Gather", x, indices, axis=axis, dtype=BF16, shape=output_shape))
 
 
 CASES = {
@@ -37,4 +28,11 @@ CASES = {
         _make_gather, [1, 64, 1280], [1, 64, 6401], index_shape=[6401], axis=2, opset=19
     ),
     "gather-scalar-idx-3d-select1-bf16": partial(_make_gather, [16, 1, 64], [1, 64], indices=1),
+}
+
+CONFIG = {
+    # Must lower the value copy to torq_hl.gather on the NSS. CSS stays enabled: the ONNX Gather
+    # index math (negative-index normalization on i64 and the i64->i32 demote) has no NSS data
+    # path and must run on CSS.
+    "gather-dynamic-indices-tsuki": {"compiler_options": ["--torq-disable-host"]},
 }

@@ -39,6 +39,25 @@ def test_duplicate_stems_rejected(family_dir):
         models._family_cases()
 
 
+def test_config_is_per_case(family_dir):
+    family(family_dir / "a.py")
+    with open(family_dir / "a.py", "a") as f:
+        f.write('CONFIG = {"example": {"input_range": [0, 1]}}\n')
+    assert models._family_cases()[0].data["config"] == {"input_range": [0, 1]}
+
+
+@pytest.mark.parametrize("config", [
+    '{"typo": {"input_range": [0, 1]}}',
+    '{"example": {"tolerance": 1}}',
+])
+def test_bad_config_rejected(family_dir, config):
+    family(family_dir / "a.py")
+    with open(family_dir / "a.py", "a") as f:
+        f.write(f"CONFIG = {config}\n")
+    with pytest.raises(ValueError, match="CONFIG must map case stems"):
+        models._family_cases()
+
+
 def test_lookup_and_relative_cache_payload(family_dir):
     family(family_dir / "a.py", kind="torch")
     cases = models._family_cases()
@@ -78,11 +97,10 @@ def test_matmul_weight_ignores_unrelated_scalar(tmp_path, raw, constant_node):
     assert _parse_uniform_bf16_constant_onnx(SimpleNamespace(file_path=path)) == (0.25, [2, 3])
 
 
-def test_new_regression_builders():
-    for name in ("gelu-tanh-decomposed-bf16-1x196x24", "reshape-only-bf16",
-                 "reducemax-tiled-large-outer-f32"):
-        model = models._call_builder(models.model_case(name + ".mlir")["_case"])
-        onnx.checker.check_model(model)
+@pytest.mark.parametrize("case", [c for c in models._family_cases() if c.data["kind"] == "onnx"],
+                         ids=lambda c: c.name)
+def test_onnx_builders_make_valid_models(case):
+    onnx.checker.check_model(models._call_builder(case.data))
 
 
 def test_direct_mlir_cache(request, monkeypatch):

@@ -1,30 +1,20 @@
-"""Add operator fixtures built with ONNX GraphSurgeon."""
+"""Add operator fixtures built with torq.testing.onnx_builder."""
 
 from functools import partial
 
-import ml_dtypes
 import numpy as np
-import onnx
-import onnx_graphsurgeon as gs
+
+from torq.testing.onnx_builder import BF16, OnnxGraph
 
 KIND = "onnx"
 
 
-def _make_add(
-    input_0_shape, input_1_shape, *, dtype=ml_dtypes.bfloat16, opset=22
-) -> onnx.ModelProto:
-    input_0 = gs.Variable("input_0", dtype=dtype, shape=input_0_shape)
-    input_1 = gs.Variable("input_1", dtype=dtype, shape=input_1_shape)
-    output = gs.Variable(
-        "output", dtype=dtype, shape=np.broadcast_shapes(input_0_shape, input_1_shape)
-    )
-    graph = gs.Graph(
-        nodes=[gs.Node("Add", inputs=[input_0, input_1], outputs=[output])],
-        inputs=[input_0, input_1],
-        outputs=[output],
-        opset=opset,
-    )
-    return gs.export_onnx(graph, ir_version=10)
+def _make_add(input_0_shape, input_1_shape, *, dtype=BF16, opset=22):
+    g = OnnxGraph(opset)
+    a = g.input("input_0", dtype, input_0_shape)
+    b = g.input("input_1", dtype, input_1_shape)
+    shape = np.broadcast_shapes(input_0_shape, input_1_shape)
+    return g.export(g.op("Add", a, b, dtype=dtype, shape=shape))
 
 
 CASES = {
