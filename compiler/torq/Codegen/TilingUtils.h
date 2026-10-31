@@ -22,6 +22,11 @@ enum SlicingIterationDomainIndex : size_t {
     PoolingNcwMaxOp = 1,
 };
 
+// True when `op` is a linalg NCHW/FCHW conv, float (Conv2DNchwFchwOp) or quantized
+// (Conv2DNchwFchwQOp, zero points as scalar operands). Both have the same iteration domain
+// and the filter as their second input, so the slicing heuristics treat them alike.
+bool isNchwFchwConv(Operation *op);
+
 // The iteration-domain dimension LinalgSlicing slices `op` on, or nullopt when
 // `op` has no slicing pattern. Keep in sync with the pattern registration in
 // LinalgSlicingPass.
@@ -51,7 +56,7 @@ constexpr llvm::StringLiteral kSingleSliceAttr = "torq-single-slice";
 // FoldConvert sizes an op against the nearest one.
 constexpr llvm::StringLiteral kPrefetchTileBudgetAttr = "torq-prefetch-tile-budget";
 
-// True when `op` is a Conv2DNchwFchwOp whose packed weight is too large to keep
+// True when `op` is an NCHW conv (isNchwFchwConv) whose packed weight is too large to keep
 // `sliceCount` copies live within half of LRAM. Dual slicing such a conv can
 // force smaller tiles that each re-stream the weights, so TileAndFuse probes it
 // both ways and sets kSingleSliceAttr when one slice needs fewer tiles.

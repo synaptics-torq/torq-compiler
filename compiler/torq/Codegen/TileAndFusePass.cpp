@@ -472,13 +472,19 @@ TilingInfo getTilingInfo(TilingInterface tilingInterfaceOp, int64_t sliceCount) 
         if (Operation *found = getFuseGroupPrincipalOpBackward(tilingInterfaceOp))
             principalOp = found;
 
+    // A Q conv that QConv2DConvert refuses is not a fuse group principal, so ConvPattern never
+    // slices it: let its output channels tile below the slicing chunk.
+    bool slicedNchwConv =
+        isa<linalg::Conv2DNchwFchwOp>(principalOp) ||
+        (isa<linalg::Conv2DNchwFchwQOp>(principalOp) && isFuseGroupPrincipalOp(principalOp));
+
     tilingInfo.minSize.append(loopIteratorTypes.size(), 1);
     if (!clDisableSlicing && sliceCount > 1) {
         if (isa<linalg::Conv2DNhwcHwcfOp>(principalOp)) {
             tilingInfo.minSize[SlicingIterationDomainIndex::Conv2DNhwcHwcfOp] =
                 sliceCount * kGrouping;
         }
-        else if (isa<linalg::Conv2DNchwFchwOp>(principalOp)) {
+        else if (slicedNchwConv) {
             tilingInfo.minSize[SlicingIterationDomainIndex::Conv2DNchwFchwOp] =
                 sliceCount * kGrouping;
         }
@@ -2307,10 +2313,10 @@ static bool isPointwiseNchwConv(Operation *op) {
         if (Operation *p = getFuseGroupPrincipalOpBackward(op))
             principal = p;
     }
-    auto convOp = dyn_cast<linalg::Conv2DNchwFchwOp>(principal);
-    if (!convOp)
+    if (!isNchwFchwConv(principal))
         return false;
-    auto filterTy = dyn_cast<RankedTensorType>(convOp.getInputs()[1].getType());
+    auto filterTy =
+        dyn_cast<RankedTensorType>(cast<linalg::LinalgOp>(principal).getDpsInputs()[1].getType());
     return filterTy && filterTy.getRank() == 4 && filterTy.getDimSize(2) == 1 &&
            filterTy.getDimSize(3) == 1;
 }

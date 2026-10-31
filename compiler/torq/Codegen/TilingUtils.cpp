@@ -36,9 +36,11 @@ std::optional<size_t> getSlicingIterationDomainIndex(Operation *op) {
         .Case<linalg::Conv2DNhwcHwcfOp>([](auto) -> std::optional<size_t> {
             return SlicingIterationDomainIndex::Conv2DNhwcHwcfOp;
         })
-        .Case<linalg::Conv2DNchwFchwOp>([](auto) -> std::optional<size_t> {
-            return SlicingIterationDomainIndex::Conv2DNchwFchwOp;
-        })
+        .Case<linalg::Conv2DNchwFchwOp, linalg::Conv2DNchwFchwQOp>(
+            [](auto) -> std::optional<size_t> {
+                return SlicingIterationDomainIndex::Conv2DNchwFchwOp;
+            }
+        )
         .Case<linalg::DepthwiseConv2DNhwcHwcOp>([](auto) -> std::optional<size_t> {
             return SlicingIterationDomainIndex::DepthwiseConv2DNhwcHwcOp;
         })
@@ -57,11 +59,15 @@ std::optional<size_t> getSlicingIterationDomainIndex(Operation *op) {
         .Default([](auto) -> std::optional<size_t> { return std::nullopt; });
 }
 
+bool isNchwFchwConv(Operation *op) {
+    return isa_and_present<linalg::Conv2DNchwFchwOp, linalg::Conv2DNchwFchwQOp>(op);
+}
+
 bool isDualSliceWeightHeavyConv(Operation *op, int64_t sliceCount) {
-    auto conv = dyn_cast<linalg::Conv2DNchwFchwOp>(op);
-    if (!conv || sliceCount <= 1)
+    if (!isNchwFchwConv(op) || sliceCount <= 1)
         return false;
-    auto filterTy = dyn_cast<RankedTensorType>(conv.getInputs()[1].getType());
+    auto filterTy =
+        dyn_cast<RankedTensorType>(cast<linalg::LinalgOp>(op).getDpsInputs()[1].getType());
     if (!filterTy || filterTy.getRank() != 4)
         return false;
     int64_t elementBytes = llvm::divideCeil(filterTy.getElementTypeBitWidth(), 8);

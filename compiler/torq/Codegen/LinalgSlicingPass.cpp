@@ -365,8 +365,7 @@ LogicalResult peelAndSlice(
 // consumer stays full, preserving the conv's single-use i32 output that lets it
 // fuse to an i8 torq_hl.conv2d.
 static bool convKeptSingleSlice(Operation *op) {
-    auto conv = dyn_cast_if_present<linalg::Conv2DNchwFchwOp>(op);
-    return conv && conv->hasAttr(kSingleSliceAttr);
+    return isNchwFchwConv(op) && op->hasAttr(kSingleSliceAttr);
 }
 
 // True when `value` is computed in `block` by a conv, through pads, slices and
@@ -381,7 +380,7 @@ static bool computedByConv(Value value, Block *block, int depth = 0) {
     Operation *def = value.getDefiningOp();
     if (!def || def->getBlock() != block)
         return false;
-    if (isa<linalg::Conv2DNchwFchwOp, linalg::Conv2DNhwcHwcfOp>(def))
+    if (isNchwFchwConv(def) || isa<linalg::Conv2DNhwcHwcfOp>(def))
         return true;
     if (auto forall = dyn_cast<scf::ForallOp>(def)) {
         BlockArgument out = forall.getRegionIterArgs()[cast<OpResult>(value).getResultNumber()];
@@ -550,7 +549,7 @@ struct TransposePattern : public OpRewritePattern<linalg::TransposeOp> {
     }
 }; // struct TransposePattern
 
-// The producer conv of this rescale group, when it is a Conv2DNchwFchwOp kept
+// The producer conv of this rescale group, when it is an NCHW conv kept
 // full by convKeptSingleSlice and read by the group as its single live
 // entry. Slicing the group would turn that single-use conv output into a
 // per-slice extract_slice fan-out, which stops Conv2dConvert from fusing the
@@ -790,6 +789,11 @@ struct LinalgSlicingPass : public impl::LinalgSlicingBase<LinalgSlicingPass> {
             context, SlicingIterationDomainIndex::Conv2DNhwcHwcfOp, this->sliceCount
         );
         patterns.add<ConvPattern<linalg::Conv2DNchwFchwOp>>(
+            context, SlicingIterationDomainIndex::Conv2DNchwFchwOp, this->sliceCount
+        );
+        // The quantized form (zero points as scalar operands) has the same iteration
+        // domain, so it slices on output channels the same way.
+        patterns.add<ConvPattern<linalg::Conv2DNchwFchwQOp>>(
             context, SlicingIterationDomainIndex::Conv2DNchwFchwOp, this->sliceCount
         );
 
