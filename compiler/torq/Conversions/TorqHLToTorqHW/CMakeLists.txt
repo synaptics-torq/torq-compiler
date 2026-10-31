@@ -12,9 +12,7 @@ set(sources
     AddPattern.cpp
     ArgMaxPattern.cpp
     AvgpoolPattern.cpp
-    Conv2DPattern.cpp
     ConvertPattern.cpp
-    DWPattern.cpp
     FCPattern.cpp
     FillPattern.cpp
     FMAPattern.cpp

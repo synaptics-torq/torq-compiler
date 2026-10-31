@@ -239,8 +239,9 @@ bool isHwLegalConvPad(
     int64_t topB = (kH - 1) / 2;
     int64_t bottomB = kH - topB - 1;
     int64_t stride = std::max(strideH, strideW);
-    // Stride > 2 uses a hand-rolled kernel that takes pad as attributes, same
-    // as always-fold on main. Leaving tensor.pad in front overflows LRAM.
+    // Stride > 2 is only [SH, 1] here, which KernelSelection turns into
+    // stride 1 with the pad as attributes. Leaving tensor.pad in front
+    // overflows LRAM.
     if (stride > 2)
         return true;
     // 1D-as-2D stride-2 (exactly one kernel dim is 1): integer DW s2 forces
@@ -260,6 +261,16 @@ bool isHwLegalConvPad(
     // stride-1 border.
     if (stride == 2 && kH > 1 && kW > 1)
         return true;
+    // The HW forges at most nss_max_kernel_width / 2 border columns on each
+    // side (knl_l / knl_r are 2 bits), and kernels taller than
+    // nss_max_kernel_height (the validated 7x7 limit) are only lowered as
+    // valid convs: such a kernel keeps its pad on that axis explicit.
+    if (std::max(leftB, rightB) > HwInfo::nss_max_kernel_width / 2 &&
+        (lrtbPad[0] != 0 || lrtbPad[1] != 0))
+        return false;
+    if (std::max(topB, bottomB) > HwInfo::nss_max_kernel_height / 2 &&
+        (lrtbPad[2] != 0 || lrtbPad[3] != 0))
+        return false;
     // A tile cut along W or H keeps only part of the border, so each side may
     // be smaller than the kernel border but never larger.
     return lrtbPad[0] <= leftB && lrtbPad[1] <= rightB && lrtbPad[2] <= topB &&

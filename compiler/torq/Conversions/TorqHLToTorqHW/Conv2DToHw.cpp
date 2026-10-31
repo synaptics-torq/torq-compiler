@@ -292,8 +292,19 @@ static torq_hw::SliceTaskOp lowerToHw(
 
     // Configure convolution parameters
     Slice slice("conv2d");
+    // A 1D valid conv reads the input columns that follow each output column. Each group of alukw
+    // kernel columns is run as a kernel with a right border only, on a row as wide as the input:
+    // the border the HW forges then lies past the last input column the kernel reads.
+    const bool isValid1D = isWideKernel1DValidConv(op);
+    const int alukw = slice.alu.kerWidth();
     LRTBDim kernelBorder = LRTBDim::symmetric(kernelDim);
-    convAdjustPadding(input, pad, kernelBorder);
+    if (isValid1D) {
+        kernelBorder = LRTBDim({0, alukw - 1, 0, 0});
+        pad = kernelBorder;
+    }
+    else {
+        convAdjustPadding(input, pad, kernelBorder);
+    }
     slice.setKernel(kernelBorder);
     slice.setPadding(pad, op.getInputZp());
     slice.setOutputChannelShape(input.dim(Dim::H), input.dim(Dim::W));
@@ -301,11 +312,15 @@ static torq_hw::SliceTaskOp lowerToHw(
     // Get out ch vector size from weight tensor (or less to handle peeled channels without padding)
     int outChVectSize = std::min(weight.dim(Weight::OCVectorItems), chCount);
 
-    // Vectorize input
-    const int alukw = slice.alu.kerWidth();
+    // Vectorize input, with the extra columns the kernel reads beyond each vector
     int vectStride = slice.alu.iWidth(input.elementType(), weight.elementType(), outChVectSize);
-    int vectSize = vectStride + std::min(kernelBorder.left + kernelBorder.right, alukw - 1);
-    input.fuse({Dim::H, Dim::W}).vectorize(vectSize, vectStride);
+    int vectSize = vectStride + std::min(kernelDim.w - 1, alukw - 1);
+    input.fuse({Dim::H, Dim::W});
+    if (isValid1D) {
+        // One vector per output column block; the last vectors read the extra input columns
+        input.subviewDim(-1, 0, output.dim(Dim::W));
+    }
+    input.vectorize(vectSize, vectStride);
 
     // Add additional dimension to scan over the kernelDim.h input rows
     int rowSize = output.dim(Dim::W);
@@ -366,7 +381,7 @@ static torq_hw::SliceTaskOp lowerToHw(
     return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
-LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
+static LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
     Value initValue = op.getInit();
     auto wDims = LData(op.getWeights()).dims();
     int outChVectSize = wDims.size() > Weight::OCVectorItems ? wDims[Weight::OCVectorItems] : 1;
@@ -389,6 +404,15 @@ LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
         }
     }
     rewriter.replaceOp(op, hwOp.getOperation()->getResults());
+    return success();
+}
+
+template <>
+LogicalResult Conv2DPattern::transform(torq_hl::Conv2DOp op, PatternRewriter &rewriter) const {
+    if (failed(convertToHw(op, rewriter))) {
+        // The frontend must not create a torq_hl.conv2d the kernel can't lower (hasEkLoweringConv)
+        return op.emitError("conv2d not supported by the conv kernel");
+    }
     return success();
 }
 

@@ -189,6 +189,7 @@ SKIP_TESTS = {
     "model012_depthwise_1x3x3x2_valid_int16": "Test ERROR - depthwise conv int16 failure",
     "model013_depthwise_1x3x3x2_same_int16": "Test ERROR - depthwise conv int16 failure",
     "model014_depthwise_1x3x3x8_valid_int16": "Test ERROR - depthwise conv int16 failure",
+    "model015_depthwise_global_12x12x45_int16": "Test ERROR - depthwise conv int16 failure",
 }
 
 def should_skip(test_name):

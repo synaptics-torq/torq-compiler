@@ -485,6 +485,7 @@ template <typename OpTy> LogicalResult prepareParams(BinaryOpParams<OpTy> &P) {
     return success();
 }
 
+bool isWideKernel1DValidConv(mlir::syna::torq_hl::Conv2DOp op);
 bool hasEkLoweringConv(mlir::syna::torq_hl::Conv2DOp op);
 bool hasEkLoweringConv(mlir::syna::torq_hl::DepthwiseConv2DOp op);
 bool hasEkLoweringMaxPool(mlir::syna::torq_hl::MaxPool2dOp op);

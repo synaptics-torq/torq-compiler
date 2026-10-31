@@ -521,6 +521,18 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
             padding[3] /= sh;
             rewriter.modifyOpInPlace(op, [&]() { op.setPad(padding); });
         }
+        if constexpr (std::is_same_v<ConvOpT, torq_hl::Conv2DOp>) {
+            if (isWideKernel1DValidConv(op)) {
+                // The kernel runs each group of 3 kernel columns (Alu::kerWidth()) as one HW
+                // kernel, so a partial last group needs zero weights. The extra column reads one
+                // input column past the end: allowed in LRAM, and junk * 0 is 0 for the integer
+                // types that reach this path.
+                constexpr int aluKernelWidth = 3;
+                weights = weights_pad_with_zero(rewriter, op.getLoc(), weights, 3, aluKernelWidth);
+                weights =
+                    createCompileTimeConstOp(weights.getDefiningOp(), rewriter).value_or(weights);
+            }
+        }
         if (on >= parallel_outs) {
             weights = weights_OIHW_to_OIHWO(
                 rewriter, op.getLoc(), weights, parallel_outs, weightElementType

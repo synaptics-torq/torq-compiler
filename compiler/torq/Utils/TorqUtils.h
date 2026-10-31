@@ -48,11 +48,6 @@ template <typename IntegerT> IntegerT doubleToInt(double value) {
     return static_cast<IntegerT>(value);
 }
 
-std::vector<uint32_t> prepareWeightDims(
-    std::vector<uint32_t> weight_shapes, size_t alu_groups_check, size_t alu_groups,
-    uint32_t wram_seg_width = HwInfo::wram_seg_width
-);
-
 std::pair<bool, LogicalResult>
 setTargetExecutorIfForced(Operation *op, PatternRewriter &rewriter, std::string opName);
 

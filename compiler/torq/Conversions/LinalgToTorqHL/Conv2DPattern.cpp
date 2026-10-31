@@ -517,9 +517,8 @@ static bool convImageIsPrePadded(Value image) {
 // ValidToSamePadPass only reaches ops the pre-conversion already turned into torq_hl, so a conv
 // matched here has not been through it: a genuinely valid one arrives unpadded and
 // convAdjustPadding aborts on pad.left != kernelBorder.left. A stride above 2 is refused by
-// hasEkLoweringConv, which drops the op onto the hand-rolled body, and that body gets the frame
-// edges wrong without complaining. Neither was reachable while the axes shared one cap, and
-// this stays dormant while the height cap equals the width cap.
+// hasEkLoweringConv, and there is no other lowering. Neither was reachable while the axes shared
+// one cap, and this stays dormant while the height cap equals the width cap.
 static auto tallKernelIsLowerable() {
     return [](auto op) -> bool {
         Operation *rawOp = op.getOperation();
@@ -878,9 +877,9 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
 // Checker methods for convolutions with input: NHWC, weights: HWC(F) or NCHW, weights: (F)CHW
 //
 // This must admit exactly what hasEkLoweringConv admits: a kernel that matches here and is then
-// refused by the EK lowering falls through to the hand-rolled Conv2DPattern body, which gets the
-// frame edges wrong without complaining. Both limits live in ConversionUtils so the two cannot
-// drift apart. Input is NCHW here, so the frame width is inputShape[3].
+// refused by the EK lowering fails to compile, since there is no fallback once the op is torq_hl.
+// Both limits live in ConversionUtils so the two cannot drift apart. Input is NCHW here, so the
+// frame width is inputShape[3].
 static bool
 isKerSmall(int kernelHIndex, ArrayRef<int64_t> inputShape, ArrayRef<int64_t> kernelShape) {
     int kernelWIndex = kernelHIndex + 1;
@@ -905,8 +904,8 @@ static bool isDepthwiseKernelShape(
 // Layout here is NCHW input [N,C,H,W] and depthwise weights [C,kH,kW].
 //
 // The 2D case must admit exactly what hasEkLoweringConv admits, for the same reason as
-// isKerSmall: a kernel refused by EK lands on the hand-rolled DWPattern body and comes out
-// wrong. depthwise_conv2d_k9_valid guards the numerics.
+// isKerSmall: a kernel refused by EK fails to compile. depthwise_conv2d_k9_valid guards the
+// numerics.
 static bool isDepthwiseKerOk(ArrayRef<int64_t> inputShape, ArrayRef<int64_t> kernelShape) {
     if (inputShape.size() != 4 || kernelShape.size() < 3) {
         return false;

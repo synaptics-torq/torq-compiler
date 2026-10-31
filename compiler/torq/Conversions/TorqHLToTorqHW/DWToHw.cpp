@@ -136,6 +136,114 @@ static torq_hw::SliceTaskOp lowerDw1dStride1ToHw(
     return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
+// A global depthwise has a kernel as large as the input frame, so it computes one output
+// pixel per channel.
+static bool isGlobalNhwcDw(torq_hl::DepthwiseConv2DOp op) {
+    auto inShape = cast<ShapedType>(op.getInput().getType()).getShape();  // NHWC
+    auto wShape = cast<ShapedType>(op.getWeights().getType()).getShape(); // [KH, 1, KW, C]
+    auto outShape = cast<ShapedType>(op.getInit().getType()).getShape();  // NHWC
+    return op.getNhwcInput() && !op.getIsDw1dStride1() && inShape.size() == 4 &&
+           wShape.size() == 4 && outShape.size() == 4 && wShape[0] == inShape[1] &&
+           wShape[1] == 1 && wShape[2] == inShape[2] && outShape[1] == 1 && outShape[2] == 1 &&
+           llvm::all_of(op.getPad(), [](int64_t p) { return p == 0; });
+}
+
+// Lower a global depthwise conv with NHWC input to SliceTaskOp
+// Input: [N, H, W, C], weight: [KH, 1, KW, C'] with KH == H, KW == W and C' >= C (zero padded),
+// output: [N, 1, 1, C].
+// For each block of chVectSize channels, accumulate the elementwise product of all the KH * KW
+// input pixels with the weights.
+static torq_hw::SliceTaskOp lowerDwGlobalNhwcToHw(
+    torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter, int chOffset, int chCount,
+    int chVectSize
+) {
+    LData input(op.getInput());
+    LData output(op.getInit());
+    LData biasScale(op.getScaleBias());
+    LData weight(op.getWeights());
+
+    int sbWidth = biasScaleWidth(output.elementType());
+    const int channelDim = 3;
+    assert(chCount % chVectSize == 0);
+
+    input.subviewDim(channelDim, chOffset, chCount);
+    output.subviewDim(channelDim, chOffset, chCount);
+    weight.subviewDim(channelDim, chOffset, chCount);
+    biasScale.subviewDim(0, chOffset * sbWidth, chCount * sbWidth);
+
+    Slice slice("DepthwiseGlobalNhwc");
+
+    const int actBlockSize =
+        std::min(chVectSize, slice.act.width(input.elementType(), weight.elementType(), true));
+    assert(chVectSize % actBlockSize == 0);
+    const int actBlockCount = chVectSize / actBlockSize;
+
+    input.forceReshapeDim(channelDim, {-1, chVectSize});
+    output.reshapeDim(channelDim, {-1, chVectSize});
+    weight.forceReshapeDim(channelDim, {-1, chVectSize});
+    biasScale.reshapeDim(0, {-1, actBlockCount, actBlockSize, sbWidth});
+
+    const int kh = weight.dim(0);
+    const int kw = weight.dim(2);
+
+    For(auto batch = slice.iterate(input.dim(0))) {
+        For(auto ch_block = slice.iterate(input.dim(channelDim))) {
+            PData pdata;
+            For(auto h = slice.iterate(kh)) {
+                For(auto w = slice.iterate(kw)) {
+                    WData wdata = slice.wram.load(weight[h][0][w][ch_block]);
+                    IData idata = slice.iram.load(input[batch][h][w][ch_block]);
+                    pdata = slice.alu.elementwiseProductAccumulate(idata, wdata);
+                }
+            }
+            For(auto a = slice.iterate(actBlockCount)) {
+                BData bdata = slice.bram.load(biasScale[ch_block][a]);
+                QData res = slice.act.rescaleClamp(
+                    pdata[a], bdata, op.getShiftFactor(), op.getOutputZp(), op.getOutputMin(),
+                    op.getOutputMax()
+                );
+                slice.append(output[batch][0][0][ch_block], res);
+            }
+        }
+    }
+
+    return slice.createSliceTaskOp(rewriter, op.getLoc());
+}
+
+static LogicalResult
+convertGlobalNhwcDwToHw(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter) {
+    if (!isGlobalNhwcDw(op)) {
+        return failure();
+    }
+    LData input(op.getInput());
+    LData weight(op.getWeights());
+    const int chCount = LData(op.getInit()).dim(3);
+    // As many channels as the ALU takes, in multiples of the activation width
+    Slice probe;
+    const DType iType = input.elementType(), wType = weight.elementType();
+    const int actWidth = probe.act.width(iType, wType, true);
+    const int aluWidth = std::min(probe.alu.iWidth(iType, wType), probe.alu.wWidth(wType));
+    const int mainVect = std::max(actWidth, aluWidth / actWidth * actWidth);
+
+    // Process the channels in up to three parts so each one has a whole number of vectors and
+    // activation blocks: full vectors, then whole activation blocks, then the rest.
+    torq_hw::SliceTaskOp hwOp;
+    int chOffset = 0;
+    for (int vect : {mainVect, actWidth, 0}) {
+        int remaining = chCount - chOffset;
+        int count = vect ? remaining / vect * vect : remaining;
+        if (count == 0) {
+            continue;
+        }
+        if (!(hwOp = lowerDwGlobalNhwcToHw(op, rewriter, chOffset, count, vect ? vect : count))) {
+            return failure();
+        }
+        chOffset += count;
+    }
+    rewriter.replaceOp(op, hwOp.getOperation()->getResults());
+    return success();
+}
+
 static torq_hw::SliceTaskOp lowerDwStride2ToHw(
     torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset,
     int chCount
@@ -445,9 +553,14 @@ static torq_hw::SliceTaskOp lowerToHw(
     return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
-LogicalResult convertToHw(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter) {
+static LogicalResult convertToHw(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter) {
     // Check for depthwise 1D stride=1 special case
     bool isDw1dStride1 = op.getIsDw1dStride1();
+
+    // Other NHWC depthwise convs are global ones
+    if (op.getNhwcInput() && !isDw1dStride1) {
+        return convertGlobalNhwcDwToHw(op, rewriter);
+    }
 
     Value initValue = op.getInit();
 
@@ -505,6 +618,16 @@ LogicalResult convertToHw(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewrit
         }
     }
     rewriter.replaceOp(op, hwOp.getOperation()->getResults());
+    return success();
+}
+
+template <>
+LogicalResult DWPattern::transform(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter) const {
+    if (failed(convertToHw(op, rewriter))) {
+        // The frontend must not create a torq_hl.depthwise_conv2d the kernel can't lower
+        // (hasEkLoweringConv)
+        return op.emitError("depthwise_conv2d not supported by the depthwise kernel");
+    }
     return success();
 }
 

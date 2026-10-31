@@ -30,60 +30,6 @@ namespace mlir::syna {
 
 namespace torq {
 
-std::vector<uint32_t> prepareWeightDims(
-    std::vector<uint32_t> weight_shapes, size_t alu_groups_check, size_t alu_groups,
-    uint32_t wram_seg_width
-) {
-    std::vector<uint32_t> limits{wram_seg_width, 1, UINT_MAX};
-    if (alu_groups_check < alu_groups) {
-        limits[0] = HwInfo::wram_width;
-        limits[1] = HwInfo::wram_seg_width / HwInfo::wram_width;
-    }
-
-    size_t mul = 1;
-    size_t limits_idx = 0;
-    std::vector<uint32_t> weight_dims;
-
-    while (!weight_shapes.empty()) {
-        auto ws = weight_shapes.back();
-        weight_shapes.pop_back();
-        auto accu_mul = mul * ws;
-        if (accu_mul <= limits[limits_idx]) {
-            mul = accu_mul;
-            continue;
-        }
-
-        auto max_range = limits[limits_idx] / mul;
-        size_t multiple = 1;
-        for (size_t i = max_range; i > 1; --i) {
-            if (ws % i == 0 && ws % alu_groups == 0) {
-                multiple = i;
-                break;
-            }
-        }
-
-        if (multiple > 1) {
-            mul *= multiple;
-            weight_shapes.push_back(ws / multiple);
-        }
-        else {
-            weight_dims.push_back(mul);
-            weight_shapes.push_back(ws);
-            mul = 1;
-            ++limits_idx;
-        }
-    }
-
-    if (mul != 1) {
-        weight_dims.push_back(mul);
-    }
-    while (weight_dims.size() < 2) {
-        weight_dims.push_back(1);
-    }
-
-    return weight_dims;
-}
-
 std::pair<bool, LogicalResult>
 setTargetExecutorIfForced(Operation *op, PatternRewriter &rewriter, std::string opName) {
     if (llvm::is_contained(clExecuteOnHost, opName)) {

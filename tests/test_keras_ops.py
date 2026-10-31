@@ -754,6 +754,11 @@ def get_keras_depthwise_test_cases():
         "keras_model_name": "model014_depthwise_1x3x3x8_valid"
     }))
 
+    # Add model015_depthwise_global_12x12x45 test case
+    test_cases.append(Case("model015_depthwise_global_12x12x45", {
+        "keras_model_name": "model015_depthwise_global_12x12x45"
+    }))
+
     return test_cases
 
 

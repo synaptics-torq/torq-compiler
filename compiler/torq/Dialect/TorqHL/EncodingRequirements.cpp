@@ -220,24 +220,6 @@ defaultEncoding(ShapedType type, int channelAlign = 0, bool alignData = true) {
     return {align, alignWithType};
 }
 
-template <typename ConvT> static KernelEncoding getConvLikeKernelEncoding(ConvT op) {
-
-    VectorizationModeEnum mode = op.getVectorizationMode();
-
-    if (mode == torq_hl::VectorizationModeEnum::None) {
-        // no encoding when vectorization is not selected yet
-        return {{}, {{}, 0}};
-    }
-
-    if (mode == torq_hl::VectorizationModeEnum::_32x32) {
-        return {{}, {{0, 32, 0, 0}, 0}};
-    }
-
-    const int parallelOuts = static_cast<int>(mode);
-
-    return {{}, defaultEncoding(op.getInit().getType(), parallelOuts, !op.getSegmentOutput())};
-}
-
 KernelEncoding TransposeOp::getKernelEncoding() {
     KernelTensorEncoding inEncodingAttr;
     KernelTensorEncoding outEncodingAttr;
@@ -458,14 +440,12 @@ KernelEncoding ReduceMeanOp::getKernelEncoding() {
 }
 
 KernelEncoding Conv2DOp::getKernelEncoding() {
-    auto encoding =
-        torq::hasEkLoweringConv(*this) ? getNoEncoding() : getConvLikeKernelEncoding(*this);
+    auto encoding = getNoEncoding();
     return getNhwcInput() ? encoding : withDenseHWPlane(*this, encoding);
 }
 
 KernelEncoding DepthwiseConv2DOp::getKernelEncoding() {
-    auto encoding =
-        torq::hasEkLoweringConv(*this) ? getNoEncoding() : getConvLikeKernelEncoding(*this);
+    auto encoding = getNoEncoding();
     return getNhwcInput() || getIsDw1dStride1() ? encoding : withDenseHWPlane(*this, encoding);
 }
 

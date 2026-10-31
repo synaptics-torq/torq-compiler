@@ -16,12 +16,7 @@
 
 #include "llvm/Support/CommandLine.h"
 
-const uint32_t constexpr K_SIZE_X = 3;
-const uint32_t constexpr K_SIZE_Y = 2;
-
 namespace mlir::syna::torq {
-
-extern llvm::cl::opt<bool> clUseNewKernels;
 
 template <class HlOp> class OpPattern : public OpRewritePattern<HlOp> {
   public:
@@ -32,10 +27,6 @@ template <class HlOp> class OpPattern : public OpRewritePattern<HlOp> {
 
   private:
     LogicalResult transform(HlOp hlOp, PatternRewriter &rewriter) const;
-
-    /// ALU can be used in 3 different modes: 64x4, 32x8 and 16x16
-    const uint32_t alu_group_width = HwInfo::max_input;
-    const uint32_t alu_groups = HwInfo::mac_count / HwInfo::max_input;
 };
 
 typedef OpPattern<torq_hl::AddOp> AddPattern;

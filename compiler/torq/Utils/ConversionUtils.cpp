@@ -533,6 +533,22 @@ std::vector<int8_t> genD2SWeights(size_t result_size) {
     return result;
 }
 
+// A 1D conv (one input row, one kernel row) with a kernel wider than the HW border and no padding:
+// each output column reads the kernel-width input columns that start at it, so no border has to
+// be forged. The frontend keeps the padding of such convs explicit (isHwLegalConvPad).
+// Integer only: the kernel can read one input column past the end, which is harmless only when
+// junk * 0 is 0.
+bool isWideKernel1DValidConv(mlir::syna::torq_hl::Conv2DOp op) {
+    auto weightShape = cast<ShapedType>(op.getWeights().getType()).getShape();
+    auto inputType = cast<ShapedType>(op.getInput().getType());
+    auto inputShape = inputType.getShape(); // NCHW
+    return inputType.getElementType().isInteger() &&
+           weightShape[3] > HwInfo::nss_max_kernel_width && weightShape[2] == 1 &&
+           inputShape.size() == 4 && inputShape[2] == 1 &&
+           llvm::all_of(op.getStride(), [](int64_t s) { return s == 1; }) &&
+           llvm::all_of(op.getPad(), [](int64_t p) { return p == 0; });
+}
+
 // Check if the Conv2DOp can be lowered using EK kernel
 bool hasEkLoweringConv(mlir::syna::torq_hl::Conv2DOp op) {
     auto weightShape = cast<ShapedType>(op.getWeights().getType()).getShape();
@@ -541,7 +557,11 @@ bool hasEkLoweringConv(mlir::syna::torq_hl::Conv2DOp op) {
     int stride = op.getStride()[0];
     // Common HW/kernel limitations. The border zeros are forged by the data engine and each axis
     // has its own limit on how wide a border it will forge; see the cap definitions.
-    if (stride > 2 || kw > HwInfo::nss_max_kernel_width || kh > HwInfo::nss_max_kernel_height) {
+    if (stride > 2 || kh > HwInfo::nss_max_kernel_height) {
+        return false;
+    }
+    // A wider kernel has no border to forge only when it runs as a 1D valid conv
+    if (kw > HwInfo::nss_max_kernel_width && !isWideKernel1DValidConv(op)) {
         return false;
     }
 
@@ -568,7 +588,7 @@ bool hasEkLoweringConv(mlir::syna::torq_hl::DepthwiseConv2DOp op) {
     //
     // isValidConv is fragile: ValidPadToSamePadPass runs first, so a zero pad here means that
     // pass declined this kernel, not that the user wrote a valid conv. Widening its cap flips
-    // this to false and drops large 1D kernels back onto the NDL path.
+    // this to false and makes large 1D kernels fail to compile.
     //
     // A genuine 1D depthwise is exempt from both limits: with one spatial extent degenerate it
     // takes lowerDw1dStride1ToHw, which never reaches convAdjustPadding and so is not bound by

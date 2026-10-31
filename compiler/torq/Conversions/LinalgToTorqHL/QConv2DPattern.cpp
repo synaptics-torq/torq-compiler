@@ -234,6 +234,28 @@ std::vector<int64_t> applyQConvDilations(Operation *op, Value &weights, PatternR
     return dilations;
 }
 
+// True if the EK conv kernel can lower this conv once it is torq_hl.conv2d. Once an op is torq_hl
+// there is no fallback, so a conv refused here stays in linalg (CSS or host).
+// - strides equal and up to 2, or [SH, 1] (KernelSelection turns it into stride 1)
+// - kernel up to the HW limit after dilation, or a 1D kernel of any width without dilation
+//   (isWideKernel1DValidConv)
+static bool isQConvLowerable(linalg::Conv2DNchwFchwQOp op) {
+    auto strides = attrValuesAsVec(op.getStrides());
+    auto dilations = attrValuesAsVec(op.getDilations());
+    if (!(strides[1] == 1 || (strides[0] == strides[1] && strides[0] <= 2))) {
+        return false;
+    }
+    auto inShape = cast<RankedTensorType>(op.getInputs()[0].getType()).getShape(); // NCHW
+    auto wShape = cast<RankedTensorType>(op.getInputs()[1].getType()).getShape();  // FCHW
+    const int64_t kH = wShape[2] + (wShape[2] - 1) * (dilations[0] - 1);
+    const int64_t kW = wShape[3] + (wShape[3] - 1) * (dilations[1] - 1);
+    if (kH > HwInfo::nss_max_kernel_height) {
+        return false;
+    }
+    const bool is1D = inShape[2] == 1 && wShape[2] == 1 && dilations[1] == 1;
+    return kW <= HwInfo::nss_max_kernel_width || is1D;
+}
+
 struct QConv2DConvert : public OpRewritePattern<linalg::Conv2DNchwFchwQOp> {
   private:
     const bool _markFuseGroups;
@@ -303,6 +325,9 @@ struct QConv2DConvert : public OpRewritePattern<linalg::Conv2DNchwFchwQOp> {
         TorqStructuredOpMatcher<linalg::Conv2DNchwFchwQOp> matcher;
         if (!matcher.addPredicate(notMarkedFuseGroupIf(_markFuseGroups)).match(convOp)) {
             return rewriter.notifyMatchFailure(convOp, "Q conv match failed");
+        }
+        if (!isQConvLowerable(convOp)) {
+            return rewriter.notifyMatchFailure(convOp, "stride or kernel size not supported");
         }
 
         int32_t inputZp, weightZp;

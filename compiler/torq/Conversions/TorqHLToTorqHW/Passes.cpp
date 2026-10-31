@@ -26,11 +26,6 @@
 
 namespace mlir::syna::torq {
 
-llvm::cl::opt<bool> clUseNewKernels(
-    "torq-use-new-kernels", llvm::cl::desc("Use new kernels for TorqHL to TorqHW conversion"),
-    llvm::cl::init(false)
-);
-
 namespace {
 
 class ConvertSliceProgramToTorqHwPass
