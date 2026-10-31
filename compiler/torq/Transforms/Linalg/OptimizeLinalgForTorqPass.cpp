@@ -132,6 +132,10 @@ class OptimizeLinalgForTorqPass
 
             linalg::TransposeOp::getCanonicalizationPatterns(patterns, ctx);
 
+            // A pad that appends a scalar constant along one axis is a concat
+            // of its source and a constant-filled tensor.
+            populatePadToConcatPatterns(ctx, patterns);
+
             populateOptimizeArithElementwiseBinaryOpPatterns(ctx, patterns);
             // The fused fp32-clamp + truncf->bf16 generic is lowered to a single
             // torq_hl.act (clamp in f32, emit bf16) by ClampOpConversion::matchFusedClampTruncf.

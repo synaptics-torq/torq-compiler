@@ -41,6 +41,7 @@ iree_cc_library(
     EliminateTransposePattern.cpp
     OptimizeMatmulOpPattern.cpp
     FoldScalarMatmulPattern.cpp
+    PadToConcatPattern.cpp
     OptimizeConv1DPattern.cpp
     OptimizeArithElementwiseBinaryOpPattern.cpp
     CastI32MulPattern.cpp

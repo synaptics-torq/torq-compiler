@@ -181,6 +181,15 @@
     elementwise product of its operands, so a row scale does not run a matmul kernel.
     Value-preserving; use ``disable`` to compare or to rule the rewrite out.
 
+  - ``--torq-head-broadcast-mode=enable|disable`` (default ``enable``): fold a single-token ``linalg.batch_matmul`` whose RHS repeats the heads of a smaller key/value cache (``[1,KV,S,D]`` broadcast to ``[1,KV,G,S,D]``). Query heads sharing one cache head become rows in M: ``[KV*G,1,K]`` becomes ``[KV,G,K]``. The K form transposes and scales the small key cache; the V form reads the small value cache directly. Both forms, including KV == 1, use plain batch matmul and the existing TorqHL matmul lowering. The result is reshaped back to its original head layout. Value-preserving; use ``disable`` to compare with the materialized chain. Runtime improvement has not been measured.
+
+  - ``--torq-pad-to-concat-mode=enable|disable`` (default ``enable``): rewrite a
+    ``tensor.pad`` that appends a scalar constant along one axis (all other pad amounts zero)
+    as a ``tensor.concat`` of the source and a constant-filled tensor. The padded region
+    becomes a constant insert instead of a fill-and-copy kernel. Pads consumed by convolution
+    or pooling, including through expand/collapse reshapes, remain available for hardware padding absorption. Value-preserving; use
+    ``disable`` to compare with the pad kernel or to rule the rewrite out when debugging.
+
   - ``--torq-probe-avoid-relocation`` (default on): when the tile that the tile-fit probe picks
     fits only by relocating LRAM buffers (storing them to XRAM and loading them straight back),
     look for a slightly smaller tile that needs no relocation. Turn it off to compare with the

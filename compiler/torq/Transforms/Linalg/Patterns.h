@@ -50,6 +50,10 @@ void populateOptimizeMatmuOpPatterns(MLIRContext *ctx, RewritePatternSet &patter
 // product of their operands.
 void populateFoldScalarMatmulPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 
+// Rewrite a tensor.pad that appends a scalar constant along one axis into a
+// tensor.concat of the source and a constant-filled tensor.
+void populatePadToConcatPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
+
 void populateRaiseSoftmaxOpPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 
 void populateRaiseDynamicQuantizeOpPatterns(MLIRContext *context, RewritePatternSet &patterns);

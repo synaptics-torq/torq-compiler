@@ -99,6 +99,270 @@ def test_broadcast_matmul_skips_forked_key_chain(torq_compiler, tmp_path):
     assert "torq-broadcast-matmul" not in on, f"the broadcast was absorbed through a forked chain:\n{on}"
 
 
+# --- Grouped head broadcast (the rank-4 cache source) -----------------------
+#
+# BatchMatmulOpPattern absorbs a batch matmul operand built by repeating the
+# heads of a [1,KV,S,D] key/value cache over a group of G query heads (the
+# unedited grouped-query attention form), so the full-size K^T and the
+# expanded cache are not materialized: query heads sharing a cache head
+# are folded into the matmul's M dimension. Both checks below drive the pass standalone on
+# the exact dispatch-shaped chain, so no importer sits in between.
+
+def grouped_k_module(
+    kv=2,
+    perm=(0, 1, 3, 2),
+    m=1,
+    g=3,
+    fork_broadcast=False,
+    body_reads_init=False,
+    wrong_merge=False,
+):
+    """One score matmul: q @ (scale * repeat(k_cache)^T). KV = kv, G = g,
+    H = KV*G, S = 7, D = 5 (non-square so a swapped K^T would not type-check).
+    `kv = 1` is the single-cache-head (Form B) source shape the producer
+    keeps at rank 4. `perm` is the K^T link's permutation; `wrong_merge`
+    splits the merge collapse's head reassociation; `fork_broadcast` also
+    returns the rank-5 broadcast result; `body_reads_init` turns the scale
+    link into an accumulate form."""
+    s, d = 7, 5
+    h = kv * g
+    # The wrong-merge chain collapses to a [KV,.,.] operand, so the matmul's
+    # batch extent is KV there (q must match it for the IR to be valid).
+    q_batch = kv if wrong_merge else h
+    merge_src = f"tensor<1x{kv}x{g}x{s}x{d}xf32>"
+    if wrong_merge:
+        # [[0],[1],[2,3],[4]]: the head dim is not merged with the group dim,
+        # so the link stack runs over [1,KV,G*S,D] and the batch collapse
+        # yields a [KV,.,.] operand whose batch is not the head count.
+        merge_out = f"tensor<1x{kv}x{g * s}x{d}xf32>"
+        merge_reassoc = "[[0], [1], [2, 3], [4]]"
+        t_in = f"1x{kv}x{g * s}x{d}"
+        t_out = f"1x{kv}x{d}x{g * s}"
+        b_shape = f"tensor<{kv}x{d}x{g * s}xf32>"
+        q_k, out_n = d, g * s
+    else:
+        merge_out = f"tensor<1x{h}x{s}x{d}xf32>"
+        merge_reassoc = "[[0], [1, 2], [3], [4]]"
+        # The link perm applied to the merge result [1,H,S,D]; the batch
+        # collapse [[0,1],[2],[3]] then fixes the matmul's B shape and q's
+        # reduction dim. (0,1,3,2) is the observed K^T; the other perms are
+        # near-miss boundaries (all type-valid).
+        in_dims = [1, h, s, d]
+        t_out_dims = [in_dims[p] for p in perm]
+        t_in = f"1x{h}x{s}x{d}"
+        t_out = "x".join(str(x) for x in t_out_dims)
+        b_dims = [t_out_dims[0] * t_out_dims[1], t_out_dims[2], t_out_dims[3]]
+        b_shape = f"tensor<{b_dims[0]}x{b_dims[1]}x{b_dims[2]}xf32>"
+        q_k, out_n = b_dims[1], b_dims[2]
+    q_shape = f"tensor<{q_batch}x{m}x{q_k}xf32>"
+    out_shape = f"tensor<{q_batch}x{m}x{out_n}xf32>"
+    yield_init = (
+        "%mul = arith.mulf %in, %in_0 : f32\n    %add = arith.addf %out, %mul : f32\n    linalg.yield %add : f32"
+        if body_reads_init
+        else "%mul = arith.mulf %in, %in_0 : f32\n    linalg.yield %mul : f32"
+    )
+    fork_ret = ", %1" if fork_broadcast else ""
+    fork_out = f", {merge_src}" if fork_broadcast else ""
+    return f"""
+func.func @grouped_k(%q: {q_shape}, %k: tensor<1x{kv}x{s}x{d}xf32>) -> ({out_shape}{fork_out}) {{
+  %scale = arith.constant dense<0.5> : tensor<1xf32>
+  %zero = arith.constant 0.000000e+00 : f32
+  %0 = tensor.empty() : {merge_src}
+  %1 = linalg.generic {{indexing_maps = [affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d3, d4)>, affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d2, d3, d4)>], iterator_types = ["parallel", "parallel", "parallel", "parallel", "parallel"]}} ins(%k : tensor<1x{kv}x{s}x{d}xf32>) outs(%0 : {merge_src}) {{
+  ^bb0(%in: f32, %out: f32):
+    linalg.yield %in : f32
+  }} -> {merge_src}
+  %2 = tensor.collapse_shape %1 {merge_reassoc} : {merge_src} into {merge_out}
+  %3 = tensor.empty() : tensor<{t_out}xf32>
+  %t = linalg.transpose ins(%2 : tensor<{t_in}xf32>) outs(%3 : tensor<{t_out}xf32>) permutation = [{perm[0]}, {perm[1]}, {perm[2]}, {perm[3]}]
+  %4 = tensor.empty() : tensor<{t_out}xf32>
+  %sc = linalg.generic {{indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>, affine_map<(d0, d1, d2, d3) -> (0)>, affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>], iterator_types = ["parallel", "parallel", "parallel", "parallel"]}} ins(%t, %scale : tensor<{t_out}xf32>, tensor<1xf32>) outs(%4 : tensor<{t_out}xf32>) {{
+  ^bb0(%in: f32, %in_0: f32, %out: f32):
+    {yield_init}
+  }} -> tensor<{t_out}xf32>
+  %c = tensor.collapse_shape %sc [[0, 1], [2], [3]] : tensor<{t_out}xf32> into {b_shape}
+  %f = tensor.empty() : {out_shape}
+  %acc = linalg.fill ins(%zero : f32) outs(%f : {out_shape}) -> {out_shape}
+  %mm = linalg.batch_matmul ins(%q, %c : {q_shape}, {b_shape}) outs(%acc : {out_shape}) -> {out_shape}
+  return %mm{fork_ret} : {out_shape}{fork_out}
+}}
+"""
+
+
+@pytest.mark.ci
+def test_grouped_head_broadcast_fires(torq_compiler, tmp_path):
+    out = run_optimize_pass_standalone(
+        torq_compiler, tmp_path, grouped_k_module(), "torq-optimize-linalg-for-torq"
+    )
+    assert "floordiv" not in out, out
+    assert "tensor<2x3x5xf32>" in out, f"heads were not folded into M:\n{out}"
+    assert "tensor<1x6x5x7xf32>" not in out, f"full-size K^T remains:\n{out}"
+    assert "tensor<2x5x7xf32>" in out, f"K^T must run on the small cache:\n{out}"
+
+
+@pytest.mark.ci
+def test_grouped_head_broadcast_disable_mode(torq_compiler, tmp_path):
+    # Control: the fold fires with the default mode and is absent when the
+    # pattern's pass-scoped label disables it (the label covers the
+    # pre-existing rank-3 form and this one).
+    on = run_optimize_pass_standalone(
+        torq_compiler, tmp_path, grouped_k_module(), "torq-optimize-linalg-for-torq"
+    )
+    disabled = run_optimize_pass_standalone(
+        torq_compiler, tmp_path, grouped_k_module(),
+        'torq-optimize-linalg-for-torq{disable-patterns="BatchMatmulOpPattern"}')
+    assert "tensor<2x3x5xf32>" in on
+    assert "tensor<1x2x3x7x5xf32>" in disabled, disabled
+    assert "linalg.batch_matmul" in disabled, f"the matmul must survive:\n{disabled}"
+
+
+@pytest.mark.ci
+def test_grouped_head_broadcast_formb_fires(torq_compiler, tmp_path):
+    # Single-cache-head and grouped-cache forms now use the same rewrite.
+    out = run_optimize_pass_standalone(
+        torq_compiler, tmp_path, grouped_k_module(kv=1), "torq-optimize-linalg-for-torq"
+    )
+    assert "tensor<1x3x5xf32>" in out, f"the single-head chain was not folded:\n{out}"
+    assert "floordiv" not in out, f"head folding must not introduce floordiv maps:\n{out}"
+    assert "tensor<1x1x3x7x5xf32>" not in out, f"the expanded cache is still materialized:\n{out}"
+    assert "tensor<1x5x7xf32>" in out, f"the K^T does not run on the squeezed cache:\n{out}"
+    off = run_optimize_pass_standalone(
+        torq_compiler, tmp_path, grouped_k_module(kv=1), "torq-optimize-linalg-for-torq",
+        "--torq-head-broadcast-mode=disable")
+    assert "torq-broadcast-matmul" not in off, f"the flag-off control must not fold:\n{off}"
+    assert "tensor<1x1x3x7x5xf32>" in off, f"the rank-5 chain must survive the control:\n{off}"
+    assert "linalg.batch_matmul" in off, f"the matmul must survive the control:\n{off}"
+
+
+def grouped_v_module(wrong_merge=False, kv=2):
+    """One context matmul: probs @ repeat(v_cache). KV = 2, G = 3, H = 6,
+    S = 7, D = 5. `wrong_merge` uses the [[0,1],[2,3],[4]] collapse over the
+    rank-5 source: type-valid (the matmul's batch extent is KV, not H), but
+    not the observed head merge."""
+    g, s, d = 3, 7, 5
+    h = kv * g
+    if wrong_merge:
+        reassoc = "[[0, 1], [2, 3], [4]]"
+        b_shape = f"tensor<{kv}x{g * s}x{d}xf32>"
+        a_k, batch = g * s, kv
+    else:
+        reassoc = "[[0, 1, 2], [3], [4]]"
+        b_shape = f"tensor<{h}x{s}x{d}xf32>"
+        a_k, batch = s, h
+    return f"""
+func.func @grouped_v(%p: tensor<{batch}x1x{a_k}xf32>, %v: tensor<1x{kv}x{s}x{d}xf32>) -> tensor<{batch}x1x{d}xf32> {{
+  %zero = arith.constant 0.000000e+00 : f32
+  %0 = tensor.empty() : tensor<1x{kv}x{g}x{s}x{d}xf32>
+  %1 = linalg.generic {{indexing_maps = [affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d3, d4)>, affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d2, d3, d4)>], iterator_types = ["parallel", "parallel", "parallel", "parallel", "parallel"]}} ins(%v : tensor<1x{kv}x{s}x{d}xf32>) outs(%0 : tensor<1x{kv}x{g}x{s}x{d}xf32>) {{
+  ^bb0(%in: f32, %out: f32):
+    linalg.yield %in : f32
+  }} -> tensor<1x{kv}x{g}x{s}x{d}xf32>
+  %c = tensor.collapse_shape %1 {reassoc} : tensor<1x{kv}x{g}x{s}x{d}xf32> into {b_shape}
+  %f = tensor.empty() : tensor<{batch}x1x{d}xf32>
+  %acc = linalg.fill ins(%zero : f32) outs(%f : tensor<{batch}x1x{d}xf32>) -> tensor<{batch}x1x{d}xf32>
+  %mm = linalg.batch_matmul ins(%p, %c : tensor<{batch}x1x{a_k}xf32>, {b_shape}) outs(%acc : tensor<{batch}x1x{d}xf32>) -> tensor<{batch}x1x{d}xf32>
+  return %mm : tensor<{batch}x1x{d}xf32>
+}}
+"""
+
+
+@pytest.mark.ci
+@pytest.mark.parametrize(
+    "variant",
+    ["wrong_perm", "identity_perm", "m_gt_1", "g_eq_1", "forked_broadcast",
+     "body_reads_init", "wrong_merge", "v_wrong_merge"],
+)
+def test_grouped_head_broadcast_near_misses(torq_compiler, tmp_path, variant):
+    if variant == "v_wrong_merge":
+        module = grouped_v_module(wrong_merge=True)
+    else:
+        args = {
+            "wrong_perm": {"perm": (1, 0, 3, 2)},
+            # The identity perm was value-safe under the pre-narrowing link
+            # walk; the strict signature declines it (future relaxation).
+            "identity_perm": {"perm": (0, 1, 2, 3)},
+            "m_gt_1": {"m": 2},
+            "g_eq_1": {"g": 1},
+            "forked_broadcast": {"fork_broadcast": True},
+            "body_reads_init": {"body_reads_init": True},
+            "wrong_merge": {"wrong_merge": True},
+        }[variant]
+        module = grouped_k_module(**args)
+    out = run_optimize_pass_standalone(
+        torq_compiler, tmp_path, module, "torq-optimize-linalg-for-torq"
+    )
+    assert "tensor<2x3x5xf32>" not in out and "tensor<2x3x7xf32>" not in out, out
+    assert "linalg.batch_matmul" in out, f"the matmul must survive {variant}:\n{out}"
+
+
+@pytest.mark.ci
+def test_grouped_head_broadcast_scale_from_argument(torq_compiler, tmp_path):
+    module = grouped_k_module().replace(
+        '%k: tensor<1x2x7x5xf32>)',
+        '%k: tensor<1x2x7x5xf32>, %data: tensor<1x6x5x7xf32>)',
+    ).replace('ins(%t, %scale', 'ins(%data, %scale')
+    out = run_optimize_pass_standalone(
+        torq_compiler, tmp_path, module, "torq-optimize-linalg-for-torq"
+    )
+    assert "tensor<2x3x5xf32>" not in out, out
+    assert "linalg.batch_matmul" in out
+
+
+@pytest.mark.ci
+def test_grouped_head_broadcast_does_not_replay_rejected_operand(torq_compiler, tmp_path):
+    # Both operands have head chains. Only the RHS cache may fold into M;
+    # its replay links must not come from the LHS chain.
+    key = grouped_k_module().replace('x5x', 'x1x')
+    key_ops = key[key.index('  %scale'):key.index('  %f =')]
+    key_ops = re.sub(r'%([a-zA-Z0-9_]+)', r'%key_\1', key_ops)
+    module = grouped_v_module().replace(
+        '%v: tensor<1x2x7x5xf32>)',
+        '%v: tensor<1x2x7x5xf32>, %key_k: tensor<1x2x7x1xf32>)',
+    ).replace('  %zero =', key_ops + '  %zero =', 1)
+    module = module.replace('ins(%p, %c', 'ins(%key_c, %c')
+    out = run_optimize_pass_standalone(
+        torq_compiler, tmp_path, module, "torq-optimize-linalg-for-torq"
+    )
+    assert "tensor<2x3x7xf32>" in out
+    assert "floordiv" not in out
+    assert "tensor<1x2x5x7xf32>" not in out
+
+
+@pytest.mark.ci
+def test_grouped_head_broadcast_preserves_custom_matmul_maps(torq_compiler, tmp_path):
+    # Equal extents keep a transposed RHS map type-valid; the operation is
+    # different even though the operand shapes match the standard form.
+    module = grouped_k_module().replace('x7x', 'x5x').replace(
+        'linalg.batch_matmul ins',
+        'linalg.batch_matmul indexing_maps = ['
+        'affine_map<(b, m, n, k) -> (b, m, k)>, '
+        'affine_map<(b, m, n, k) -> (b, n, k)>, '
+        'affine_map<(b, m, n, k) -> (b, m, n)>] ins',
+    )
+    out = run_optimize_pass_standalone(
+        torq_compiler, tmp_path, module, "torq-optimize-linalg-for-torq"
+    )
+    assert "tensor<2x3x5xf32>" not in out, out
+    assert "linalg.batch_matmul" in out
+
+
+@pytest.mark.ci
+def test_grouped_head_broadcast_fires_on_onnx_fixture(torq_compiler, tmp_path):
+    # Both score and context matmuls use the small cache with heads in M.
+    model = onnx.load(ONNX_MODELS / "gqa_head_broadcast.onnx")
+    on = dump_after(torq_compiler, tmp_path, model, "torq-optimize-linalg-for-torq")
+    assert "floordiv" not in on, on
+    assert "tensor<2x3x5xf32>" in on and "tensor<2x3x7xf32>" in on, on
+    assert "tensor<1x2x3x7x5xf32>" not in on, f"the expanded cache is still materialized:\n{on}"
+    off = dump_after(
+        torq_compiler, tmp_path, model, "torq-optimize-linalg-for-torq",
+        "--torq-head-broadcast-mode=disable")
+    assert "torq-broadcast-matmul" not in off, \
+        f"the disable mode must leave the chain in place:\n{off}"
+    assert off.count("linalg.batch_matmul") == 2, f"both matmuls must survive:\n{off}"
+    assert "tensor<1x6x5x7xf32>" in off, f"the full-size K^T must survive:\n{off}"
+
+
 def unit_dim_transpose():
     """Transpose [1,64,1,1] -> [1,1,1,64]: only size-1 dims move, so the flat
     element order is unchanged and the transpose is a free reshape."""
@@ -329,13 +593,14 @@ func.func @fold_label_r2() {
 """
 
 
-def run_optimize_pass_standalone(torq_compiler, tmp_path, module_text, pass_spec):
-    """Run OptimizeLinalgForTorq via iree-opt on module text; return the IR."""
+def run_optimize_pass_standalone(torq_compiler, tmp_path, module_text, pass_spec, *flags):
+    """Run OptimizeLinalgForTorq via iree-opt on module text; return the IR.
+    `flags` are extra global command-line options (e.g. a pattern mode flag)."""
     iree_opt = Path(torq_compiler.file_path).parent / "iree-opt"
     mlir = tmp_path / "module.mlir"
     mlir.write_text(module_text)
     cmd = [str(iree_opt), str(mlir),
-           "--pass-pipeline", f"builtin.module(func.func({pass_spec}))"]
+           "--pass-pipeline", f"builtin.module(func.func({pass_spec}))", *flags]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     assert proc.returncode == 0, f"iree-opt failed:\n{proc.stderr}"
     return proc.stdout
@@ -528,8 +793,15 @@ func.func @dequant_matmul(%h: tensor<1x1x4xbf16>) -> tensor<1x1x3xbf16> {
 
 
 @pytest.mark.ci
-def test_per_tensor_dequant_matmul_single_block_form(torq_compiler, tmp_path):
-    out = run_optimize_pass_standalone(torq_compiler, tmp_path, DEQUANT_MODULE, "torq-optimize-linalg-for-torq")
+@pytest.mark.parametrize("custom_maps", [False, True])
+def test_per_tensor_dequant_matmul_single_block_form(torq_compiler, tmp_path, custom_maps):
+    module = DEQUANT_MODULE
+    if custom_maps:
+        module = module.replace("tensor<1x1x4xbf16>", "tensor<1x4x1xbf16>")
+        module = module.replace("linalg.batch_matmul ins", "linalg.batch_matmul indexing_maps = ["
+            "affine_map<(b,m,n,k)->(b,k,m)>, affine_map<(b,m,n,k)->(b,k,n)>, "
+            "affine_map<(b,m,n,k)->(b,m,n)>] ins")
+    out = run_optimize_pass_standalone(torq_compiler, tmp_path, module, "torq-optimize-linalg-for-torq")
     # uint8 w - 129 == int8 (w ^ 0x80) - 1: the weight is re-encoded as int8
     # with zero point 1, and scale/zero point become [1,1,N] splats.
     assert ("dense<[[[-128, 0, 1], [2, 126, 127], [-123, -122, -121], [-120, -119, -118]]]> "
@@ -549,6 +821,127 @@ def test_per_tensor_dequant_matmul_near_misses(torq_compiler, tmp_path, variant)
         module = module.replace("129 : i32", "256 : i32" if variant == "zero_point_256" else "-1 : i32")
     out = run_optimize_pass_standalone(torq_compiler, tmp_path, module, "torq-optimize-linalg-for-torq")
     assert "arith.extui" in out and "xi8>" in out and "1x4x3xi8" not in out, out
+
+
+# --- Constant pad -> concat --------------------------------------------------
+#
+# PadToConcatPattern rewrites a pad that appends a scalar constant along a
+# single axis into tensor.concat(source, constant-filled tensor), so the
+# padded region is one constant insert instead of a fill-and-copy kernel.
+# The ONNX fixture carries the three rewritable pads of a padded attention
+# block (heads 5, S 11, D 36 -> 40; the K^T pad on its head-dim axis) plus two
+# declined near-miss pads (multi-axis and leading); the near misses without an
+# ONNX form are driven standalone below. An all-zero pad is a separate
+# non-case: PadOp::fold canonicalizes it away before the pass runs, so the
+# pattern (and its tests) only see pads with a non-zero amount.
+
+PAD_PASS = "torq-optimize-linalg-for-torq"
+
+
+@pytest.mark.ci
+def test_pad_to_concat_fires_on_onnx_fixture(torq_compiler, tmp_path):
+    model = onnx.load(ONNX_MODELS / "pad_to_concat.onnx")
+    on = dump_after(torq_compiler, tmp_path, model, PAD_PASS)
+    # The three single-axis constant pads become concats with zero-filled
+    # tensors; only the multi-axis and the leading pad remain.
+    assert on.count("tensor.pad") == 2, \
+        f"only the two declined near-miss pads may remain:\n{on}"
+    assert on.count("tensor.concat") == 3, f"each rewritable pad becomes a concat:\n{on}"
+    for fill in ["tensor<1x5x1x4xf32>", "tensor<1x5x4x11xf32>", "tensor<1x5x11x4xf32>"]:
+        assert fill in on, f"the constant fill {fill} is missing:\n{on}"
+    # The disable control keeps all five pads and adds no concat.
+    off = dump_after(torq_compiler, tmp_path, model, PAD_PASS, "--torq-pad-to-concat-mode=disable")
+    assert off.count("tensor.pad") == 5, f"the disable control must keep every pad:\n{off}"
+    assert off.count("tensor.concat") == 0, f"the disable control must add no concat:\n{off}"
+
+
+@pytest.mark.ci
+@pytest.mark.parametrize("op,kernel", [
+    ("conv_2d_nchw_fchw", "tensor<8x8x3x3xf32>"),
+    ("pooling_nchw_max", "tensor<3x3xf32>"),
+])
+def test_pad_to_concat_preserves_sliding_window_padding(torq_compiler, tmp_path, op, kernel):
+    module = f"""
+func.func @pad(%src: tensor<1x8x7x40xf32>, %kernel: {kernel},
+               %init: tensor<1x8x3x20xf32>) -> tensor<1x8x3x20xf32> {{
+  %zero = arith.constant 0.0 : f32
+  %padded = tensor.pad %src low[0, 0, 0, 0] high[0, 0, 0, 1] {{
+  ^bb0(%n: index, %c: index, %h: index, %w: index):
+    tensor.yield %zero : f32
+  }} : tensor<1x8x7x40xf32> to tensor<1x8x7x41xf32>
+  %result = linalg.{op} {{strides = dense<2> : tensor<2xi64>,
+                          dilations = dense<1> : tensor<2xi64>}}
+    ins(%padded, %kernel : tensor<1x8x7x41xf32>, {kernel})
+    outs(%init : tensor<1x8x3x20xf32>) -> tensor<1x8x3x20xf32>
+  return %result : tensor<1x8x3x20xf32>
+}}
+"""
+    out = run_optimize_pass_standalone(torq_compiler, tmp_path, module, PAD_PASS)
+    assert "tensor.pad" in out, f"hardware input padding must remain visible:\n{out}"
+    assert "tensor.concat" not in out, f"input padding must not become a concat:\n{out}"
+
+
+def pad_to_concat_module(negative=False, position_dependent=False, dynamic=False):
+    """One constant pad the concat rewrite targets (rank 2, 4x7 -> 4x9, the
+    last axis extended by 2), with a single guard violated per flag: a
+    negative low pad, a position-dependent (non-constant) value, or a dynamic
+    shape. The result is returned, so each near miss must keep its pad."""
+    if dynamic:
+        src, res = "tensor<?x7xf32>", "tensor<?x9xf32>"
+    elif negative:
+        src, res = "tensor<4x7xf32>", "tensor<2x7xf32>"
+    else:
+        src, res = "tensor<4x7xf32>", "tensor<4x9xf32>"
+    low = "[-2, 0]" if negative else "[0, 0]"
+    high = "[0, 0]" if negative else "[0, 2]"
+    extras = ("  %c1 = arith.constant 1.000000e+00 : f32\n  %c2 = arith.constant 2 : index\n"
+              if position_dependent else "")
+    body = (
+        "%in_range = arith.cmpi \"slt\", %j, %c2 : index\n"
+        "    %v = arith.select %in_range, %c1, %c0 : f32\n"
+        "    tensor.yield %v : f32"
+        if position_dependent
+        else "tensor.yield %c0 : f32"
+    )
+    return f"""
+func.func @pad(%src: {src}) -> {res} {{
+  %c0 = arith.constant 0.000000e+00 : f32
+{extras}  %padded = tensor.pad %src low{low} high{high} {{
+  ^bb0(%i: index, %j: index):
+    {body}
+  }} : {src} to {res}
+  return %padded : {res}
+}}
+"""
+
+
+@pytest.mark.ci
+@pytest.mark.parametrize("variant", ["negative_low", "position_dependent", "dynamic_shape"])
+def test_pad_to_concat_near_misses(torq_compiler, tmp_path, variant):
+    flags = {
+        "negative_low": {"negative": True},
+        "position_dependent": {"position_dependent": True},
+        "dynamic_shape": {"dynamic": True},
+    }[variant]
+    out = run_optimize_pass_standalone(
+        torq_compiler, tmp_path, pad_to_concat_module(**flags), PAD_PASS
+    )
+    assert "tensor.pad" in out, f"the near miss {variant} was rewritten:\n{out}"
+
+
+@pytest.mark.ci
+def test_pad_to_concat_disable_patterns_label(torq_compiler, tmp_path):
+    # The default mode rewrites the single trailing pad; the pass-scoped label
+    # disables it with the mode flag left at its default.
+    module = pad_to_concat_module()
+    on = run_optimize_pass_standalone(torq_compiler, tmp_path, module, PAD_PASS)
+    assert "tensor.concat" in on and "tensor<4x2xf32>" in on, \
+        f"the default mode must rewrite the pad:\n{on}"
+    off = run_optimize_pass_standalone(
+        torq_compiler, tmp_path, module,
+        'torq-optimize-linalg-for-torq{disable-patterns="PadToConcatPattern"}')
+    assert "tensor.pad" in off, f"the pass-scoped label must disable the rewrite:\n{off}"
+    assert "tensor.concat" not in off, f"no concat may appear under the label:\n{off}"
 
 
 # --- Float ACT tail fold (LinalgToTorqHL conversion) -------------------------
@@ -841,3 +1234,66 @@ def test_softmax_raised_before_keepdims_folding(torq_compiler, tmp_path, shape, 
     after = "\n".join(ir_dumps(dump, "After"))
     assert "linalg.generic" in before, before
     assert "linalg.softmax" in after, after
+
+
+@pytest.mark.ci
+@pytest.mark.parametrize("lifted", [False, True])
+def test_pad_to_concat_preserves_lifted_conv1d_padding(torq_compiler, tmp_path, lifted):
+    module = """
+func.func @pad(%src: tensor<1x8x40xf32>, %kernel: tensor<8x8x2xf32>,
+               %init: tensor<1x8x40xf32>) -> tensor<1x8x40xf32> {
+  %zero = arith.constant 0.0 : f32
+  %padded = tensor.pad %src low[0, 0, 0] high[0, 0, 1] {
+  ^bb0(%n: index, %c: index, %w: index):
+    tensor.yield %zero : f32
+  } : tensor<1x8x40xf32> to tensor<1x8x41xf32>
+  %result = linalg.conv_1d_ncw_fcw {strides = dense<1> : tensor<1xi64>,
+                                  dilations = dense<1> : tensor<1xi64>}
+    ins(%padded, %kernel : tensor<1x8x41xf32>, tensor<8x8x2xf32>)
+    outs(%init : tensor<1x8x40xf32>) -> tensor<1x8x40xf32>
+  return %result : tensor<1x8x40xf32>
+}
+"""
+    if lifted:
+        # Exercise the same pad after Conv1D lowering has already inserted a unit axis.
+        module = module.replace("  %result =", """
+  %expanded = tensor.expand_shape %padded [[0], [1], [2, 3]] output_shape [1, 8, 1, 41] : tensor<1x8x41xf32> into tensor<1x8x1x41xf32>
+  %kernel2 = tensor.expand_shape %kernel [[0], [1], [2, 3]] output_shape [8, 8, 1, 2] : tensor<8x8x2xf32> into tensor<8x8x1x2xf32>
+  %init2 = tensor.expand_shape %init [[0], [1], [2, 3]] output_shape [1, 8, 1, 40] : tensor<1x8x40xf32> into tensor<1x8x1x40xf32>
+  %result2 =""").replace("linalg.conv_1d_ncw_fcw", "linalg.conv_2d_nchw_fchw").replace("tensor<1xi64>", "tensor<2xi64>")
+        module = module.replace("ins(%padded, %kernel : tensor<1x8x41xf32>, tensor<8x8x2xf32>)", "ins(%expanded, %kernel2 : tensor<1x8x1x41xf32>, tensor<8x8x1x2xf32>)")
+        module = module.replace("outs(%init : tensor<1x8x40xf32>) -> tensor<1x8x40xf32>", "outs(%init2 : tensor<1x8x1x40xf32>) -> tensor<1x8x1x40xf32>\n  %result = tensor.collapse_shape %result2 [[0], [1], [2, 3]] : tensor<1x8x1x40xf32> into tensor<1x8x40xf32>")
+    out = run_optimize_pass_standalone(torq_compiler, tmp_path, module, PAD_PASS)
+    assert "tensor.pad" in out, out
+    assert "tensor.concat" not in out, out
+
+
+@pytest.mark.ci
+@pytest.mark.parametrize("kv", [1, 2])
+@pytest.mark.parametrize("form", ["k", "v"])
+@pytest.mark.parametrize("external_init", [False, True])
+def test_grouped_heads_lower_to_torqhl_matmul(torq_compiler, tmp_path, kv, form, external_init):
+    module = grouped_k_module(kv=kv) if form == "k" else grouped_v_module(kv=kv)
+    module = module.replace("f32", "bf16")
+    if external_init:
+        width = 7 if form == "k" else 5
+        module = module.replace(") ->", f", %init: tensor<{kv * 3}x1x{width}xbf16>) ->", 1)
+        module = module.replace("outs(%acc :", "outs(%init :")
+    out = run_optimize_pass_standalone(torq_compiler, tmp_path, module,
+        "torq-optimize-linalg-for-torq,torq-linalg-to-torqhl-conversion")
+    assert "torq_hl.matmul" in out, out
+    if external_init:
+        assert "linalg.fill" not in out, out
+    assert "floordiv" not in out and "torq-broadcast-matmul" not in out, out
+
+
+@pytest.mark.parametrize("kv,g", [(1, 3), (2, 3), (4, 8)])
+@pytest.mark.parametrize("k,n", [(5, 7), (7, 5), (32, 64)])
+def test_grouped_heads_preserve_matmul_and_accumulator(kv, g, k, n):
+    rng = np.random.default_rng(0)
+    lhs = rng.normal(size=(kv * g, 1, k))
+    rhs = rng.normal(size=(kv, k, n))
+    init = rng.normal(size=(kv * g, 1, n))
+    expected = init + lhs @ np.repeat(rhs, g, axis=0)
+    actual = (init.reshape(kv, g, n) + lhs.reshape(kv, g, k) @ rhs).reshape(expected.shape)
+    np.testing.assert_allclose(actual, expected, rtol=1e-14, atol=1e-14)

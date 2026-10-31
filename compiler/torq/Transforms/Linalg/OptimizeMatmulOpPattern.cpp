@@ -35,6 +35,31 @@
 
 namespace mlir::syna::torq {
 
+enum class HeadBroadcastMode { Enable, Disable };
+
+static llvm::cl::opt<HeadBroadcastMode> clHeadBroadcastMode(
+    "torq-head-broadcast-mode",
+    llvm::cl::desc("Choose how to handle a batch matmul operand built by repeating the heads "
+                   "of a smaller key/value cache tensor"),
+    llvm::cl::values(
+        clEnumValN(
+            HeadBroadcastMode::Enable, "enable",
+            "Query-head groups that share one cache head are rewritten to read the "
+            "small cache with query-head groups folded into M, so the repeated-head "
+            "tensors (the full-size K^T transpose and the expanded cache) are not "
+            "materialized. Covers the grouped form and the single-cache-head form, "
+            "both lowered through the existing batch matmul path. "
+            "Value-preserving; on by default"
+        ),
+        clEnumValN(
+            HeadBroadcastMode::Disable, "disable",
+            "Leave repeated-head cache chains in place; the pre-existing "
+            "batch-1 broadcast fold is unaffected"
+        )
+    ),
+    llvm::cl::init(HeadBroadcastMode::Enable)
+);
+
 static bool isMapWithResults(AffineMap map, ArrayRef<AffineExpr> expectedResults) {
     if (!map || map.getNumDims() != 3 || map.getNumSymbols() != 0 ||
         map.getNumResults() != expectedResults.size()) {
@@ -1115,11 +1140,15 @@ static Value getBroadcastCommutingLinkInput(Operation *op) {
 }
 
 /// Replays the broadcast-commuting `links` (in data-flow order) on the
-/// un-broadcast rank-3 source, so they run once instead of once per head.
+/// un-broadcast source, so they run once instead of once per head. The links
+/// are rank-4 ops ([1, batch, d2, d3]); the source is rank 3 with the
+/// leading unit dimension removed.
 static Value
 replayLinksBeforeBroadcast(Value source, ArrayRef<Operation *> links, PatternRewriter &rewriter) {
     MLIRContext *ctx = rewriter.getContext();
-    AffineMap id3 = AffineMap::getMultiDimIdentityMap(3, ctx);
+    int64_t srcRank = cast<RankedTensorType>(source.getType()).getRank();
+    assert(srcRank == 3 && "source must be rank 3");
+    AffineMap id = AffineMap::getMultiDimIdentityMap(srcRank, ctx);
     for (Operation *op : links) {
         Location loc = op->getLoc();
         auto sourceType = cast<RankedTensorType>(source.getType());
@@ -1145,12 +1174,12 @@ replayLinksBeforeBroadcast(Value source, ArrayRef<Operation *> links, PatternRew
             AffineMap map = generic.getMatchingIndexingMap(input);
             bool isData = map.isIdentity();
             inputs.push_back(isData ? source : input->get());
-            maps.push_back(isData ? id3 : AffineMap::get(3, 0, map.getResults(), ctx));
+            maps.push_back(isData ? id : AffineMap::get(srcRank, 0, map.getResults(), ctx));
         }
-        maps.push_back(id3);
+        maps.push_back(id);
         auto replayed = linalg::GenericOp::create(
             rewriter, loc, TypeRange{init.getType()}, inputs, ValueRange{init}, maps,
-            SmallVector<utils::IteratorType>(3, utils::IteratorType::parallel)
+            SmallVector<utils::IteratorType>(srcRank, utils::IteratorType::parallel)
         );
         rewriter.cloneRegionBefore(
             generic.getRegion(), replayed.getRegion(), replayed.getRegion().end()
@@ -1239,6 +1268,139 @@ static int detectBroadcastBatchInput(
     return -1;
 }
 
+namespace {
+/// The repeated-head cache chain above a batch_matmul operand, the source of
+/// the un-broadcast cache, and its K-form links (data-flow order).
+struct HeadBroadcastChain {
+    Value smallSource;
+    int64_t group = 0;
+    SmallVector<Operation *, 2> links;
+};
+
+/// The splat-scale link of the K-form stack: a rank-4 elementwise generic
+/// with a single identity data input (block arg 0), the remaining inputs
+/// constants read at fixed indices, its init never read, and a body of one
+/// `arith.mulf` of the data and the first constant input, then the yield.
+static bool isSplatScaleLink(Operation *op) {
+    auto generic = dyn_cast<linalg::GenericOp>(op);
+    if (!generic || !getBroadcastCommutingLinkInput(op))
+        return false;
+    auto &ops = generic.getBody()->getOperations();
+    if (!llvm::hasNItems(ops, 2))
+        return false;
+    auto mulf = dyn_cast<arith::MulFOp>(&*ops.begin());
+    auto yield = dyn_cast<linalg::YieldOp>(std::prev(ops.end()));
+    if (!mulf || !yield || yield.getOperand(0) != mulf)
+        return false;
+    auto dataArg = dyn_cast<BlockArgument>(mulf.getLhs());
+    auto constArg = dyn_cast<BlockArgument>(mulf.getRhs());
+    return dataArg && dataArg.getArgNumber() == 0 && constArg && constArg.getArgNumber() == 1;
+}
+
+/// Check if a batch_matmul input is the small head-broadcast cache: a rank-4
+/// [1,KV,S,D] tensor repeated over a group of G query heads by an identity
+/// broadcast generic, then the merge collapse into the head batch, and either
+///   K form: the observed link stack (K^T transpose perm [0,1,3,2], then the
+///           splat scale) on the expanded heads, then the batch collapse into
+///           the matmul;
+///   V form: the batch collapse into the matmul directly.
+/// KV may be 1. Only RHS cache chains with single-token LHS operands match;
+/// grouping query heads into M then preserves a plain batch matmul.
+bool detectHeadBroadcastChain(linalg::BatchMatmulOp matmul, HeadBroadcastChain &chain) {
+    MLIRContext *ctx = matmul.getContext();
+    auto gExpr = getAffineDimExpr(1, ctx);
+    auto headMap = AffineMap::get(
+        5, 0, {getAffineDimExpr(0, ctx), gExpr, getAffineDimExpr(3, ctx), getAffineDimExpr(4, ctx)},
+        ctx
+    );
+    auto mergeReassoc = SmallVector<ReassociationIndices>{{0}, {1, 2}, {3}, {4}};
+    auto vBatchReassoc = SmallVector<ReassociationIndices>{{0, 1, 2}, {3}, {4}};
+    auto kBatchReassoc = SmallVector<ReassociationIndices>{{0, 1}, {2}, {3}};
+
+    Value input = matmul.getInputs()[1];
+    auto collapseOp = input.getDefiningOp<tensor::CollapseShapeOp>();
+    if (!collapseOp || collapseOp.getReassociationIndices().size() != 3 ||
+        ShapedType::isDynamicShape(collapseOp.getSrcType().getShape()))
+        return false;
+    // The rank-5 result of the head broadcast [1,KV,S,D] -> [1,KV,G,S,D]
+    // (group dim inserted between the cache head and the last two dims) and,
+    // for the K form, the merge collapse between it and the links.
+    tensor::CollapseShapeOp mergeOp;
+    Value broadcastResult;
+    if (collapseOp.getReassociationIndices() == vBatchReassoc &&
+        collapseOp.getSrcType().getRank() == 5) {
+        // V form: the batch collapse reads the broadcast directly.
+        if (collapseOp.getSrcType().getDimSize(0) != 1 || !collapseOp->hasOneUse())
+            return false;
+        broadcastResult = collapseOp.getSrc();
+    }
+    else if (collapseOp.getReassociationIndices() == kBatchReassoc &&
+             collapseOp.getSrcType().getRank() == 4 && collapseOp.getSrcType().getDimSize(0) == 1) {
+        // K form: the observed link stack, verbatim: the K^T transpose
+        // (perm [0,1,3,2]) followed by the splat scale, each single-use,
+        // above the merge collapse.
+        Value chainTop = collapseOp.getSrc();
+        Operation *scaleOp = chainTop.getDefiningOp();
+        if (!chainTop.hasOneUse() || !scaleOp || !isSplatScaleLink(scaleOp))
+            return false;
+        Value transposeOut = cast<linalg::GenericOp>(scaleOp).getInputs()[0];
+        auto transpose = dyn_cast_or_null<linalg::TransposeOp>(transposeOut.getDefiningOp());
+        if (!transposeOut.hasOneUse() || !transpose ||
+            !transpose.getPermutation().equals({0, 1, 3, 2}))
+            return false;
+        Value mergeOut = transpose.getInput();
+        if (!mergeOut.hasOneUse())
+            return false;
+        mergeOp = dyn_cast_or_null<tensor::CollapseShapeOp>(mergeOut.getDefiningOp());
+        if (!mergeOp || !mergeOp->hasOneUse() ||
+            mergeOp.getReassociationIndices() != mergeReassoc ||
+            mergeOp.getSrcType().getRank() != 5 || mergeOp.getSrcType().getDimSize(0) != 1)
+            return false;
+        chain.links.push_back(transpose);
+        chain.links.push_back(scaleOp);
+        broadcastResult = mergeOp.getSrc();
+    }
+    else {
+        return false;
+    }
+    auto broadcast = broadcastResult.getDefiningOp<linalg::GenericOp>();
+    if (!broadcast || !broadcastResult.hasOneUse() || broadcast.getNumDpsInputs() != 1 ||
+        broadcast.getNumResults() != 1 || broadcast.getNumLoops() != 5 ||
+        !broadcast.isAllParallelLoops() || broadcast.getBody()->getOperations().size() != 1 ||
+        !isYieldedBlockArgument(broadcast, 0))
+        return false;
+    auto maps = broadcast.getIndexingMapsArray();
+    if (maps.size() != 2 || maps[0] != headMap || !maps[1].isIdentity())
+        return false;
+    auto srcType = dyn_cast<RankedTensorType>(broadcast.getInputs()[0].getType());
+    auto resType = dyn_cast<RankedTensorType>(broadcast.getResult(0).getType());
+    if (!srcType || !resType || srcType.getRank() != 4 || resType.getRank() != 5 ||
+        !srcType.hasStaticShape() || !resType.hasStaticShape() || srcType.getShape()[0] != 1 ||
+        resType.getShape()[0] != 1 || resType.getShape()[1] != srcType.getShape()[1] ||
+        resType.getShape()[2] <= 1 ||
+        resType.getShape().drop_front(3) != srcType.getShape().drop_front(2))
+        return false;
+    int64_t kv = srcType.getShape()[1];
+    int64_t group = resType.getShape()[2];
+    int64_t batch = kv * group;
+    // Single-token decode: the other operand is [H,1,.] and the matmul's
+    // head batch is exactly the expanded batch.
+    auto otherType = dyn_cast<RankedTensorType>(matmul.getInputs()[0].getType());
+    auto outType = dyn_cast<RankedTensorType>(matmul.getResult(0).getType());
+    if (!otherType || !outType || otherType.getRank() != 3 || outType.getRank() != 3 ||
+        ShapedType::isDynamicShape(otherType.getShape()) ||
+        ShapedType::isDynamicShape(outType.getShape()) || otherType.getShape()[0] != batch ||
+        outType.getShape()[0] != batch || outType.getShape()[1] != 1 ||
+        srcType.getElementType() != otherType.getElementType() ||
+        srcType.getElementType() != outType.getElementType() ||
+        (!srcType.getElementType().isF32() && !srcType.getElementType().isBF16()))
+        return false;
+    chain.smallSource = broadcast.getInputs()[0];
+    chain.group = group;
+    return true;
+}
+} // namespace
+
 /// Check if a batch_matmul input comes *directly* (no intervening collapse_shape)
 /// from a broadcast linalg.generic that broadcasts a 2-D [K,N] value over the batch
 /// dim to [B,K,N] with B >= 2:
@@ -1310,27 +1472,20 @@ static LogicalResult replaceBatchMatmulWithBroadcastGeneric(
     MLIRContext *ctx = rewriter.getContext();
     // dims: (b=d0, m=d1, n=d2, k=d3)
     AffineMap lhsMap, rhsMap, outMap;
+    auto b = getAffineDimExpr(0, ctx);
+    auto m = getAffineDimExpr(1, ctx);
+    auto n = getAffineDimExpr(2, ctx);
+    auto k = getAffineDimExpr(3, ctx);
+    auto zero = getAffineConstantExpr(0, ctx);
     if (broadcastIdx == 1) {
-        // lhs = A[b,m,k], rhs = B[0,k,n]
-        lhsMap = AffineMap::get(
-            4, 0, {getAffineDimExpr(0, ctx), getAffineDimExpr(1, ctx), getAffineDimExpr(3, ctx)},
-            ctx
-        );
-        rhsMap = AffineMap::get(
-            4, 0,
-            {getAffineConstantExpr(0, ctx), getAffineDimExpr(3, ctx), getAffineDimExpr(2, ctx)}, ctx
-        );
+        // lhs = A[b,m,k], rhs = the small operand
+        lhsMap = AffineMap::get(4, 0, {b, m, k}, ctx);
+        rhsMap = AffineMap::get(4, 0, {zero, k, n}, ctx);
     }
     else {
-        // lhs = A[0,m,k], rhs = B[b,k,n]
-        lhsMap = AffineMap::get(
-            4, 0,
-            {getAffineConstantExpr(0, ctx), getAffineDimExpr(1, ctx), getAffineDimExpr(3, ctx)}, ctx
-        );
-        rhsMap = AffineMap::get(
-            4, 0, {getAffineDimExpr(0, ctx), getAffineDimExpr(3, ctx), getAffineDimExpr(2, ctx)},
-            ctx
-        );
+        // lhs = the small operand, rhs = B[b,k,n]
+        lhsMap = AffineMap::get(4, 0, {zero, m, k}, ctx);
+        rhsMap = AffineMap::get(4, 0, {b, k, n}, ctx);
     }
     outMap = AffineMap::get(
         4, 0, {getAffineDimExpr(0, ctx), getAffineDimExpr(1, ctx), getAffineDimExpr(2, ctx)}, ctx
@@ -1500,6 +1655,10 @@ class BatchMatmulOpPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
             return failure();
         }
 
+        // Only the broadcast folds below assume standard batch/m/n/k roles.
+        bool hasDefaultMaps = srcOp.getIndexingMapsArray() ==
+                              linalg::BatchMatmulOp::getDefaultIndexingMaps(srcOp.getContext());
+
         Value input0 = srcOp.getInputs()[0];
         Value input1 = srcOp.getInputs()[1];
         Value origInput0 = input0;
@@ -1534,7 +1693,8 @@ class BatchMatmulOpPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
         // the broadcast buffer and lets tile-and-fuse handle it naturally.
         Value broadcastSource;
         SmallVector<Operation *> links;
-        int broadcastIdx = detectBroadcastBatchInput(srcOp, broadcastSource, links);
+        int broadcastIdx =
+            hasDefaultMaps ? detectBroadcastBatchInput(srcOp, broadcastSource, links) : -1;
         if (broadcastIdx >= 0) {
             // Only apply when the broadcast source is rank 3 ([1,K,N]).
             // Rank-2 sources ([K,N]) would produce a linalg.generic with a
@@ -1550,6 +1710,57 @@ class BatchMatmulOpPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
             }
         }
 
+        // Detect the repeated-head cache form: a [1,KV,S,D] cache head tensor
+        // broadcast over a group of G query heads (KV > 1: grouped heads; KV == 1:
+        // one head shared by all), expanded to [1,KV,G,S,D] and collapsed into
+        // the matmul's head batch.
+        if (hasDefaultMaps && clHeadBroadcastMode == HeadBroadcastMode::Enable) {
+            HeadBroadcastChain chain;
+            if (detectHeadBroadcastChain(srcOp, chain)) {
+                rewriter.setInsertionPoint(srcOp);
+                Location loc = srcOp.getLoc();
+                auto cacheType = cast<RankedTensorType>(chain.smallSource.getType());
+                int64_t kv = cacheType.getDimSize(1);
+                auto elemType = cacheType.getElementType();
+                Value cache = tensor::CollapseShapeOp::create(
+                    rewriter, loc,
+                    RankedTensorType::get(cacheType.getShape().drop_front(), elemType),
+                    chain.smallSource, ArrayRef<ReassociationIndices>{{0, 1}, {2}, {3}}
+                );
+                cache = replayLinksBeforeBroadcast(cache, chain.links, rewriter);
+                // [KV*G,1,K] -> [KV,G,K], preserving head order. Reshape the
+                // accumulator identically so nonzero init values are preserved.
+                auto groupHeads = [&](Value value) -> Value {
+                    auto type = cast<RankedTensorType>(value.getType());
+                    int64_t width = type.getDimSize(2);
+                    Value expanded = tensor::ExpandShapeOp::create(
+                        rewriter, loc, RankedTensorType::get({kv, chain.group, 1, width}, elemType),
+                        value, ArrayRef<ReassociationIndices>{{0, 1}, {2}, {3}}
+                    );
+                    return tensor::CollapseShapeOp::create(
+                        rewriter, loc, RankedTensorType::get({kv, chain.group, width}, elemType),
+                        expanded, ArrayRef<ReassociationIndices>{{0}, {1, 2}, {3}}
+                    );
+                };
+                Value lhs = groupHeads(srcOp.getInputs()[0]);
+                Value init = groupHeads(srcOp.getDpsInits()[0]);
+                Value result = linalg::BatchMatmulOp::create(
+                                   rewriter, loc, ValueRange{lhs, cache}, ValueRange{init}
+                )
+                                   .getResult(0);
+                auto resultType = cast<RankedTensorType>(srcOp.getResult(0).getType());
+                Value expanded = tensor::ExpandShapeOp::create(
+                    rewriter, loc,
+                    RankedTensorType::get({kv, chain.group, 1, resultType.getDimSize(2)}, elemType),
+                    result, ArrayRef<ReassociationIndices>{{0}, {1, 2}, {3}}
+                );
+                rewriter.replaceOpWithNewOp<tensor::CollapseShapeOp>(
+                    srcOp, resultType, expanded, ArrayRef<ReassociationIndices>{{0, 1}, {2}, {3}}
+                );
+                return success();
+            }
+        }
+
         // Constant-weight batch broadcast left in place by expandConstantInput (the
         // #1767 fix): the matmul input is directly a [K,N] -> [B,K,N] broadcast generic.
         // Absorb it into the matmul via indexing maps instead of materializing the
@@ -1557,7 +1768,7 @@ class BatchMatmulOpPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
         // reshape) and reusing the rank-3 broadcast path -- which emits a 3-result
         // (0,k,n) map the TORQ backend (findBatchMatmulBcastIdx) already lowers.
         Value directSource;
-        int directIdx = detectDirectBatchBroadcastInput(srcOp, directSource);
+        int directIdx = hasDefaultMaps ? detectDirectBatchBroadcastInput(srcOp, directSource) : -1;
         if (directIdx >= 0) {
             auto srcType = cast<RankedTensorType>(directSource.getType());
             SmallVector<int64_t> expShape = {1, srcType.getShape()[0], srcType.getShape()[1]};
