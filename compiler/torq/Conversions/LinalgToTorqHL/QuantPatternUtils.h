@@ -276,6 +276,47 @@ matchOutputDequantization(Value candidate, PatternRewriter &rewriter, QuantizedO
 LogicalResult
 matchOutputQuantization(Value candidate, PatternRewriter &rewriter, QuantizedOpChain &chain);
 
+// Side-effect-free cores of the two matchers above, shared with the claim
+// check (isQuantizedMatmulChain) so a claim can never outgrow what the
+// consumer pattern converts.
+bool matchOutputDequantizationPure(Value candidate, QuantizedOpChain &chain);
+bool matchOutputQuantizationPure(Value candidate, QuantizedOpChain &chain);
+
+// The QDQ matmul chain exactly as QMatmulToFCConvert rewrites it: a rank-2
+// i8 x i8 -> i32 linalg.matmul with a single-use result, feeding at most one
+// strict input-zero-point correction combine (matchZpCorrectionCombine), then
+// either the float form (dequant generic, optional dequantized-bias add,
+// quant generic) or the fused integer form (optional integer bias add, then a
+// per-tensor apply_scale rescale).  Matching is side-effect free;
+// QMatmulToFCConvert and the claim check (isQuantizedMatmulChain) share it.
+struct QMatmulFcChain {
+    linalg::MatmulOp matmul;
+    Value input;
+    Value rhs;
+    Value weightsOMajor; // [O, K] view of the weights
+    bool needsTranspose = false;
+    int32_t inputZp = 0;
+    linalg::GenericOp combineOp = nullptr; // the correction combine, if present
+    Value chain;                           // matmul/combine result feeding the tail
+    linalg::GenericOp biasAddOp = nullptr; // the tail's bias add, if present
+    Value bias = nullptr;                  // the bias constant from biasAddOp
+    bool fusedIntForm = false;
+    QuantizedOpChain qChain; // populated for both tail forms
+};
+
+// Matches the chain into `chain`; see QMatmulFcChain for the accepted forms.
+bool matchQMatmulFcChain(linalg::MatmulOp matmulOp, QMatmulFcChain &chain);
+
+// True when the per-output-channel weight column sum `v` (validated by
+// matchZpCorrectionCombine) arrives in a form the conv-as-matmul fusion walk
+// cannot trace: an extracted dispatch block argument, or an LRAM-tiled
+// reduction (the table reduce or the scf.for self-accumulate form).  The
+// inline generic reduction over the weight constant is traceable (a
+// per-channel reduction of the anchor's filter) and stays with the
+// conv-as-matmul patterns; so does any other form (a constant-folded sum
+// included).
+bool isExtractedWeightSum(Value v);
+
 // Deferred constant-resolution helpers.
 //
 // These builders emit the zero-point correction / scale_bias chains as

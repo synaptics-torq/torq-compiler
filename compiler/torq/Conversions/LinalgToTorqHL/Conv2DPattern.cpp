@@ -648,15 +648,78 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         }
         auto finalType = cast<RankedTensorType>(output.getType());
 
+        // The epilogue transpose is absorbed into the torq op's output only when it
+        // is a layout conversion (NCHW <-> NHWC): the H and W extents must land in
+        // the H and W slots of the result layout. A transpose that swaps them in
+        // place (e.g. [0,1,3,2]) would emit a torq op whose output shape disagrees
+        // with the conv geometry. When the swap occurs, the fusion plan is cut back
+        // to before the transpose and the transpose is materialized after the
+        // torq_hl op. Discovery and conversion modes must agree on the cut: the
+        // fuse-group marks (discovery) drive tile-and-fuse's grouping, and a group
+        // that spans the transpose while the converted torq op stops before it
+        // would tile ops the conversion does not fuse.
+        auto swapTranspose = [](FusionPlan &plan, int channelDim) -> std::optional<Operation *> {
+            if (!plan.includedTranspose)
+                return std::nullopt;
+            auto transposeOp = *plan.includedTranspose;
+            auto perm = cast<linalg::TransposeOp>(transposeOp).getPermutation();
+            if (perm.size() != 4)
+                return std::nullopt;
+            const int srcH = (channelDim == 1) ? 2 : 1;
+            const int srcW = (channelDim == 1) ? 3 : 2;
+            int dstChannel = 1;
+            for (size_t i = 0; i < 4; ++i)
+                if (perm[i] == channelDim)
+                    dstChannel = static_cast<int>(i);
+            const int dstH = (dstChannel == 1) ? 2 : 1;
+            const int dstW = (dstChannel == 1) ? 3 : 2;
+            if (perm[dstH] != srcH || perm[dstW] != srcW)
+                return transposeOp;
+            return std::nullopt;
+        };
+
         if (_markFuseGroups) {
             // Discovery mode: annotate only. Do not fold padding / rewrite inputs here;
             // those mutations requeue the worklist and prevent greedy convergence.
+            Value markRoot = output;
+            if (auto trans = swapTranspose(*fusionPlanOr, _channelDim)) {
+                // Cut the mark root back to the same truncated terminal the
+                // conversion will use, so the transpose and everything after it
+                // stay out of the conv's fuse group.
+                Value convResult = convOp.getResultTensors()[0];
+                auto truncated = buildFusionPlanAndRebindOutput(convResult, _channelDim, *trans);
+                if (succeeded(truncated))
+                    markRoot = truncated->getFusedOutput();
+            }
             if (!markFuseGroupBackward(
-                    output, {peelPadAndReshapeSource(input), weights}, rewriter,
+                    markRoot, {peelPadAndReshapeSource(input), weights}, rewriter,
                     convOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
                 ))
                 return failure();
             return success();
+        }
+
+        if (auto transposeOp = swapTranspose(*fusionPlanOr, _channelDim)) {
+            // An H<->W swap cannot be absorbed into the torq op's output
+            // (its H and W extents would not land in the H and W slots of
+            // the result layout).  Cut the fusion plan back to before the
+            // transpose and rebuild it: the conv keeps the pre-transpose
+            // epilogue fused, while the transpose and everything after it
+            // stay materialized and read the torq op's output.  Keeping the
+            // full plan would fold the post-transpose epilogue into the
+            // torq op while the transpose/requant generics survive to
+            // apply it a second time.
+            Operation *trans = *transposeOp;
+            Value convResult = convOp.getResultTensors()[0];
+            auto truncated = buildFusionPlanAndRebindOutput(convResult, _channelDim, trans);
+            if (failed(truncated)) {
+                return rewriter.notifyMatchFailure(
+                    convOp, "failed to cut the fusion plan back before the transpose"
+                );
+            }
+            fusionPlanOr = std::move(truncated);
+            output = convResult;
+            finalType = cast<RankedTensorType>(output.getType());
         }
 
         bool isNchw = _2DNchwChw;

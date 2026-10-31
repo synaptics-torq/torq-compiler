@@ -296,9 +296,14 @@ bool foldForwardPerChannelAdd(
 // and collecting intermediate operations needed to reconstruct that chain.
 // On success, `fusionPlan.anchor` and `fusionPlan.neededOps` are populated.
 // Also updates the defining op of `value` to the terminal fused result, so that
-// subsequent patterns can match against it.
-FailureOr<FusionPlan>
-buildFusionPlanAndRebindOutput(Value &value, std::optional<int64_t> knownChannelDim = std::nullopt);
+// subsequent patterns can match against it.  When `stopBefore` is set, the
+// terminal is the value feeding `stopBefore`: the plan spans up to, but never
+// through, that op (used to cut a fusion plan back to before an op that cannot
+// be absorbed, e.g. an H<->W transpose in a conv epilogue).
+FailureOr<FusionPlan> buildFusionPlanAndRebindOutput(
+    Value &value, std::optional<int64_t> knownChannelDim = std::nullopt,
+    Operation *stopBefore = nullptr
+);
 
 // Build per-channel bias from the fusion plan rooted at `fusionPlan.anchor`.
 // Optionally surfaces folded weight zero-point through `optionalWeightZp`.

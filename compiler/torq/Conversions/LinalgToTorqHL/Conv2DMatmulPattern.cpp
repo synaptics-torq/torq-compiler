@@ -42,29 +42,27 @@
 
 namespace mlir::syna::torq {
 
-// A QDQ quantized matmul chain: i8 x i8 -> i32 matmul followed by the
-// accumulator dequant, possibly through the input-zp correction combine.
-// These chains are owned by QMatmulToFCConvert (QMatmulPattern.cpp);
-// Conv2DMatmulOpConversion must not convert them.
+// A QDQ quantized matmul chain: a rank-2 i8 x i8 -> i32 matmul whose result
+// feeds the exact output chain QMatmulToFCConvert (QMatmulPattern.cpp)
+// rewrites - an optional strict input-zp correction combine, then the float
+// dequant -> [bias add] -> quant form or the fused integer form (optional
+// integer bias add, per-tensor apply_scale rescale).  The claim shares that
+// matcher (matchQMatmulFcChain), so it can never outgrow what the consumer
+// converts and strand the matmul on the host fallback.
+//
+// One exception: a fused-integer chain whose correction is an inline
+// (traceable) weight-sum reduction, or has no correction at all, stays owned
+// by the conv-as-matmul patterns - their fusion walk traces those corrections
+// and fuses the epilogue into the FC lowering.  Only the extracted forms
+// (dispatch block argument or LRAM-tiled reduction), untraceable by the walk,
+// are claimed here.
 bool isQuantizedMatmulChain(linalg::MatmulOp op) {
-    auto outTy = dyn_cast<RankedTensorType>(op.getResult(0).getType());
-    if (!outTy || !outTy.getElementType().isInteger(32))
+    QMatmulFcChain chain;
+    if (!matchQMatmulFcChain(op, chain))
         return false;
-    Value result = op.getResult(0);
-    if (!result.hasOneUse())
-        return false;
-    auto user = dyn_cast<linalg::GenericOp>(*result.getUsers().begin());
-    if (!user)
-        return false;
-    double scale;
-    int32_t zp;
-    if (matchDequantGeneric(user, scale, zp))
+    if (!chain.fusedIntForm)
         return true;
-    Value userResult = user.getResult(0);
-    if (!userResult.hasOneUse())
-        return false;
-    auto nextUser = dyn_cast<linalg::GenericOp>(*userResult.getUsers().begin());
-    return nextUser && matchDequantGeneric(nextUser, scale, zp);
+    return chain.combineOp && isExtractedWeightSum(chain.combineOp.getInputs()[1]);
 }
 
 // Return the matmul RHS operand in the canonical [K, N] orientation expected by

@@ -1737,12 +1737,14 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
         float max_f = std::numeric_limits<float>::max();
         int32_t output_max = *reinterpret_cast<int32_t *>(&max_f);
 
-        const llvm::fltSemantics &bf16 = APFloat::BFloat();
-        std::vector<llvm::APFloat> weights(2, llvm::APFloat(bf16, "1.0"));
+        // The HW weight bus is 16-bit BF, so add/sub weights are always bf16. They are
+        // exactly +/-1.0, which bf16 represents without loss, so the ALU multiply-accumulate
+        // is exact regardless of the data precision.
+        std::vector<llvm::APFloat> weights(2, llvm::APFloat(llvm::APFloat::BFloat(), "1.0"));
         // for sub, set weight of 2nd input to -1.0
         // so it becomes => %input0 + (-1.0) * %input1
         if (opName == "sub") {
-            weights[1] = llvm::APFloat(bf16, "-1.0");
+            weights[1] = llvm::APFloat(llvm::APFloat::BFloat(), "-1.0");
         }
         std::vector<float> biasScale{0.0};
 
@@ -1786,8 +1788,8 @@ class AddOpPattern : public OpRewritePattern<linalg::GenericOp> {
         // Note: scale not supported for bf16 operations so we have to take this approach.
         if (needReverse && opName == "sub") {
             if (rhs_is_scalar) {
-                weights[0] = llvm::APFloat(bf16, "-1.0");
-                weights[1] = llvm::APFloat(bf16, "1.0");
+                weights[0] = llvm::APFloat(llvm::APFloat::BFloat(), "-1.0");
+                weights[1] = llvm::APFloat(llvm::APFloat::BFloat(), "1.0");
             }
             opName = "add";
         }

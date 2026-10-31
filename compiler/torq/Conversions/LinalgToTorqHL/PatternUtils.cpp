@@ -35,6 +35,7 @@
 #include "mlir/IR/Verifier.h"
 #include "mlir/Pass/PassManager.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/ScopeExit.h"
@@ -3950,16 +3951,415 @@ static bool shouldInclude(Operation *op) {
     return false;
 }
 
-static FailureOr<Value> pickGroupResultInt8(Value value) {
-    // Follow single-use chain forward until we hit an int rescale/clamp boundary,
-    // which defines the terminal value for fusion planning.
-    while (true) {
-        if (!value.hasOneUse()) {
-            // Ambiguous fanout: stop to avoid planning across multiple consumers.
-            return failure();
+// True when `operand` is derived purely from compile-time constants, uniform
+// fills, and (when the anchor's filter shape is known) per-channel reductions
+// of that filter: the fusible epilogue sources.  Elementwise and reduction
+// generics qualify only when every one of their inputs does, so a term that
+// mixes in any other runtime data (a sibling conv of a decomposed sum, a
+// running accumulator, a residual/skip activation) fails the trace.  The
+// quantized input-zero-point correction is a per-channel reduction of the
+// (possibly runtime) filter, which is why the filter counts alongside
+// constants.
+static bool tracesToEpilogueSource(
+    Value operand, std::optional<ArrayRef<int64_t>> filterShape,
+    llvm::DenseMap<Value, bool> *memo = nullptr, int depth = 0
+);
+
+// Worker for tracesToEpilogueSource.  `memo` maps each value to the result of
+// the first time it was traced: in a DAG the same value is reached more than
+// once (a shared broadcast, a bias generic with a repeated input), and the
+// second visit must reuse the first decision rather than reject it.
+static bool tracesToEpilogueSourceWorker(
+    Value operand, std::optional<ArrayRef<int64_t>> filterShape, llvm::DenseMap<Value, bool> *memo,
+    int depth
+) {
+    if (depth > 12)
+        return false;
+    Operation *defOp = operand.getDefiningOp();
+    if (!defOp)
+        return false;
+    if (isa<arith::ConstantOp, linalg::FillOp, tensor::EmptyOp>(defOp))
+        return true;
+    if (auto insert = dyn_cast<tensor::InsertSliceOp>(defOp))
+        // The result is the destination buffer with a region of the source
+        // inserted: a constant pipeline only when both sides are.  A runtime
+        // destination (a residual, an accumulator buffer) must not be counted
+        // as a constant epilogue source.
+        return tracesToEpilogueSource(insert.getSource(), filterShape, memo, depth + 1) &&
+               tracesToEpilogueSource(insert.getDest(), filterShape, memo, depth + 1);
+    if (isa<linalg::BroadcastOp, linalg::TransposeOp, tensor::ReshapeOp, tensor::ExpandShapeOp,
+            tensor::CollapseShapeOp, tensor::ExtractSliceOp>(defOp))
+        return tracesToEpilogueSource(defOp->getOperand(0), filterShape, memo, depth + 1);
+    if (auto generic = dyn_cast<linalg::GenericOp>(defOp)) {
+        if (generic.getNumDpsInputs() == 0)
+            return false;
+        // The input-zero-point correction: a per-channel reduction over the
+        // anchor's filter (its input carries the filter's shape, however the
+        // filter tensor itself is materialized).
+        if (filterShape && isSingleTensorReductionOp(generic) && generic.getNumDpsInputs() == 1) {
+            auto inType = dyn_cast<RankedTensorType>(generic.getDpsInputs()[0].getType());
+            if (inType && inType.hasStaticShape() &&
+                cast<RankedTensorType>(inType).getShape() == *filterShape)
+                return true;
         }
-        auto userOp = value.getUsers().begin();
-        if (auto genericOp = dyn_cast<linalg::GenericOp>(*userOp)) {
+        for (Value input : generic.getInputs())
+            if (!tracesToEpilogueSource(input, filterShape, memo, depth + 1))
+                return false;
+        return true;
+    }
+    if (auto affine = dyn_cast<affine::AffineApplyOp>(defOp)) {
+        for (Value src : affine.getOperands())
+            if (!tracesToEpilogueSource(src, filterShape, memo, depth + 1))
+                return false;
+        return true;
+    }
+    // The input-zero-point correction inlined by the tiler: a per-chunk sum of
+    // the anchor's filter built in an scf.for (marked TORQ_REDUCTION_TILING_LOOP)
+    // into a [C, chunks] table, reduced back to [C] by a linalg.reduce, and
+    // read per chunk through an extract_slice (peeled above).
+    if (auto reduce = dyn_cast<linalg::ReduceOp>(defOp)) {
+        if (reduce.getNumDpsInputs() != 1)
+            return false;
+        auto tableFor = reduce.getDpsInputs()[0].getDefiningOp<scf::ForOp>();
+        return tableFor && tableFor->hasAttr("torq-reduction-tiling-loop");
+    }
+    if (auto forall = dyn_cast<scf::ForallOp>(defOp)) {
+        Block &body = forall.getRegion().front();
+        Region *bodyRegion = body.getParent();
+        auto resolve = [&](Value in) -> Value {
+            while (auto extract = in.getDefiningOp<tensor::ExtractSliceOp>())
+                if (extract->getParentRegion() == bodyRegion)
+                    in = extract.getSource();
+                else
+                    break;
+            return in;
+        };
+        SmallVector<Value> externalInputs;
+        bool hasCompute = false;
+        for (Operation &op : body) {
+            if (isa<tensor::ExtractSliceOp, tensor::EmptyOp, scf::YieldOp, scf::InParallelOp,
+                    tensor::ParallelInsertSliceOp>(op))
+                continue;
+            auto generic = dyn_cast<linalg::GenericOp>(&op);
+            if (!generic || !linalg::isElementwise(generic))
+                return false;
+            hasCompute = true;
+            for (Value in : generic.getInputs()) {
+                Value resolved = resolve(in);
+                if (resolved.getParentRegion() == bodyRegion)
+                    return false;
+                externalInputs.push_back(resolved);
+            }
+        }
+        // A partition loop without any elementwise compute just shuttles its
+        // input (runtime data) into the buffer: not a constant pipeline.
+        if (!hasCompute)
+            return false;
+        for (Value in : externalInputs)
+            if (!tracesToEpilogueSource(in, filterShape, memo, depth + 1))
+                return false;
+        return true;
+    }
+    // The fit-check pipeline replaces scf.forall with an equivalent scf.for
+    // (ReplaceForLoopsWithMidIteration), so the same channel partition loop
+    // also arrives as an iter_args loop: one carried buffer, static bounds,
+    // each iteration writing a disjoint slice (write-only partition).  Peel
+    // to the body's data inputs; an accumulator loop reads the carried value
+    // as data (read-modify-write) and is never peeled.
+    if (auto forOp = dyn_cast<scf::ForOp>(defOp)) {
+        if (forOp.getNumRegionIterArgs() != 1)
+            return false;
+        if (!forOp.getLowerBound().getDefiningOp<arith::ConstantOp>() ||
+            !forOp.getUpperBound().getDefiningOp<arith::ConstantOp>() ||
+            !forOp.getStep().getDefiningOp<arith::ConstantOp>())
+            return false;
+        Value carried = forOp.getRegionIterArgs()[0];
+        Block &forBody = forOp.getBodyRegion().front();
+        bool hasCompute = false;
+        for (Operation &op : forBody) {
+            if (isa<linalg::GenericOp>(op))
+                hasCompute = true;
+            if (auto generic = dyn_cast<linalg::GenericOp>(op)) {
+                if (!linalg::isElementwise(generic))
+                    return false;
+                for (Value in : generic.getInputs()) {
+                    Value v = in;
+                    while (auto e = v.getDefiningOp<tensor::ExtractSliceOp>())
+                        v = e.getSource();
+                    if (v == carried)
+                        return false;
+                    if (!tracesToEpilogueSource(v, filterShape, memo, depth + 1))
+                        return false;
+                }
+            }
+            else if (auto nested = dyn_cast<scf::ForallOp>(op)) {
+                for (Value r : nested->getResults())
+                    if (!tracesToEpilogueSource(r, filterShape, memo, depth + 1))
+                        return false;
+                hasCompute = true;
+            }
+            else if (auto nested = dyn_cast<scf::ForOp>(op)) {
+                for (Value r : nested->getResults())
+                    if (!tracesToEpilogueSource(r, filterShape, memo, depth + 1))
+                        return false;
+                hasCompute = true;
+            }
+            else if (!isa<
+                         tensor::ExtractSliceOp, tensor::InsertSliceOp, tensor::EmptyOp,
+                         scf::YieldOp, scf::InParallelOp, tensor::ParallelInsertSliceOp,
+                         arith::ConstantOp>(op))
+                return false;
+        }
+        if (!hasCompute)
+            return false;
+        return true;
+    }
+    return false;
+}
+
+static bool tracesToEpilogueSource(
+    Value operand, std::optional<ArrayRef<int64_t>> filterShape, llvm::DenseMap<Value, bool> *memo,
+    int depth
+) {
+    if (memo) {
+        if (auto it = memo->find(operand); it != memo->end())
+            return it->second;
+    }
+    bool result = tracesToEpilogueSourceWorker(operand, filterShape, memo, depth);
+    if (memo)
+        (*memo)[operand] = result;
+    return result;
+}
+
+// True when `operand` is the extracted input-zero-point correction sum: the
+// per-channel sum of the anchor's filter arriving as a block argument of the
+// enclosing region (the dispatch; the slicing plan extracts per-channel
+// filter reductions out of the dispatch).  It is a legal epilogue source only
+// in the strict correction form inside `generic`:
+//   %m = muli %colsum, %scalar     (%scalar: scalar or rank-0 operand)
+//   %r = addi/subi %chain, %m      (the chain value, and nothing else)
+// A rank-1 i32 block argument used as bare data (a residual/skip activation)
+// is runtime input and must keep stopping the walk.
+static bool isExtractedColsumCorrection(
+    linalg::GenericOp generic, Value operand, Value chain,
+    std::optional<ArrayRef<int64_t>> filterShape
+) {
+    if (!isa<BlockArgument>(operand))
+        return false;
+    // Map the chain value to its body argument in `generic` (inputs precede
+    // inits); the correction must combine the product with that argument.
+    BlockArgument chainArg;
+    bool chainFound = false;
+    for (unsigned i = 0, e = generic.getNumDpsInputs(); i < e; ++i)
+        if (generic.getInputs()[i] == chain) {
+            chainArg = generic.getBody()->getArgument(i);
+            chainFound = true;
+            break;
+        }
+    if (!chainFound)
+        return false;
+    BlockArgument argBody;
+    bool argFound = false;
+    for (unsigned i = 0, e = generic.getNumDpsInputs(); i < e; ++i)
+        if (generic.getInputs()[i] == operand) {
+            argBody = generic.getBody()->getArgument(i);
+            argFound = true;
+            break;
+        }
+    if (!argFound)
+        return false;
+    auto ty = dyn_cast<RankedTensorType>(operand.getType());
+    if (!ty || ty.getRank() != 1 || !ty.hasStaticShape() || !ty.getElementType().isInteger(32))
+        return false;
+    if (filterShape && filterShape->size() >= 1) {
+        int64_t first = (*filterShape)[0];
+        int64_t last = (*filterShape)[filterShape->size() - 1];
+        if (ty.getShape()[0] != first && ty.getShape()[0] != last)
+            return false;
+    }
+    for (auto &use : argBody.getUses()) {
+        auto muli = dyn_cast<arith::MulIOp>(use.getOwner());
+        if (!muli || muli->getParentOp() != generic.getOperation())
+            return false;
+        Value other = (muli.getLhs() == use.get()) ? muli.getRhs() : muli.getLhs();
+        // A body argument is scalar-typed; the rank lives on the matching
+        // operand.  The factor may be a scalar value or a rank-0 tensor, but
+        // a higher-rank operand (e.g. an activation) makes the multiply
+        // elementwise: runtime data, not a per-channel correction.
+        if (auto oa = dyn_cast<BlockArgument>(other)) {
+            if (auto opOperand = generic.getMatchingOpOperand(oa))
+                if (auto ty = dyn_cast<RankedTensorType>(opOperand->get().getType()))
+                    if (ty.getRank() != 0)
+                        return false;
+        }
+        else if (auto cst = other.getDefiningOp<arith::ConstantOp>()) {
+            if (auto dense = dyn_cast<DenseElementsAttr>(cst.getValue()))
+                if (dense.getNumElements() > 1)
+                    return false;
+        }
+        else {
+            return false;
+        }
+        for (auto &mu : muli.getResult().getUses()) {
+            auto add = dyn_cast<arith::AddIOp>(mu.getOwner());
+            auto sub = dyn_cast<arith::SubIOp>(mu.getOwner());
+            if (!add && !sub)
+                return false;
+            Value lhs = add ? add.getLhs() : sub.getLhs();
+            Value rhs = add ? add.getRhs() : sub.getRhs();
+            if (lhs != chainArg && rhs != chainArg)
+                return false;
+        }
+    }
+    return true;
+}
+
+// True when `generic` merges in, besides `value`, data that is not an
+// epilogue source (see tracesToEpilogueSource): the fusion-plan walk must
+// stop before such a merge so the plan never spans unrelated computations.
+// tracesToEpilogueSource sees through the tile-and-fuse partition forms of a
+// constant pipeline (extract/insert chains, channel-partitioned scf.forall
+// and the scf.for iter_args form the fit-check pipeline rewrites them to),
+// so a conv bias materialized that way still counts as an epilogue source,
+// while runtime data (sibling conv outputs of a decomposed sum — possibly
+// wrapped in a convert/transpose — residuals, carried accumulators as block
+// arguments) does not.
+static bool hasNonEpilogueOtherInput(
+    linalg::GenericOp generic, Value value, std::optional<ArrayRef<int64_t>> filterShape
+) {
+    // The walk may fuse through a merge only when every input besides the
+    // walked value is an epilogue source: a constant pipeline (constants,
+    // fills, and the shape/broadcast ops over them — including a bias
+    // broadcast tiled into channel-partitioned scf.forall/insert_slice
+    // chains) or a per-channel reduction of the anchor's filter (the
+    // quantized zero-point correction).  The strict extracted input-zero-
+    // point correction, a rank-1 per-channel sum of the anchor's filter
+    // consumed as sumW * scalar, is accepted even though it arrives as a
+    // block argument.
+    //
+    // Any other runtime input stops the walk before the merge, so the merge
+    // keeps its own task instead of spanning the anchor's plan: spanning it
+    // would let createNewBias const-outline that input as the anchor's
+    // per-channel bias, which mis-folds for
+    // - a sibling conv/matmul output (a decomposed conv sum): right only
+    //   when the sibling constant-folds, which it does under constant test
+    //   inputs — the silent-corruption case;
+    // - a residual/skip activation: wrong math, it is runtime data;
+    // - a carried accumulator block argument (the slice program's running
+    //   result): its first tile would be outlined as the anchor's "bias".
+    //
+    // The constant pipelines must be walked through rather than matched by
+    // structure here: doing the latter changed the tile-and-fuse probe's
+    // task counts and broke models the unconditional walk tiles fine
+    // (efficientnet SE blocks).
+    for (Value operand : generic.getInputs()) {
+        if (operand == value)
+            continue;
+        if (isa<BlockArgument>(operand) &&
+            isExtractedColsumCorrection(generic, operand, value, filterShape))
+            continue;
+        llvm::DenseMap<Value, bool> memo;
+        if (!tracesToEpilogueSource(operand, filterShape, &memo))
+            return true;
+    }
+    return false;
+}
+
+// The anchor op's filter shape, if any: the fusion-plan walk may trace
+// epilogue terms through constants and per-channel reductions of the filter,
+// but through no other runtime value.
+static std::optional<ArrayRef<int64_t>> anchorFilterShape(Value value) {
+    Operation *defOp = value.getDefiningOp();
+    if (auto conv = dyn_cast_or_null<linalg::ConvolutionOpInterface>(defOp)) {
+        auto ty = dyn_cast<RankedTensorType>(conv.filter().getType());
+        if (ty && ty.hasStaticShape())
+            return ty.getShape();
+    }
+    if (auto mm = dyn_cast_or_null<linalg::MatmulOp>(defOp)) {
+        auto ty = dyn_cast<RankedTensorType>(mm.getInputs()[1].getType());
+        if (ty && ty.hasStaticShape())
+            return ty.getShape();
+    }
+    if (auto bmm = dyn_cast_or_null<linalg::BatchMatmulOp>(defOp)) {
+        auto ty = dyn_cast<RankedTensorType>(bmm.getInputs()[1].getType());
+        if (ty && ty.hasStaticShape())
+            return ty.getShape();
+    }
+    return std::nullopt;
+}
+
+// Returns the single op that linearly consumes `value` in an elementwise
+// chain, or nullptr when the value is dead or consumed non-linearly.
+//
+// A value consumed in-place by a linalg.generic (used as both a data input
+// and its output accumulator, which yields two SSA uses from one op) counts
+// as a single linear consumer.
+static Operation *getLinearChainConsumer(Value value) {
+    Operation *consumer = nullptr;
+    for (Operation *user : value.getUsers()) {
+        if (consumer && consumer != user) {
+            return nullptr;
+        }
+        consumer = user;
+    }
+    if (!consumer) {
+        return nullptr;
+    }
+    if (value.hasOneUse()) {
+        return consumer;
+    }
+    unsigned consumerUses = 0;
+    for (OpOperand &use : value.getUses()) {
+        if (use.getOwner() == consumer) {
+            consumerUses++;
+        }
+    }
+    // The consumer's extra use is linear only when it consumes the value
+    // in-place: once as a data input and once as its output accumulator.
+    if (consumerUses != 2) {
+        return nullptr;
+    }
+    auto generic = dyn_cast<linalg::GenericOp>(consumer);
+    if (!generic) {
+        return nullptr;
+    }
+    if (!llvm::is_contained(generic.getInputs(), value)) {
+        return nullptr;
+    }
+    if (!llvm::is_contained(generic.getOutputs(), value)) {
+        return nullptr;
+    }
+    return generic;
+}
+
+static FailureOr<Value> pickGroupResultInt8(Value value, Operation *stopBefore = nullptr) {
+    // Follow the linear single-consumer chain forward until we hit an int
+    // rescale/clamp boundary, which defines the terminal value for fusion
+    // planning.  The walk stops before a generic that merges in anything but
+    // constant epilogue terms or reductions of the anchor's filter, so the
+    // plan never spans unrelated computations (a sibling conv of a decomposed
+    // sum, a running accumulator, an activation).  When `stopBefore` is set,
+    // the value feeding it is the terminal: the plan spans up to, but never
+    // through, that op.
+    std::optional<ArrayRef<int64_t>> filterShape = anchorFilterShape(value);
+    while (true) {
+        auto consumer = getLinearChainConsumer(value);
+        if (!consumer) {
+            if (value.use_empty()) {
+                // Dead value: no terminal exists.
+                return failure();
+            }
+            // Fan-out (a tiled conv result both inserted into a group buffer
+            // and merged into an add): `value` is a valid terminal.  The plan
+            // spans up to it and never crosses the branch into the other
+            // consumers.
+            return value;
+        }
+        if (stopBefore && consumer == stopBefore)
+            return value;
+        if (auto genericOp = dyn_cast<linalg::GenericOp>(consumer)) {
+            if (hasNonEpilogueOtherInput(genericOp, value, filterShape))
+                return value;
             value = genericOp.getResult(0);
             for (auto &op : genericOp.getRegion().getOps()) {
                 if (isa<linalg::YieldOp>(op)) {
@@ -3972,9 +4372,9 @@ static FailureOr<Value> pickGroupResultInt8(Value value) {
                 }
             }
         }
-        else if (shouldInclude(*userOp)) {
+        else if (shouldInclude(consumer)) {
             // Shape-only op: keep walking through the transformed value.
-            value = (*userOp)->getResult(0);
+            value = consumer->getResult(0);
         }
         else {
             // Non-target user kind: current value is the best terminal point.
@@ -3984,14 +4384,23 @@ static FailureOr<Value> pickGroupResultInt8(Value value) {
     return value;
 }
 
-static FailureOr<Value> pickGroupResultFloat(Value value) {
-    // Float path mirrors int path but uses float rescale/clamp markers.
+static FailureOr<Value> pickGroupResultFloat(Value value, Operation *stopBefore = nullptr) {
+    // Float path mirrors the int path but uses float rescale/clamp markers.
+    std::optional<ArrayRef<int64_t>> filterShape = anchorFilterShape(value);
     while (true) {
-        if (!value.hasOneUse()) {
-            return failure();
+        auto consumer = getLinearChainConsumer(value);
+        if (!consumer) {
+            if (value.use_empty()) {
+                return failure();
+            }
+            // Fan-out terminal: see pickGroupResultInt8.
+            return value;
         }
-        auto userOp = value.getUsers().begin();
-        if (auto genericOp = dyn_cast<linalg::GenericOp>(*userOp)) {
+        if (stopBefore && consumer == stopBefore)
+            return value;
+        if (auto genericOp = dyn_cast<linalg::GenericOp>(consumer)) {
+            if (hasNonEpilogueOtherInput(genericOp, value, filterShape))
+                return value;
             value = genericOp.getResult(0);
             for (auto &op : genericOp.getRegion().getOps()) {
                 if (isa<linalg::YieldOp>(op)) {
@@ -4004,8 +4413,8 @@ static FailureOr<Value> pickGroupResultFloat(Value value) {
                 }
             }
         }
-        else if (shouldInclude(*userOp)) {
-            value = (*userOp)->getResult(0);
+        else if (shouldInclude(consumer)) {
+            value = consumer->getResult(0);
         }
         else {
             return value;
@@ -4014,14 +4423,14 @@ static FailureOr<Value> pickGroupResultFloat(Value value) {
     return value;
 }
 
-static FailureOr<Value> pickGroupResult(Value value) {
+static FailureOr<Value> pickGroupResult(Value value, Operation *stopBefore = nullptr) {
     // Dispatch terminal-value selection by element type family.
     auto valueType = dyn_cast<ShapedType>(value.getType()).getElementType();
     if (valueType.isInteger()) {
-        return pickGroupResultInt8(value);
+        return pickGroupResultInt8(value, stopBefore);
     }
     if (valueType.isBF16() || valueType.isF32()) {
-        return pickGroupResultFloat(value);
+        return pickGroupResultFloat(value, stopBefore);
     }
     return failure();
 }
@@ -4237,10 +4646,14 @@ static LogicalResult findPerChannelBiasDims(FusionPlan &fusionPlan, int64_t &bia
     return failure();
 }
 
-static FailureOr<FusionPlan> createFusionPlan(Value value, std::optional<int64_t> knownChannelDim) {
+static FailureOr<FusionPlan> createFusionPlan(
+    Value value, std::optional<int64_t> knownChannelDim, Operation *stopBefore = nullptr
+) {
     // Build a backward fusion plan rooted at `value`.
     // The plan captures operations between `value` (anchor) and a selected terminal
     // result (`groupResult`) that are eligible for cloning/folding later.
+    // When `stopBefore` is set, the terminal is the value feeding `stopBefore`
+    // (the plan spans up to, but never through, that op).
     FusionPlan fusionPlan;
     auto valueType = dyn_cast<ShapedType>(value.getType());
     if (!valueType) {
@@ -4250,7 +4663,7 @@ static FailureOr<FusionPlan> createFusionPlan(Value value, std::optional<int64_t
 
     // Choose the final op/value of the fusible chain (typically at the end of
     // elementwise/rescale/clamp sequence).
-    auto groupResult = pickGroupResult(value);
+    auto groupResult = pickGroupResult(value, stopBefore);
     if (failed(groupResult)) {
         LLVM_DEBUG({ llvm::dbgs() << "pickGroupResult FAILED\n"; });
         return failure();
@@ -4318,9 +4731,10 @@ static FailureOr<FusionPlan> createFusionPlan(Value value, std::optional<int64_t
     return fusionPlan;
 }
 
-FailureOr<FusionPlan>
-buildFusionPlanAndRebindOutput(Value &value, std::optional<int64_t> knownChannelDim) {
-    auto plan = createFusionPlan(value, knownChannelDim);
+FailureOr<FusionPlan> buildFusionPlanAndRebindOutput(
+    Value &value, std::optional<int64_t> knownChannelDim, Operation *stopBefore
+) {
+    auto plan = createFusionPlan(value, knownChannelDim, stopBefore);
     if (failed(plan)) {
         return failure();
     }
@@ -4843,6 +5257,36 @@ static bool extractF32ClampTruncfInfo(linalg::GenericOp op, ScaleClampInfo &scIn
     return true;
 }
 
+// Interleave [bias, scale] per channel into a single 1D i32 tensor:
+// even indices <- bias, odd indices <- scale.
+static Value interleaveBiasScale(OpBuilder &builder, Location loc, Value bias, Value scale) {
+    int64_t channels = cast<RankedTensorType>(bias.getType()).getShape()[0];
+
+    // HW expects biasScale tensor to be int32
+    auto iTy = RankedTensorType::get({channels * 2}, builder.getIntegerType(32));
+
+    auto init =
+        tensor::EmptyOp::create(builder, loc, iTy.getShape(), iTy.getElementType()).getResult();
+
+    auto iOp = tensor::InsertSliceOp::create(
+                   builder, loc, bias, init, llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(0)},
+                   llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(channels)},
+                   llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(2)}
+    )
+                   .getResult();
+
+    // Insert scales at odd offsets with stride=2 to complete interleaving.
+    iOp = tensor::InsertSliceOp::create(
+              builder, loc, scale, iOp, llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(1)},
+              llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(channels)},
+              llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(2)}
+    )
+              .getResult();
+
+    IRRewriter irRewriter(builder.getContext());
+    return createCompileTimeConstOp(iOp.getDefiningOp(), irRewriter).value_or(iOp);
+}
+
 FailureOr<Value>
 computeRescaleInfo(FusionPlan &fusionPlan, Value biasScale, ScaleClampInfo &scInfo) {
     // Parse the terminal rescale generic and reconstruct explicit scale/clamp metadata.
@@ -4990,42 +5434,7 @@ computeRescaleInfo(FusionPlan &fusionPlan, Value biasScale, ScaleClampInfo &scIn
         llvm::dbgs() << "\n";
     });
 
-    // Interleave [bias, scale] per channel into a single 1D tensor:
-    // even indices  <- biasScale, odd indices <- finalScaleV.
-
-    SmallVector<int64_t, 1> sh{biasScaleTy.getShape()[0] * 2};
-
-    // HW expects biasScale tensor to be int32
-    auto iTy = RankedTensorType::get(sh, builder.getIntegerType(32));
-
-    auto init =
-        tensor::EmptyOp::create(builder, lastOp->getLoc(), iTy.getShape(), iTy.getElementType())
-            .getResult();
-
-    auto iOp = tensor::InsertSliceOp::create(
-                   builder, lastOp->getLoc(), biasScale, init,
-                   llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(0)},
-                   llvm::ArrayRef<OpFoldResult>{
-                       builder.getIndexAttr(biasScaleTy.getShape()[0]),
-                   },
-                   llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(2)}
-    )
-                   .getResult();
-
-    // Insert scales at odd offsets with stride=2 to complete interleaving.
-    iOp = tensor::InsertSliceOp::create(
-              builder, lastOp->getLoc(), finalScaleV, iOp,
-              llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(1)},
-              llvm::ArrayRef<OpFoldResult>{
-                  builder.getIndexAttr(biasScaleTy.getShape()[0]),
-              },
-              llvm::ArrayRef<OpFoldResult>{builder.getIndexAttr(2)}
-    )
-              .getResult();
-
-    IRRewriter irRewriter(builder.getContext());
-    biasScale = createCompileTimeConstOp(iOp.getDefiningOp(), irRewriter).value_or(iOp);
-    return biasScale;
+    return interleaveBiasScale(builder, lastOp->getLoc(), biasScale, finalScaleV);
 }
 
 FailureOr<Value> computeBiasForMatmul(
@@ -5047,7 +5456,21 @@ FailureOr<Value> computeBiasAndRescaleInfo(
                 extractF32ClampTruncfInfo(lastOp, scInfo);
         return failure();
     }
-    return computeRescaleInfo(fusionPlan, *maybeBias, scInfo);
+    auto biasScale = computeRescaleInfo(fusionPlan, *maybeBias, scInfo);
+    // An integer op whose plan has no rescale to fold (e.g. a raw i32 accumulator whose
+    // epilogue stops at a runtime-data merge) gets its bias back unpaired, but still needs
+    // [bias, scale] pairs: pair each bias with a unit scale, as getDefaultBiasScale does for a
+    // zero bias.
+    auto biasTy = cast<RankedTensorType>(maybeBias->getType());
+    if (failed(biasScale) || *biasScale != *maybeBias || !biasTy.getElementType().isInteger())
+        return biasScale;
+    Operation *lastOp = fusionPlan.neededOps.back();
+    OpBuilder builder(lastOp);
+    auto scaleTy = RankedTensorType::get(biasTy.getShape(), builder.getI32Type());
+    Value unitScale = arith::ConstantOp::create(
+        builder, lastOp->getLoc(), DenseElementsAttr::get(scaleTy, builder.getI32IntegerAttr(1))
+    );
+    return interleaveBiasScale(builder, lastOp->getLoc(), *maybeBias, unitScale);
 }
 
 FailureOr<Value> buildWeightWithZp(Value weights, Value weightZp, PatternRewriter &rewriter) {

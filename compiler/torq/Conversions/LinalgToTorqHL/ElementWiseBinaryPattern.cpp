@@ -446,8 +446,14 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
                 SmallVector<ReassociationIndices> toOut(1);
                 for (int64_t i = 0; i < outTy.getRank(); ++i)
                     toOut[0].push_back(i);
-                input = tensor::ExpandShapeOp::create(rewriter, input.getLoc(), outTy, flat, toOut)
-                            .getResult();
+                // Keep the input's element type: for a fused quantized add the
+                // operands live in the pre-quantization (i32) domain while
+                // `outTy` is the requantized output (e.g. i8). An expand_shape
+                // must not change the element type.
+                auto alignedTy = RankedTensorType::get(outTy.getShape(), inTy.getElementType());
+                input =
+                    tensor::ExpandShapeOp::create(rewriter, input.getLoc(), alignedTy, flat, toOut)
+                        .getResult();
             }
             return true;
         }
@@ -498,8 +504,10 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
             for (int64_t i = leadingPad + 1; i < outRank; ++i) {
                 reassociation.push_back({i});
             }
+            // Keep the input's element type (see the equal-count branch above).
+            auto alignedTy = RankedTensorType::get(outShape, inTy.getElementType());
             auto expandOp = tensor::ExpandShapeOp::create(
-                rewriter, input.getLoc(), outTy, input, reassociation
+                rewriter, input.getLoc(), alignedTy, input, reassociation
             );
             input = expandOp.getResult();
             return true;

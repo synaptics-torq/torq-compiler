@@ -177,24 +177,22 @@ bool hasConv1DExpandReassociation(tensor::ExpandShapeOp expandOp) {
            reassociation[0][1] == 1 && reassociation[1].size() == 1 && reassociation[1][0] == 2;
 }
 
-// Lower a `linalg.matmul` produced by Conv1D-as-matmul to torq_hl.fully_connected,
-// folding the trailing per-channel bias and any truncf/clamp or
-// requantize/clamp chain into the fully_connected op. This eliminates dangling
-// elementwise linalg.generic ops that have no NSS/slice lowering, and routes
-// pointwise Conv1D layers to NPU instead of leaving them on Host.
+// Lower a rank-2 `linalg.matmul` to torq_hl.fully_connected when its output feeds a
+// pointwise epilogue chain (per-channel bias and any truncf/clamp or
+// requantize/clamp, with optional transpose/expand_shape layout steps), folding that
+// chain into the fully_connected op. This eliminates dangling elementwise
+// linalg.generic ops that have no NSS/slice lowering.
 //
 // Pattern is element-type agnostic: it handles both the bf16 path and the
 // integer (i8/i32) requantize path produced by quantized ONNX models. The
 // post-matmul layout chain (transpose -> optional expand_shape) is shared
 // between the two; only the bias/scale folding differs.
 //
-// Layout assumed (created by Conv1DNcwFcwToLinalgMatmulPattern):
-//   %im2col      : [Ow, K]       (K = C * Kw)
-//   %filter_T    : [K, F]        (linalg.transpose of [F, K]; canonicalization
-//                                 may have folded this into a constant, in
-//                                 which case the matmul RHS already lives in
-//                                 [K, F] and we re-introduce the transpose)
-//   %matmul      : [Ow, F]       (element type matches the conv1d output)
+// Layout assumed (historically this chain was produced by a Conv1D-as-matmul
+// lowering; the pattern matches any rank-2 matmul with the same shape):
+//   %input       : [Ow, K]       (matmul LHS)
+//   %filter_T    : [K, F]        (matmul RHS)
+//   %matmul      : [Ow, F]       (element type matches the fully_connected output)
 //   %trans       = linalg.transpose %matmul -> [F, Ow]
 //   %expand      = tensor.expand_shape %trans -> [1, F, Ow]   (optional)
 //
@@ -207,7 +205,7 @@ bool hasConv1DExpandReassociation(tensor::ExpandShapeOp expandOp) {
 //     %req   = linalg.generic apply_scale + clamp + trunci -> [1, F, Ow] i8
 //
 // We emit:
-//   %fc          = torq_hl.fully_connected(%im2col, %weights[F,K], %bias)
+//   %fc          = torq_hl.fully_connected(%input, %weights[F,K], %bias)
 //                                                                 -> [Ow, F]
 //   %trans2      = linalg.transpose %fc                            -> [F, Ow]
 //   %expand2     = tensor.expand_shape %trans2                     -> [1, F, Ow]
@@ -226,8 +224,8 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
     Conv1DMatmulToTorqHlFCPattern(
         MLIRContext *context, int shift8b, int shift16b, bool markFuseGroups
     )
-        // Higher benefit than Conv2DMatmulOpConversion's default (1) so we win
-        // when the matmul is conv1d-derived.
+        // Higher benefit than Conv2DMatmulOpConversion's default (1) so this
+        // pattern wins for rank-2 matmuls carrying the fusible FC epilogue.
         : OpRewritePattern(context, /*benefit=*/2), _shift8b(shift8b), _shift16b(shift16b),
           _markFuseGroups(markFuseGroups) {}
 
@@ -348,7 +346,7 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
 
         auto loc = matmulOp.getLoc();
 
-        Value im2col = matmulOp.getInputs()[0];
+        Value input = matmulOp.getInputs()[0];
         Value weights = matmulOp.getInputs()[1];
         Value matmulResult = matmulOp.getResult(0);
 
@@ -362,14 +360,14 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
             llvm::dbgs() << "[" DEBUG_TYPE "] Matmul output shape: [" << Ow << ", " << F << "]\n"
         );
 
-        auto im2colType = dyn_cast<RankedTensorType>(im2col.getType());
+        auto inputType = dyn_cast<RankedTensorType>(input.getType());
         auto weightsType = dyn_cast<RankedTensorType>(weights.getType());
-        if (!im2colType || !weightsType || !im2colType.hasStaticShape() ||
-            !weightsType.hasStaticShape() || im2colType.getRank() != 2 ||
+        if (!inputType || !weightsType || !inputType.hasStaticShape() ||
+            !weightsType.hasStaticShape() || inputType.getRank() != 2 ||
             weightsType.getRank() != 2) {
             return rewriter.notifyMatchFailure(matmulOp, "Expected static 2D matmul inputs");
         }
-        int64_t K = im2colType.getShape()[1];
+        int64_t K = inputType.getShape()[1];
 
         // Recover [K, F] weights. Canonicalization folds the filter transpose into the
         // constant, so the matmul RHS lands directly as [K, F].
@@ -379,7 +377,7 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
         }
         LLVM_DEBUG(
             llvm::dbgs() << "[" DEBUG_TYPE "] Weights shape: [" << K << ", " << F
-                         << "], im2col shape: [" << Ow << ", " << K << "]\n"
+                         << "], input shape: [" << Ow << ", " << K << "]\n"
         );
 
         bool preserveInit = false;
@@ -412,7 +410,7 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
                     llvm::dbgs() << "[" DEBUG_TYPE "] Marking fuse group (non-fusable path)\n"
                 );
                 if (!markFuseGroupBackward(
-                        output, {im2col, weights}, rewriter,
+                        output, {input, weights}, rewriter,
                         matmulOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
                     ))
                     return failure();
@@ -426,7 +424,7 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
             // Discovery-only mode: mark before any bias/scale IR materialization.
             LLVM_DEBUG(llvm::dbgs() << "[" DEBUG_TYPE "] Marking fuse group (fusable path)\n");
             if (!markFuseGroupBackward(
-                    output, {im2col, weights}, rewriter,
+                    output, {input, weights}, rewriter,
                     matmulOp->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)
                 ))
                 return failure();
@@ -477,7 +475,7 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
         {
             rewriter.setInsertionPoint(output.getDefiningOp());
             // Build the torq_hl.fully_connected:
-            //   $input   (input_slot) : im2col [Ow, K]   → N=Ow, IC=K
+            //   $input   (input_slot) : matmul LHS [Ow, K]   → N=Ow, IC=K
             //   $weights (weight_slot): filterT [K, F]   → IC=K, OC=F
             //   $bias                 : [F] for float, interleaved bias/scale [2*F] for integer
             //   output                : [Ow, F] in fcElemType
@@ -515,7 +513,7 @@ struct Conv1DMatmulToTorqHlFCPattern : public OpRewritePattern<linalg::MatmulOp>
             auto fcOp = torq_hl::FullyConnectedOp::create(
                 rewriter, loc, fcOutType, fcInit, /*inputZp=*/0, /*weightZp=*/0, scInfo.zp,
                 scInfo.min, scInfo.max, scInfo.scaleShift, torq_hl::VectorizationModeEnum::None,
-                weights, *biasV, im2col, isBatchBias
+                weights, *biasV, input, isBatchBias
             );
             Value finalResult = fcOp.getResult(0); // [Ow, F]
 

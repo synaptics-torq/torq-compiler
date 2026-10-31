@@ -677,43 +677,45 @@ matchInputQuantization(Value candidate, PatternRewriter &rewriter, QuantizedOpCh
     return success();
 }
 
+// Pure matching cores behind the rewriter-taking entry points below: the
+// side-effect-free match, shared with the claim check (isQuantizedMatmulChain)
+// so a claim can never outgrow what the consumer pattern converts.
+bool matchOutputDequantizationPure(Value candidate, QuantizedOpChain &chain) {
+    if (!candidate.hasOneUse())
+        return false;
+    chain.outputDequantOp = dyn_cast<linalg::GenericOp>(*candidate.getUsers().begin());
+    if (!chain.outputDequantOp || !chain.outputDequantOp->getResult(0).hasOneUse())
+        return false;
+    return matchDequantGeneric(
+        chain.outputDequantOp, chain.outputDequantInfo.scale, chain.outputDequantInfo.zp
+    );
+}
+
 LogicalResult
 matchOutputDequantization(Value candidate, PatternRewriter &rewriter, QuantizedOpChain &chain) {
     Operation *anchor = getDiagOp(candidate);
-    if (!candidate.hasOneUse())
-        return rewriter.notifyMatchFailure(anchor, "output candidate has multiple uses");
-
-    chain.outputDequantOp = dyn_cast<linalg::GenericOp>(*candidate.getUsers().begin());
-    if (!chain.outputDequantOp || !chain.outputDequantOp->getResult(0).hasOneUse())
-        return rewriter.notifyMatchFailure(
-            chain.outputDequantOp ? chain.outputDequantOp.getOperation() : anchor,
-            "failed to match output Q dequant"
-        );
-    if (!matchDequantGeneric(
-            chain.outputDequantOp, chain.outputDequantInfo.scale, chain.outputDequantInfo.zp
-        ))
-        return rewriter.notifyMatchFailure(
-            chain.outputDequantOp, "not a recognized output Q dequant"
-        );
-
+    if (!matchOutputDequantizationPure(candidate, chain))
+        return rewriter.notifyMatchFailure(anchor, "failed to match output Q dequant");
     return success();
+}
+
+bool matchOutputQuantizationPure(Value candidate, QuantizedOpChain &chain) {
+    if (!candidate.hasOneUse())
+        return false;
+    chain.quantOp = dyn_cast<linalg::GenericOp>(*candidate.getUsers().begin());
+    if (!chain.quantOp)
+        return false;
+    return matchQuantGeneric(
+        chain.quantOp, chain.outputInfo.scale, chain.outputInfo.zp, chain.outputInfo.min,
+        chain.outputInfo.max
+    );
 }
 
 LogicalResult
 matchOutputQuantization(Value candidate, PatternRewriter &rewriter, QuantizedOpChain &chain) {
     Operation *anchor = getDiagOp(candidate);
-    if (!candidate.hasOneUse())
-        return rewriter.notifyMatchFailure(anchor, "quant input has multiple uses");
-
-    chain.quantOp = dyn_cast<linalg::GenericOp>(*candidate.getUsers().begin());
-    if (!chain.quantOp || !matchQuantGeneric(
-                              chain.quantOp, chain.outputInfo.scale, chain.outputInfo.zp,
-                              chain.outputInfo.min, chain.outputInfo.max
-                          ))
-        return rewriter.notifyMatchFailure(
-            chain.quantOp ? chain.quantOp.getOperation() : anchor, "failed to match Q quant"
-        );
-
+    if (!matchOutputQuantizationPure(candidate, chain))
+        return rewriter.notifyMatchFailure(anchor, "failed to match Q quant");
     return success();
 }
 

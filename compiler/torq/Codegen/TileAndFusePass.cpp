@@ -702,6 +702,14 @@ static bool isElementwiseOverFullTensor(Operation *op) {
            });
 }
 
+// A per-channel bias or scale: a value that its users only read through a linalg.broadcast.
+// Its broadcast folds into the consumer, so the producer is not tiled in its own loop.
+static bool isOnlyBroadcast(Value v) {
+    return !v.use_empty() && llvm::all_of(v.getUsers(), [](Operation *user) {
+        return isa<linalg::BroadcastOp>(user);
+    });
+}
+
 // How the probe module gets a value that it does not compute.
 enum class ProbeInputKind {
     ConstantLike, // a tensor.empty, or a fill of one for a contraction's accumulator
@@ -720,7 +728,8 @@ static ProbeInputKind classifyProbeInput(Value input, Operation *consumerOp) {
     if (!ty || !ty.hasStaticShape())
         return ProbeInputKind::Passthrough;
     Operation *def = input.getDefiningOp();
-    if (isConstantLikeProducer(input) && !isElementwiseOverFullTensor(def))
+    if (isConstantLikeProducer(input) &&
+        (!isElementwiseOverFullTensor(def) || isOnlyBroadcast(input)))
         return ProbeInputKind::ConstantLike;
     if (!def)
         return ProbeInputKind::Passthrough;
