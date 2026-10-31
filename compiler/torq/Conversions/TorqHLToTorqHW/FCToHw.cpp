@@ -5,8 +5,7 @@
 #include "torq/Utils/Kernel.h"
 #include "torq/Utils/TorqUtils.h"
 #include "llvm/Support/Debug.h"
-
-#include "llvm/Support/Debug.h"
+#include "llvm/Support/MathExtras.h"
 
 using namespace mlir::syna::torq_hw;
 
@@ -30,6 +29,16 @@ struct Weight {
 struct BiasScale {
     enum { OCVect, ActVect, ActItems, Items };
 };
+
+// Bias/scale records read per ACT group. DEBR only accepts 4/8/16/32-byte reads, so an
+// OC vector narrower than the ACT width must not set the read size: a 7-column N tile
+// (which stream-schedule tiling picks for a 64x4096x1024 matmul) would read 7 f32 biases,
+// 28 bytes, and the descriptor generator aborts. Round up to a power of two, capped at the
+// ACT width; the extra records only feed padding lanes whose results are never written
+// back, the same way the last vector of an OC remainder is read in full.
+static int biasScaleReadItems(int actVectSize, int actWidth) {
+    return std::min<int>(actWidth, llvm::PowerOf2Ceil(actVectSize));
+}
 
 // Per-output-channel bias/scale kernel.
 //
@@ -58,9 +67,11 @@ static torq_hw::SliceTaskOp lowerToHwPerChannel(
     const auto inType = input.elementType();
     const auto wType = weight.elementType();
     const int weightVectSize = weight.dim(Weight::OCElement);
-    const int actVectSize = std::min(weightVectSize, slice.act.width(wType, inType, true));
+    const int actWidth = slice.act.width(wType, inType, true);
+    const int actVectSize = std::min(weightVectSize, actWidth);
     biasScale.forceReshapeDim(
-        0, {-1, (int)div_ceil(weightVectSize, actVectSize), actVectSize, biasScaleWidth(inType)}
+        0, {-1, (int)div_ceil(weightVectSize, actVectSize),
+            biasScaleReadItems(actVectSize, actWidth), biasScaleWidth(inType)}
     );
 
     input.subviewDim(In::N, rowOffset, rowCount);
@@ -173,7 +184,8 @@ static torq_hw::SliceTaskOp lowerToHwPerChannelFast(
     // below that it over-reads the bias tensor, but the extra records only feed padding lanes
     // whose results are never written back, the same way an OC remainder vector already works.
     biasScale.forceReshapeDim(
-        0, {-1, (int)div_ceil(aluWidth, actWidth), actVectSize, biasScaleWidth(inType)}
+        0, {-1, (int)div_ceil(aluWidth, actWidth), biasScaleReadItems(actVectSize, actWidth),
+            biasScaleWidth(inType)}
     );
 
     input.subviewDim(In::N, rowOffset, rowCount);
