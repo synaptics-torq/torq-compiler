@@ -3449,7 +3449,13 @@ IData IRam::loadIndexed(const LData &table, const LData &indices) {
     // The ALU reads each row as its part of an ALU group
     const int partBytes = HwInfo::max_input / rows;
     assert(rowElements * elementSize <= partBytes && "Table row too large");
-    assert(HwInfo::iram_seg_width / rows % elementSize == 0 && "Row part not element aligned");
+    // With several indices, rows of more than 4 bytes in all come out wrong on SL2610 HW (only the
+    // low byte of the first 2 rows arrives; the C model and SR200 HW are right).
+    // synaptics-torq/torq-compiler-dev#2817
+    assert(
+        (rows == 1 || rows * rowElements * elementSize <= 4) &&
+        "Several indices need rows of 4 bytes or less in all"
+    );
 
     // DEDR set 1 reads the indices and gives them to DEDR set 0, which reads each row at
     // index * row size (de_d_rx.c and de_d_r.c in the C model) and gathers them in the parts of

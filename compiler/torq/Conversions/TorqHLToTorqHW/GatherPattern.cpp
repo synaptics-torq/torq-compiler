@@ -106,8 +106,13 @@ LogicalResult GatherPattern::transform(torq_hl::GatherOp op, PatternRewriter &re
         if (valuesRank == 1) {
             output.insertDim(0, {1});
         }
-        // Look up to 4 indices at a time
-        const int groupSize = indicesCount % 4 == 0 ? 4 : indicesCount % 2 == 0 ? 2 : 1;
+        // Look up as many indices at a time as fit in 4 bytes of rows (4 int8, 2 int16, 1 int32),
+        // the limit of IRam::loadIndexed()
+        const int elementSize = sizeofType(values.elementType());
+        int groupSize = 4;
+        while (groupSize > 1 && (groupSize * elementSize > 4 || indicesCount % groupSize != 0)) {
+            groupSize /= 2;
+        }
         indices.reshapeDim(0, {-1, groupSize});
         // Tables of rows of one element. The rows dimension of the values is only used to compute
         // the address of the indexed rows.

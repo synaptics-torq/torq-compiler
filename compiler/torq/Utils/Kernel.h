@@ -597,7 +597,8 @@ class IRam : public SliceRam {
     // Load the rows of a table selected by indices (gather).
     // table: {rows, row elements}, dense, integer; index i selects row i.
     // indices: 1, 2 or 4 integer indices, >= 0.
-    // A row can be up to 64 bytes / number of indices.
+    // A row can be up to 64 bytes with 1 index. With 2 or 4 indices, the rows can be up to 4 bytes
+    // in all (e.g. 4 int8 or 2 int16 rows of one element).
     // return: one IData row per index, padded to the same size.
     IData loadIndexed(const LData &table, const LData &indices);
 
