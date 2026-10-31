@@ -36,7 +36,7 @@ from torq.lab.pipeline.io import (
 
 from .aws_fpga import FpgaSession, RemoteFpgaSession
 from .dtype_utils import convert_io_dtypes_policy
-from .remote_testing import RemoteTestRunner, setup_dev_board, _default_remote_runner_path, acquire_board_lock, release_board_lock
+from .remote_testing import RemoteTestRunner, setup_dev_board, _default_remote_runner_path, acquire_board_lock, release_board_lock, kill_remote_runner
 from .versioned_fixtures import VersionedFile, versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
                                 versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_unhashable_object_fixture, versioned_generated_directory_fixture
 from torq.lab.profiling.annotate import annotate_host_profile_from_files
@@ -102,12 +102,23 @@ def pytest_addoption(parser):
     
 
 
+def _raise_on_sigterm(signum, frame):
+    # Handle SIGTERM (e.g. a cancelled CI job) like Ctrl+C, so that pytest
+    # unwinds: _run_with_group_kill kills the running tool and
+    # pytest_sessionfinish releases the board lock. A second SIGTERM
+    # terminates at once.
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    raise KeyboardInterrupt("SIGTERM")
+
+
 def pytest_sessionstart(session):
     """Prepare the remote board at session start when --update-astra-runtime is active.
 
     Deploys torq-run-module and checks the NPU kernel module.
     Only runs when both --update-astra-runtime and --torq-addr are provided.
     """
+    signal.signal(signal.SIGTERM, _raise_on_sigterm)
+
     update_runtime = session.config.getoption("--update-astra-runtime", default=False)
     board_addr = session.config.getoption("--torq-addr", default=None)
     ko_path = session.config.getoption("--torq-ko-path", default=None)
@@ -136,32 +147,28 @@ def pytest_sessionstart(session):
     acquire_board_lock(board_addr, port, logger=logger)
 
     # Track whether the lock has been released to avoid double-release
-    # (signal handler + pytest_sessionfinish).
+    # (atexit + pytest_sessionfinish).
     _lock_state = {"released": False}
 
     def _release_once():
         if _lock_state["released"]:
             return
         _lock_state["released"] = True
+        # An interrupted session leaves its last runner running on the board
+        # (killing the local ssh client does not stop it): kill it before
+        # another session can take the board.
+        try:
+            kill_remote_runner(board_addr, port, _default_remote_runner_path(), logger=logger)
+        except Exception:
+            pass
         try:
             release_board_lock(board_addr, port, logger=logger)
         except Exception:
             pass
 
-    # Ensure the lock is released even if the session is interrupted
-    # (Ctrl+C) or terminated (SIGTERM).  Signal handlers restore the
-    # default handler and re-raise so Python's normal behaviour (e.g.
-    # KeyboardInterrupt) is preserved.
-    def _signal_cleanup(signum, frame):
-        _release_once()
-        # Restore the default handler and re-raise the signal so the
-        # process terminates normally (KeyboardInterrupt for SIGINT).
-        signal.signal(signum, signal.SIG_DFL)
-        os.kill(os.getpid(), signum)
-
+    # Ctrl+C and SIGTERM raise KeyboardInterrupt (see _raise_on_sigterm), so
+    # pytest_sessionfinish releases the lock; atexit covers other exits.
     atexit.register(_release_once)
-    signal.signal(signal.SIGINT, _signal_cleanup)
-    signal.signal(signal.SIGTERM, _signal_cleanup)
 
     # Stash the release function so pytest_sessionfinish can call it.
     session.config._torq_release_board_lock = _release_once
@@ -323,8 +330,22 @@ def _collect_stuck_process_diagnostics(proc):
     return "\n".join(lines)
 
 
+def _kill_group(proc, reap_timeout=10):
+    """SIGKILL proc's process group and reap proc. A process stuck in the kernel
+    (e.g. in the NPU driver) dies only when it leaves it: don't block on it,
+    subprocess reaps it later."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=reap_timeout)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def _run_with_group_kill(*popenargs, timeout=None, error_tail_lines=None, **kwargs):
-    """Like subprocess.check_call, but kills the whole process group on timeout so
+    """Like subprocess.check_call, but kills the process group on timeout or interrupt so
     helpers spawned by the tool (e.g. the qemu CSS simulator) do not outlive it.
 
     With error_tail_lines, the command's stdout/stderr is captured to a temp
@@ -340,37 +361,46 @@ def _run_with_group_kill(*popenargs, timeout=None, error_tail_lines=None, **kwar
         kwargs["stdout"] = output_file
         kwargs["stderr"] = subprocess.STDOUT
 
-    proc = subprocess.Popen(*popenargs, start_new_session=True, **kwargs)
-    failure = None
+    proc = None
+    # Set once the process group is gone; any other exit (Ctrl+C, SIGTERM,
+    # pytest-timeout, ...) kills the group in the finally block.
+    done = False
     try:
-        retcode = proc.wait(timeout=timeout)
-        if retcode:
-            failure = CommandFailedError(retcode, popenargs[0])
-    except subprocess.TimeoutExpired:
-        diagnostics = _collect_stuck_process_diagnostics(proc)
+        proc = subprocess.Popen(*popenargs, start_new_session=True, **kwargs)
+        # The tool runs in its own session, so it never gets the SIGINT:
+        # don't let Popen.wait() wait 0.25 s for it to exit on Ctrl+C.
+        proc._sigint_wait_secs = 0
+        failure = None
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait()
-        failure = CommandTimeoutError(popenargs[0], timeout, stderr=diagnostics)
+            retcode = proc.wait(timeout=timeout)
+            done = True
+            if retcode:
+                failure = CommandFailedError(retcode, popenargs[0])
+        except subprocess.TimeoutExpired:
+            diagnostics = _collect_stuck_process_diagnostics(proc)
+            _kill_group(proc)
+            done = True
+            failure = CommandTimeoutError(popenargs[0], timeout, stderr=diagnostics)
 
-    if failure is not None and output_file is not None:
-        try:
-            output_file.flush()
-            with open(output_file.name, "rb") as f:
-                lines = f.read().decode("utf-8", errors="replace").splitlines()
-            failure.output = "\n".join(lines[-error_tail_lines:])
-        except Exception:
-            pass
-    if output_file is not None:
-        output_file.close()
-        try:
-            os.unlink(output_file.name)
-        except OSError:
-            pass
-    if failure is not None:
-        raise failure
+        if failure is not None and output_file is not None:
+            try:
+                output_file.flush()
+                with open(output_file.name, "rb") as f:
+                    lines = f.read().decode("utf-8", errors="replace").splitlines()
+                failure.output = "\n".join(lines[-error_tail_lines:])
+            except Exception:
+                pass
+        if failure is not None:
+            raise failure
+    finally:
+        if proc is not None and not done:
+            _kill_group(proc)
+        if output_file is not None:
+            output_file.close()
+            try:
+                os.unlink(output_file.name)
+            except OSError:
+                pass
 
 
 def _find_iree_tool(env_var, tool_name):

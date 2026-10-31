@@ -253,6 +253,32 @@ def release_board_lock(
     log.info("Released board lock on %s", board_addr)
 
 
+def kill_remote_runner(
+    board_addr: str,
+    port: int,
+    remote_runner_path: str,
+    timeout: int = 10,
+    logger: logging.Logger | None = None,
+    private_key: str | None = None,
+) -> None:
+    """Kill any process running the runner at *remote_runner_path* on the board.
+
+    Killing the local ssh client (e.g. on Ctrl+C) does not stop the remote
+    command, so call this before releasing the board lock.
+    """
+    log = logger or logging.getLogger("RemoteTestRunner")
+    # "[/]home/..." matches the runner's command line but not pkill's own.
+    pattern = f"[{remote_runner_path[0]}]{remote_runner_path[1:]}"
+    runner = remote_command_runner_factory(
+        board_addr, timeout, ssh_multiplex=True, ssh_port=port, ssh_private_key=private_key
+    )
+    with runner as r:
+        try:
+            r.run_cmd([f"pkill -KILL -f '{pattern}' || true"])
+        except RemoteCommandError:
+            log.warning("Failed to kill %s on %s (board may be unreachable).", remote_runner_path, board_addr)
+
+
 def setup_dev_board(
     board_addr: str,
     port: int,
