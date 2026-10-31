@@ -1,3 +1,4 @@
+import json
 import re
 import subprocess
 
@@ -16,7 +17,7 @@ COMMON_FLAGS = [
 ]
 
 
-def dispatch_dump_after(torq_compiler, tmp_path, mlir, pass_arg, timeout=None):
+def dispatch_dump_after(torq_compiler, tmp_path, mlir, pass_arg, timeout=None, flags=COMMON_FLAGS):
     """Compile `mlir` and return the last IR dump of the dispatch function after
     `pass_arg`. `timeout` (seconds) stops a compile that hangs."""
     model = tmp_path / "model.mlir"
@@ -27,7 +28,7 @@ def dispatch_dump_after(torq_compiler, tmp_path, mlir, pass_arg, timeout=None):
         "-o",
         str(tmp_path / "model.vmfb"),
         f"--mlir-print-ir-after={pass_arg}",
-        *COMMON_FLAGS,
+        *flags,
     ]
     print("Compiling with:", " ".join(cmd))
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -181,6 +182,40 @@ def test_silu_gate_is_sliced(torq_compiler, tmp_path):
     layers on one slice, 1.5x main."""
     dump = dispatch_dump_after(torq_compiler, tmp_path, SILU, "torq-linalg-slicing")
     assert "scf.forall" in dump, f"the SiLU group was not sliced:\n{dump}"
+
+
+RECIPROCAL = """
+module {
+  func.func @main(%x: tensor<1x144x56x56xbf16>) -> tensor<1x144x56x56xbf16> {
+    %e = tensor.empty() : tensor<1x144x56x56xbf16>
+    %y = linalg.reciprocal ins(%x : tensor<1x144x56x56xbf16>) outs(%e : tensor<1x144x56x56xbf16>) -> tensor<1x144x56x56xbf16>
+    return %y : tensor<1x144x56x56xbf16>
+  }
+}
+"""
+
+
+@pytest.mark.ci
+@pytest.mark.parametrize("executor,sliced", [("nss", True), ("css", False), ("host", False)])
+def test_op_assigned_off_the_slices_is_not_sliced(torq_compiler, tmp_path, executor, sliced):
+    """An op that the executor map sends to CSS or the host is not split across
+    the slices. Only Host ops were skipped, so a CSS op was sliced."""
+    lines = RECIPROCAL.split("\n")
+    line = next(i for i, text in enumerate(lines) if "linalg.reciprocal" in text)
+    column = lines[line].index("linalg.reciprocal") + 1
+    executor_map = tmp_path / "executor_map.json"
+    executor_map.write_text(
+        json.dumps({"op_assignments": {f"{line + 1}:{column}": {"executor": executor}}})
+    )
+    # CSS and host ops need their back ends.
+    flags = [f for f in COMMON_FLAGS if not f.startswith("--torq-disable-")]
+    dump = dispatch_dump_after(
+        torq_compiler, tmp_path, RECIPROCAL, "torq-linalg-slicing",
+        flags=[*flags, f"--torq-executor-map={executor_map}"],
+    )
+    assert any(in_forall(dump, "linalg.reciprocal")) == sliced, (
+        f"the reciprocal on {executor} was {'not ' if sliced else ''}sliced:\n{dump}"
+    )
 
 
 def depthwise_block(h, cin, c, with_conv):

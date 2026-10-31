@@ -276,10 +276,20 @@ static bool groupHasResidualAdd(Operation *op, IntegerAttr fuseGroup) {
     return hasResidualAdd;
 }
 
+// True when `op` still goes to the NPU slices. An op without an executor attribute does.
+// One that already has another executor (from --torq-executor-map, a forced op such as a
+// raised softmax, or Host set by an earlier pass) must not be sliced.
+static bool runsOnSlices(Operation *op) {
+    return getTargetExecutor(op) == torq_hl::Executor::Slice;
+}
+
 LogicalResult peelAndSlice(
     PatternRewriter &rewriter, Operation *op, size_t slicingIter, int64_t grouping,
     int64_t sliceCount
 ) {
+    if (!runsOnSlices(op))
+        return rewriter.notifyMatchFailure(op, "not executed on the slices");
+
     // Do nothing if the containing operation is a forall (already sliced)
     if (op->getParentOfType<scf::ForallOp>())
         return rewriter.notifyMatchFailure(op, "already sliced");
@@ -495,9 +505,6 @@ struct TransposePattern : public OpRewritePattern<linalg::TransposeOp> {
 
     LogicalResult
     matchAndRewrite(linalg::TransposeOp transposeOp, PatternRewriter &rewriter) const override {
-        if (getTargetExecutor(transposeOp) == torq_hl::Executor::Host)
-            return rewriter.notifyMatchFailure(transposeOp, "host-executed operation");
-
         if (isMarkedFuseGroup(transposeOp) && !isFuseGroupPrincipalOp(transposeOp))
             return rewriter.notifyMatchFailure(transposeOp, "not the principal operation");
 
@@ -578,7 +585,7 @@ static Operation *findBlockedConvProducer(Operation *op, IntegerAttr fuseGroup) 
 // even if tiling later puts the two in different loops: its tiles are then not aligned, as before.
 std::optional<int64_t> getConvSlicingDim(Operation *op) {
     std::optional<size_t> dim = getSlicingIterationDomainIndex(op);
-    if (!dim || !isFuseGroupPrincipalOp(op) || convKeptSingleSlice(op))
+    if (!dim || !runsOnSlices(op) || !isFuseGroupPrincipalOp(op) || convKeptSingleSlice(op))
         return std::nullopt;
     if (isa<linalg::DepthwiseConv2DNchwChwOp, linalg::DepthwiseConv2DNhwcHwcOp>(op) &&
         inputFromConvInBlock(op))
@@ -596,10 +603,10 @@ std::optional<int64_t> getElementwiseSlicingDim(Operation *op, StringRef *reason
     if (!isa<linalg::GenericOp, linalg::ReciprocalOp>(op))
         return skip("not an elementwise generic or a reciprocal");
 
-    // Host-executed elementwise ops are compile-time helper/rescale paths
-    // and should not be tiled/sliced.
-    if (getTargetExecutor(op) == torq_hl::Executor::Host)
-        return skip("host-executed operation");
+    // peelAndSlice skips these ops too (for elementwise ops, Host ones are compile-time
+    // helper/rescale paths). Checked here so that TileAndFusePass gets the same answer.
+    if (!runsOnSlices(op))
+        return skip("not executed on the slices");
 
     // If this op is part of a fuse group but is NOT the principal op, skip
     // it — the principal op drives tiling for the whole group.

@@ -32,11 +32,15 @@ def test_css_program_code_is_shared_across_invocations(request, torq_compiler, t
     (synaptics-torq/torq-compiler-dev#1615).
 
     NSS covers every op of the depthwise-conv1d model, so the activation is pinned to
-    CSS with an executor map to get a CSS program at all. Linalg slicing, on by
-    default, then splits it one partition per slice, and those CSS create_invocation
-    ops must all reference the same program_code value and the same XRAM address.
+    CSS with an executor map to get a CSS program at all. The model is widened from
+    32 to 256 columns so that the activation does not fit in DTCM: DTCM tiling then
+    invokes the CSS program once per tile, and those CSS create_invocation ops must
+    all reference the same program_code value and the same XRAM address. (Linalg
+    slicing does not split ops that run on CSS.)
     """
-    model = MODELS_DIR / "torch_ops" / "depthwise-conv1d-bf16-c64-w32.mlir"
+    source = MODELS_DIR / "torch_ops" / "depthwise-conv1d-bf16-c64-w32.mlir"
+    model = tmp_path / "depthwise-conv1d-bf16-c64-w256.mlir"
+    model.write_text(source.read_text().replace("[1,64,32]", "[1,64,256]"))
     phases = tmp_path / "phases"
 
     # Executor-map keys are the op's `line:column` in the model file, so derive the
