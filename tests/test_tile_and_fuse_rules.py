@@ -218,6 +218,73 @@ def test_op_assigned_off_the_slices_is_not_sliced(torq_compiler, tmp_path, execu
     )
 
 
+SOFTMAX = """
+module {
+  func.func @main(%x: tensor<1x8x64x64xbf16>) -> tensor<1x8x64x64xbf16> {
+    %e = tensor.empty() : tensor<1x8x64x64xbf16>
+    %y = linalg.softmax dimension(3) ins(%x : tensor<1x8x64x64xbf16>) outs(%e : tensor<1x8x64x64xbf16>) -> tensor<1x8x64x64xbf16>
+    return %y : tensor<1x8x64x64xbf16>
+  }
+}
+"""
+
+
+@pytest.mark.ci
+def test_softmax_is_sliced_on_whole_rows(torq_compiler, tmp_path):
+    """A softmax is split across the slices on a dimension other than its
+    softmax dimension, so each slice reduces whole rows. On one slice, the
+    Moonshine encoder softmaxes left the other slice idle."""
+    dump = dispatch_dump_after(torq_compiler, tmp_path, SOFTMAX, "torq-linalg-slicing")
+    assert any(in_forall(dump, "linalg.softmax")), f"the softmax was not sliced:\n{dump}"
+    assert re.search(r"linalg\.softmax .*-> tensor<1x4x64x64xbf16>", dump), (
+        f"the softmax was not sliced on dimension 1:\n{dump}"
+    )
+
+
+def transpose(in_shape, out_shape):
+    return f"""
+module {{
+  func.func @main(%x: tensor<{in_shape}xbf16>) -> tensor<{out_shape}xbf16> {{
+    %e = tensor.empty() : tensor<{out_shape}xbf16>
+    %y = linalg.transpose ins(%x : tensor<{in_shape}xbf16>) outs(%e : tensor<{out_shape}xbf16>) permutation = [0, 2, 1, 3]
+    return %y : tensor<{out_shape}xbf16>
+  }}
+}}
+"""
+
+
+@pytest.mark.ci
+@pytest.mark.parametrize(
+    "in_shape,out_shape,slices",
+    [
+        # No dimension splits evenly into long runs: 207 is split unevenly, 2 x 100
+        # on the slices and a remainder of 7 (Moonshine encoder Transpose_114).
+        ("1x8x207x36", "1x207x8x36", ["1x100x8x36", "1x7x8x36"]),
+        # 16 splits evenly, so it is taken over the outer 100, which does not.
+        ("1x16x100x64", "1x100x16x64", ["1x100x8x64"]),
+        # 50 does not split evenly but is at least 4 chunks: 2 x 24 and a remainder of 2.
+        ("1x8x50x36", "1x50x8x36", ["1x24x8x36", "1x2x8x36"]),
+        # 30 does not split evenly and is too short for an uneven split.
+        ("1x8x30x36", "1x30x8x36", None),
+    ],
+)
+def test_transpose_slicing_dimension(torq_compiler, tmp_path, in_shape, out_shape, slices):
+    """A transpose that keeps its innermost dimension is sliced on a dimension that
+    splits evenly if there is one, and otherwise on a long uneven dimension."""
+    dump = dispatch_dump_after(
+        torq_compiler, tmp_path, transpose(in_shape, out_shape), "torq-linalg-slicing"
+    )
+    sliced = in_forall(dump, "linalg.transpose")
+    if slices is None:
+        assert sliced and not any(sliced), f"the transpose was sliced:\n{dump}"
+        return
+    assert any(sliced), f"the transpose was not sliced:\n{dump}"
+    for shape in slices:
+        assert re.search(rf"linalg\.transpose .*outs\([^)]*tensor<{shape}xbf16>\)", dump), (
+            f"no transpose writes a {shape} slice:\n{dump}"
+        )
+
+
 def depthwise_block(h, cin, c, with_conv):
     """TOSA i8 block: optional 1x1 conv cin -> c with its rescale, then a 3x3
     depthwise conv on c channels with its rescale, at h x h."""

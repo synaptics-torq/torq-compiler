@@ -493,8 +493,12 @@ struct BatchMatmulPattern : public OpRewritePattern<linalg::BatchMatmulOp> {
 // Minimum contiguous elements that must remain inside one transpose slice chunk.
 constexpr int64_t kMinTransposeSliceRun = 64;
 
+// A transpose dimension that does not split evenly over the slices is sliced only if it is at
+// least this many chunks (sliceCount * kGrouping) long, so the peeled remainder is small.
+constexpr int64_t kMinUnevenTransposeSliceDim = 4;
+
 // Transpose pattern. Slices a standalone linalg.transpose on the outermost
-// dimension that splits evenly and leaves a long contiguous run in each chunk.
+// dimension that is large enough and leaves a long contiguous run in each chunk.
 // A transpose adopted by FuseTransposeIntoGroupPass reaches this pattern as a
 // group member, not a principal, and is skipped.
 struct TransposePattern : public OpRewritePattern<linalg::TransposeOp> {
@@ -512,22 +516,33 @@ struct TransposePattern : public OpRewritePattern<linalg::TransposeOp> {
         if (!shaped || !shaped.hasStaticShape())
             return rewriter.notifyMatchFailure(transposeOp, "output shape is not static");
 
-        // Take the outermost dimension that splits evenly and still leaves a long
-        // contiguous run inside each chunk.
+        // Take the outermost dimension that splits evenly and still leaves a long contiguous
+        // run inside each chunk. Only if there is none, take a dimension that does not split
+        // evenly, if the transpose keeps the innermost dimension in place (each slice then
+        // copies whole rows) and the dimension is large enough that the remainder
+        // peelAndSlice peels off is small. Layout transposes that move the innermost
+        // dimension get slower with an uneven split.
         const int64_t chunk = sliceCount_ * kGrouping;
         ArrayRef<int64_t> shape = shaped.getShape();
-        std::optional<size_t> slicingIter;
-        for (size_t dim = 0; dim < shape.size(); ++dim) {
-            if (shape[dim] < 2 * kGrouping || shape[dim] % chunk != 0)
-                continue;
-            int64_t run = 1;
-            for (size_t inner = dim + 1; inner < shape.size(); ++inner)
-                run *= shape[inner];
-            if (run < kMinTransposeSliceRun)
-                continue;
-            slicingIter = dim;
-            break;
-        }
+        ArrayRef<int64_t> perm = transposeOp.getPermutation();
+        bool keepsInnerDim = !perm.empty() && perm.back() == static_cast<int64_t>(perm.size()) - 1;
+        auto findSlicingDim = [&](bool allowUneven) -> std::optional<size_t> {
+            for (size_t dim = 0; dim < shape.size(); ++dim) {
+                bool uneven = shape[dim] % chunk != 0;
+                if (shape[dim] < 2 * kGrouping ||
+                    (uneven && (!allowUneven || shape[dim] < kMinUnevenTransposeSliceDim * chunk)))
+                    continue;
+                int64_t run = 1;
+                for (size_t inner = dim + 1; inner < shape.size(); ++inner)
+                    run *= shape[inner];
+                if (run >= kMinTransposeSliceRun)
+                    return dim;
+            }
+            return std::nullopt;
+        };
+        std::optional<size_t> slicingIter = findSlicingDim(/*allowUneven=*/false);
+        if (!slicingIter && keepsInnerDim)
+            slicingIter = findSlicingDim(/*allowUneven=*/true);
         if (!slicingIter)
             return rewriter.notifyMatchFailure(transposeOp, "no dimension splits into long runs");
 
@@ -717,6 +732,33 @@ struct ReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
     }
 }; // struct ReciprocalPattern
 
+// Softmax pattern. Slices linalg.softmax on the leftmost dimension that is large enough
+// and is not the softmax dimension, so each slice reduces whole rows. Only bf16 softmax,
+// the one LinalgToTorqHL lowers to the slices, and only a standalone one: in a fuse group,
+// peelAndSlice would tile the group's output op on that dimension index.
+struct SoftmaxPattern : public OpRewritePattern<linalg::SoftmaxOp> {
+    int64_t sliceCount_;
+
+    SoftmaxPattern(MLIRContext *context, int64_t sliceCount)
+        : OpRewritePattern<linalg::SoftmaxOp>(context), sliceCount_(sliceCount) {}
+
+    LogicalResult
+    matchAndRewrite(linalg::SoftmaxOp softmaxOp, PatternRewriter &rewriter) const override {
+        if (isMarkedFuseGroup(softmaxOp))
+            return rewriter.notifyMatchFailure(softmaxOp, "softmax in a fuse group");
+
+        auto shaped = cast<ShapedType>(softmaxOp->getResult(0).getType());
+        if (!shaped.getElementType().isBF16())
+            return rewriter.notifyMatchFailure(softmaxOp, "not a bf16 softmax");
+
+        for (auto [i, size] : llvm::enumerate(shaped.getShape())) {
+            if (i != softmaxOp.getDimension() && size >= 2 * kGrouping)
+                return peelAndSlice(rewriter, softmaxOp, i, kGrouping, sliceCount_);
+        }
+        return rewriter.notifyMatchFailure(softmaxOp, "no dimension to slice");
+    }
+}; // struct SoftmaxPattern
+
 struct LinalgSlicingPass : public impl::LinalgSlicingBase<LinalgSlicingPass> {
     mlir::OpPassManager canonicalizer_;
 
@@ -776,6 +818,7 @@ struct LinalgSlicingPass : public impl::LinalgSlicingBase<LinalgSlicingPass> {
         patterns.add<TransposePattern>(context, this->sliceCount);
         patterns.add<ElementwisePattern>(context, this->sliceCount);
         patterns.add<ReciprocalPattern>(context, this->sliceCount);
+        patterns.add<SoftmaxPattern>(context, this->sliceCount);
 
         FrozenRewritePatternSet frozenPatterns(std::move(patterns));
 
