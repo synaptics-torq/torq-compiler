@@ -88,6 +88,13 @@ def case_config(request, chip_config):
 
     nss_layers = ["layer_MatMul"]
     torq_compiler_options = ["--torq-convert-dtypes", "--torq-convert-io-dtype"]
+    # Stream-schedule prefetch without slicing gives the shortest estimated time for
+    # both full models. A single layer uses both slices with slicing, so use these
+    # options only for the full models.
+    if "full_model" in request.node.name:
+        torq_compiler_options += [
+            "--torq-prefetch-algorithm=stream-schedule", "--torq-disable-slicing",
+        ]
     if any(s in request.node.name for s in nss_layers):
         torq_compiler_options += ["--torq-disable-css", "--torq-disable-host"]
 
