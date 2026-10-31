@@ -6,6 +6,7 @@ import numpy as np
 from torq.testing.iree import MODELS_DIR
 from torq.testing.comparison import compare_test_results
 from .models.keras_models import conv_act_model
+from .torch_ops_models import model_case, torch_ops_case_data, torch_ops_onnx_model
 
 from torq.testing.versioned_fixtures import versioned_cached_data_fixture
 from torq.testing.cases import Case
@@ -36,14 +37,10 @@ def get_test_cases():
             "static_mlir_model_file": str(MODELS_DIR / name[0] / (name[1] + ".mlir"))
         }))
 
-    test_cases.append(Case("torch_ops_instancenorm", {
-        "mlir_model_file": "static_mlir_model_file",
-        "static_mlir_model_file": str(MODELS_DIR / "torch_ops" / "instancenorm.mlir"),
-    }))
+    test_cases.append(Case("torch_ops_instancenorm", model_case("instancenorm.mlir")))
 
     test_cases.append(Case("torch_ops_equal", {
-        "mlir_model_file": "static_mlir_model_file",
-        "static_mlir_model_file": str(MODELS_DIR / "torch_ops_host_css" / "equal.mlir"),
+        **model_case("equal.mlir", "torch_ops_host_css"),
         "input_data": "equal_input_data"
     }))
 

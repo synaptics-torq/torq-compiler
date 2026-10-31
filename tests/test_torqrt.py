@@ -7,6 +7,8 @@ from torq.testing.cases import Case
 from torq.testing.iree import TOPDIR
 from torq.testing.versioned_fixtures import versioned_hashable_object_fixture, VersionedUncachedData
 
+from .torch_ops_models import model_case, torch_ops_case_data, torch_ops_onnx_model
+
 from .test_tflite_mbv2 import download_mobilenetv2_model, mbv2_compile_options
 
 
@@ -34,7 +36,6 @@ def get_torqrt_test_cases():
     TEST_DATA_DIR = TOPDIR / "tests" / "testdata"
 
     test_files = [
-        (TEST_DATA_DIR / "torch_ops" / "softmax-1x8x1x207xbf16.mlir", False),
         (TEST_DATA_DIR / "tosa_ops" / "dw_peeling.mlir", True)        
     ]
 
@@ -44,6 +45,12 @@ def get_torqrt_test_cases():
         case_config["check_results"] = check_results
         cases.append(Case(test_file.name, case_config))
 
+
+    cases.append(Case("softmax-1x8x1x207xbf16.mlir", {
+        **base_config,
+        **model_case("softmax-1x8x1x207xbf16.mlir"),
+        "check_results": False,
+    }))
 
     # add e2e test cases
     cases.append(Case("mbv2_full_model", {

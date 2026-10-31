@@ -71,15 +71,38 @@ def _parse_uniform_bf16_constant(mlir_model_file):
     return value, shape
 
 
+def _parse_uniform_bf16_constant_onnx(onnx_model_file):
+    """Same, but from the ONNX model (generated MLIR externalizes big constants)."""
+    model = onnx.load(str(onnx_model_file.file_path))
+    constants = {t.name: t for t in model.graph.initializer}
+    for node in model.graph.node:
+        if node.op_type == "Constant":
+            for attr in node.attribute:
+                if attr.name == "value" and attr.type == onnx.AttributeProto.TENSOR:
+                    constants[node.output[0]] = attr.t
+    for node in model.graph.node:
+        if node.op_type != "MatMul" or node.input[1] not in constants:
+            continue
+        t = constants[node.input[1]]
+        if t.data_type != TensorProto.BFLOAT16:
+            continue
+        arr = numpy_helper.to_array(t).reshape(-1)
+        if arr.size and (arr == arr[0]).all():
+            return float(arr[0]), list(t.dims)
+    raise ValueError(f"no uniform bf16 constant in {onnx_model_file.file_path}")
+
+
 @versioned_unhashable_object_fixture
-def numpy_matmul_const_weight_reference_results(input_data, mlir_io_spec, mlir_model_file):
+def numpy_matmul_const_weight_reference_results(request, input_data, mlir_io_spec, mlir_model_file):
     """Compute a uniform-const-weight matmul reference in fp32, round once to bf16.
 
     The model has a single external input (the activation); the weight is a
-    uniform bf16 constant parsed out of the MLIR. Accumulating in fp32 and
-    rounding the output once matches what the NSS matmul kernels do, so this is
-    a genuine numpy golden for the K-split repros (whose bf16 chunk-boundary
-    rounding is what we want to compare, not an llvm-cpu bf16-accumulated one).
+    uniform bf16 constant parsed out of the MLIR (static fixtures) or the ONNX
+    model (generated fixtures, where the constant is externalized). Accumulating
+    in fp32 and rounding the output once matches what the NSS matmul kernels do,
+    so this is a genuine numpy golden for the K-split repros (whose bf16
+    chunk-boundary rounding is what we want to compare, not an llvm-cpu
+    bf16-accumulated one).
     """
     from .iree import get_dtype
 
@@ -88,7 +111,11 @@ def numpy_matmul_const_weight_reference_results(input_data, mlir_io_spec, mlir_m
     assert len(mlir_io_spec.outputs) == 1
 
     output_dtype = get_dtype(mlir_io_spec.outputs[0].fmt)
-    value, shape = _parse_uniform_bf16_constant(mlir_model_file)
+    try:
+        value, shape = _parse_uniform_bf16_constant(mlir_model_file)
+    except ValueError:
+        value, shape = _parse_uniform_bf16_constant_onnx(
+            request.getfixturevalue("onnx_model_file"))
     weight = np.full(shape, value, dtype=np.float32)
     result = np.matmul(data[0].astype(np.float32, copy=False), weight)
     return [result.astype(output_dtype)]

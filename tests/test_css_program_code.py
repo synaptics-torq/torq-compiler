@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from torq.testing.iree import MODELS_DIR
+from .torch_ops_models import torch_ops_mlir
 
 
 def _latest_phase_with(phases_dir, needle):
@@ -26,7 +26,7 @@ def _latest_phase_with(phases_dir, needle):
 
 
 @pytest.mark.ci
-def test_css_program_code_is_shared_across_invocations(request, torq_compiler, tmp_path):
+def test_css_program_code_is_shared_across_invocations(request, torq_compiler, tmp_path, torch_ops_mlir):
     """A CSS program invoked multiple times must share a single torq_hl.program_code
     op, so its binary is placed in XRAM exactly once instead of once per invocation
     (synaptics-torq/torq-compiler-dev#1615).
@@ -38,7 +38,7 @@ def test_css_program_code_is_shared_across_invocations(request, torq_compiler, t
     all reference the same program_code value and the same XRAM address. (Linalg
     slicing does not split ops that run on CSS.)
     """
-    source = MODELS_DIR / "torch_ops" / "depthwise-conv1d-bf16-c64-w32.mlir"
+    source = torch_ops_mlir("depthwise-conv1d-bf16-c64-w32.mlir")
     model = tmp_path / "depthwise-conv1d-bf16-c64-w256.mlir"
     model.write_text(source.read_text().replace("[1,64,32]", "[1,64,256]"))
     phases = tmp_path / "phases"

@@ -1,22 +1,21 @@
 import re
 import subprocess
-from pathlib import Path
 
 import pytest
+
+from .torch_ops_models import torch_ops_mlir
 
 # The compile-time profile of an NSS code block load must use the size of the block, which
 # torq-assign-nss-programs-addresses measures and cuts the DMA to, not the 640-byte upper bound
 # the block is created with.
 
-MODEL = Path(__file__).parent / "testdata/torch_ops/layernorm-nss-1x128x768-bf16.mlir"
-
 
 @pytest.mark.ci
-def test_code_loads_profiled_with_block_size(torq_compiler, tmp_path):
+def test_code_loads_profiled_with_block_size(torq_compiler, tmp_path, torch_ops_mlir):
     proc = subprocess.run(
         [
             str(torq_compiler.file_path),
-            str(MODEL),
+            str(torch_ops_mlir("layernorm-nss-1x128x768-bf16.mlir")),
             "-o",
             str(tmp_path / "model.vmfb"),
             "--torq-hw=SL2610",

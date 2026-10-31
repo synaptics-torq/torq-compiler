@@ -1,29 +1,28 @@
 import re
 import subprocess
-from pathlib import Path
 
 import pytest
+
+from .torch_ops_models import torch_ops_mlir
 
 # IR check for a function that only reshapes its input. The reshape must stay outside the
 # dispatch as a flow.tensor.reshape, and the dispatch left behind must write in place. If the
 # reshape is kept inside the dispatch, the dispatch loads the input and stores a new output,
 # which is a full copy on the NPU. The numerics are the same either way, so only the IR shows it.
 
-TESTDATA = Path(__file__).parent / "testdata"
-
 CASES = [
     # onnx.Reshape 1x256x20x20 -> 1x256x400 and nothing else
-    TESTDATA / "torch_ops" / "reshape-only-bf16.mlir",
+    "reshape-only-bf16.mlir",
 ]
 
 
 @pytest.mark.ci
-@pytest.mark.parametrize("model", CASES, ids=lambda p: p.name)
+@pytest.mark.parametrize("model", CASES, ids=str)
 # runtime_hw_type is unused, but requesting it makes the plugin run the test for each chip.
-def test_boundary_reshape_is_not_a_copy(torq_compiler, runtime_hw_type, chip_config, model):
+def test_boundary_reshape_is_not_a_copy(torq_compiler, runtime_hw_type, chip_config, model, torch_ops_mlir):
     cmd = [
         str(torq_compiler.file_path),
-        str(model),
+        str(torch_ops_mlir(model)),
         "-o",
         "-",
         f"--torq-hw={chip_config.data['target']}",

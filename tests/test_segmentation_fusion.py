@@ -3,7 +3,7 @@ import subprocess
 
 import pytest
 
-from torq.testing.iree import MODELS_DIR
+from .torch_ops_models import torch_ops_mlir
 
 # On one slice a torq_hl.segmentation lands directly on its producer conv (sr200 layout). On two
 # slices the producer is in an scf.forall over output channels, and
@@ -14,9 +14,8 @@ TWO_SLICE_HW = "SL2610"
 CONV_RE = re.compile(r'"torq_hl\.(conv2d|depthwise_conv2d)".*?stride = array<i64: ([0-9, ]+)>')
 
 
-def _segmented_producers(torq_compiler, tmp_path, name, hw):
+def _segmented_producers(torq_compiler, tmp_path, model, hw):
     """Return the stride of every conv that writes segmented output after the segmentation pass."""
-    model = MODELS_DIR / "torch_ops" / f"{name}.mlir"
     cmd = [
         str(torq_compiler.file_path),
         str(model),
@@ -31,7 +30,7 @@ def _segmented_producers(torq_compiler, tmp_path, name, hw):
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        pytest.fail(f"torq-compile failed for {name} on {hw}:\n{result.stderr}")
+        pytest.fail(f"torq-compile failed for {model} on {hw}:\n{result.stderr}")
     strides = []
     for line in result.stderr.splitlines():
         m = CONV_RE.search(line)
@@ -52,7 +51,7 @@ def _segmented_producers(torq_compiler, tmp_path, name, hw):
         ("conv2d_bf16_8x8x3x3_s1_into_dw_s2_segment_output_8x7x40", (1, 1)),
     ],
 )
-def test_producer_writes_segmented_output(torq_compiler, tmp_path, name, stride, hw):
+def test_producer_writes_segmented_output(torq_compiler, tmp_path, torch_ops_mlir, name, stride, hw):
     """The consumer's segmentation folds into the producer on one and two slices, so the numeric
     fixtures of the same name exercise the segmented write of stride-1 and stride-2 producers."""
-    assert stride in _segmented_producers(torq_compiler, tmp_path, name, hw)
+    assert stride in _segmented_producers(torq_compiler, tmp_path, torch_ops_mlir(f"{name}.mlir"), hw)

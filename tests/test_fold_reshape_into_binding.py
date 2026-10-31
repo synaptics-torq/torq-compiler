@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from .torch_ops_models import torch_ops_mlir
+
 # IR checks for the fold of a reshape that sits between a dispatch result and its
 # dispatch.tensor.store. Without the fold, bufferization writes the result to a temporary
 # buffer and leaves a torq_hl.host_copy of the reshaped view to the binding, which becomes a
@@ -14,7 +16,7 @@ TESTDATA = Path(__file__).parent / "testdata"
 
 CASES = [
     # unit-dim collapse_shape after a depthwise conv
-    TESTDATA / "torch_ops" / "depthwise-conv1d-bf16-c464-k5.mlir",
+    ("gen", "depthwise-conv1d-bf16-c464-k5.mlir"),
     # collapse_shape after depth-to-space
     TESTDATA / "tosa_ops" / "d2s_8x8x128xi8_crd.mlir",
 ]
@@ -55,9 +57,12 @@ def host_copies_from_reshapes(torq_compiler, tmp_path, model):
 
 
 @pytest.mark.ci
-@pytest.mark.parametrize("model", CASES, ids=lambda p: p.name)
-def test_output_reshape_is_not_copied(torq_compiler, tmp_path, model):
+@pytest.mark.parametrize("model", CASES, ids=lambda p: p[1] if isinstance(p, tuple) else p.name)
+def test_output_reshape_is_not_copied(torq_compiler, tmp_path, torch_ops_mlir, model):
     """The reshape folds into the binding, so the result is written in place and no copy of a
     reshaped view is left for LowerHostCopiesToNpu."""
+    if isinstance(model, tuple):
+        _, name = model
+        model = torch_ops_mlir(name)
     found = host_copies_from_reshapes(torq_compiler, tmp_path, model)
     assert not found, "output copied through a reshape:\n" + "\n".join(found)

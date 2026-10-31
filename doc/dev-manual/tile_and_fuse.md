@@ -175,7 +175,7 @@ flowchart LR
     P --> S["merge reduction"] --> Y["final output"]
 ```
 
-The test case `tests/testdata/torch_ops/reducemean-tiling.mlir` exercises that length. The tail contributes one more partial; it is not a separate continuation of a loop-carried accumulator. This matters for correctness when the length does not divide evenly. If only a parallel dimension is tiled, the reduction remains whole and the ordinary full-reduction tiling path is used.
+The test case `reducemean-tiling` (builder in `tests/testdata/torch_ops/reduce_mean.py`; its MLIR is generated at test time) exercises that length. The tail contributes one more partial; it is not a separate continuation of a loop-carried accumulator. This matters for correctness when the length does not divide evenly. If only a parallel dimension is tiled, the reduction remains whole and the ordinary full-reduction tiling path is used.
 
 ### Keepdims output maps
 

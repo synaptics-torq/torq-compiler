@@ -3,11 +3,11 @@ import subprocess
 
 import pytest
 
-from torq.testing.iree import MODELS_DIR
+from .torch_ops_models import torch_ops_mlir
 
 # The tanh GELU of gelu-gemma.mlir. On SL2610 it runs untiled on both slices, and its LRAM plan
 # spills copies of the input along with computed buffers.
-GELU_MODEL = MODELS_DIR / "torch_ops" / "gelu-gemma.mlir"
+GELU_MODEL = "gelu-gemma.mlir"
 
 
 def compile_stderr(torq_compiler, tmp_path, model, hw, extra_flags):
@@ -40,18 +40,19 @@ def dispatch_after(torq_compiler, tmp_path, model, hw, pass_arg, extra_flags):
     dumps = [
         dump
         for dump in stderr.split("// -----// IR Dump After")
-        if re.search(r"func\.func @main_dispatch", dump)
+        if re.search(r"func\.func @\S+_dispatch", dump)
     ]
     assert dumps, f"no dump of the dispatch after {pass_arg}"
     return dumps[-1]
 
 
 @pytest.mark.ci
-def test_spilled_input_copies_are_loaded_again(torq_compiler, tmp_path):
+def test_spilled_input_copies_are_loaded_again(torq_compiler, tmp_path, torch_ops_mlir):
     """A spilled copy of the input must be loaded again from the input, not stored to XRAM: the
     LRAM plan swaps it in with its load, and such a swap-out stores nothing."""
+    model = torch_ops_mlir(GELU_MODEL)
     stderr = compile_stderr(
-        torq_compiler, tmp_path, GELU_MODEL, "SL2610", ["--torq-vm-print-statistics"]
+        torq_compiler, tmp_path, model, "SL2610", ["--torq-vm-print-statistics"]
     )
     reloads = re.findall(r"Swap-ins reloaded from the source: (\d+)", stderr)
     assert reloads, "no swap statistics printed"
@@ -59,10 +60,11 @@ def test_spilled_input_copies_are_loaded_again(torq_compiler, tmp_path):
 
 
 @pytest.mark.ci
-def test_input_bitcast_is_a_view_of_the_loaded_input(torq_compiler, tmp_path):
+def test_input_bitcast_is_a_view_of_the_loaded_input(torq_compiler, tmp_path, torch_ops_mlir):
     """The GELU tables read the input as i16: that must be a view of the bf16 input tile in
     LRAM, so that the tile is loaded once, not a load of a bitcast of the input in XRAM."""
-    ir = dispatch_after(torq_compiler, tmp_path, GELU_MODEL, "SR200", "torq-fold-convert", [])
+    model = torch_ops_mlir(GELU_MODEL)
+    ir = dispatch_after(torq_compiler, tmp_path, model, "SR200", "torq-fold-convert", [])
     bitcasts = re.findall(r'"torq_hl\.bitcast"\(%\S+\) : \((.*?)\) ->', ir)
     # Without this, the test would pass even if the GELU stopped using bitcasts.
     assert bitcasts, "no bitcast left, so this test proves nothing"
