@@ -135,6 +135,13 @@ def comparison_config_relaxed():
     return {"fp_avg_tol": 0.1, "fp_max_tol": 1.0}
 
 
+@versioned_hashable_object_fixture
+def comparison_config_abs_gate():
+    # The default relative tolerance, gated by an absolute error of 2% of the output range:
+    # near-zero logits keep a large relative error from a few bf16 ULP of absolute error.
+    return {"use_abs_tol_gate": True, "fp_abs_tol_frac": 0.02}
+
+
 @pytest.fixture
 def torch_zoo_turbine_case(request):
     return request.param
@@ -144,19 +151,16 @@ def torch_zoo_turbine_case(request):
 def case_config(request, chip_config):
     case = request.getfixturevalue("torch_zoo_turbine_case")
 
-    # Cases xfail'd for non-tolerance reasons (crash, exceed LRAM, parsing issue).
-    xfail_tc = [
-        # Full models — exceed LRAM on all zoo models
+    # Cases xfail'd for failures a relaxed tolerance would not cover (wrong results, crashes,
+    # LRAM overflows, parsing issues).
+    xfail_tc = []
+
+    # Cases checked with comparison_config_abs_gate.
+    abs_gate_tc = [
+        # 246 of the 1000 logits exceed the relative fp_max_tol 0.01, all near zero: the
+        # largest absolute error is 0.094 on logits from -7.7 to 11.1 (0.85% of the range), and
+        # the top-5 classes match (sim-sl2610 and sim-sr200).
         'mobilenet_v2_full_model',
-        'efficientnet_b0_full_model',
-
-        # crash with lram issue
-        'mobilenet_v2_features_sequential',
-        'efficientnet_b0_features_Sequential',
-        'efficientnet_b0_features_5_Sequential',
-
-        # Times out at runtime on CSS simulator.
-        'mobilenet_v2_features_2_conv_sequential',
     ]
 
     # Cases that fail only due to tolerance; use relaxed comparison config instead of xfail.
@@ -219,6 +223,8 @@ def case_config(request, chip_config):
 
     if any(fnmatch.fnmatch(name_lower, pat.lower()) for pat in relaxed_tc):
         comp_config["comparison_config"] = "comparison_config_relaxed"
+    if any(fnmatch.fnmatch(name_lower, pat.lower()) for pat in abs_gate_tc):
+        comp_config["comparison_config"] = "comparison_config_abs_gate"
 
     return comp_config
 

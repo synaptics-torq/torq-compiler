@@ -32,6 +32,15 @@ def case_config(request, runtime_hw_type, chip_config):
         "conv_s2_dw_w_subview-bf16",
     ]
 
+    long_compile_tc = [
+        # gather-i16: compiles in well under a second locally, but a CI run on
+        # sr200 (next.group) stalled past the 300s default compile budget.
+        # Double it so one-off runner stalls don't red the lane.
+        "gather-i16",
+    ]
+    if any(s in request.param.data.name for s in long_compile_tc):
+        extra_args["torq_compiler_timeout"] = 600
+
     extra_args["torq_compiler_options"] = []
     if any(s in request.param.data.name for s in no_slicing_tc):
         extra_args["torq_compiler_options"].append("--torq-disable-slicing=true")

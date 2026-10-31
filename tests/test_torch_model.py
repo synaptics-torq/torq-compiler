@@ -56,10 +56,6 @@ def torch_model_case(request):
 def case_config(request, chip_config):
     case = request.getfixturevalue("torch_model_case")
 
-    next_chip = (chip_config.data['target'] != "SL2610")
-    if next_chip:
-        pytest.xfail("AssertionError: Nans differ")
-
     return {
         "layer_name": case.data["layer_name"],
         "model_path": case.data.get("model_path"),

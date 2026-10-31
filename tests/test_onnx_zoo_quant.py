@@ -58,10 +58,6 @@ def onnx_quant_config():
 def case_config(request, chip_config):
     """Standard full-model config for the quantized ONNX Model Zoo model."""
 
-    next_chip = (chip_config.data['target'] != "SL2610")
-    if next_chip:
-        pytest.xfail("AssertionError: Nans differ")
-
     return {
         "onnx_model": "onnx_layer_model",
         "mlir_model_file": "onnx_mlir_model_file",

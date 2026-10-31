@@ -106,9 +106,10 @@ def case_config(request, runtime_hw_type, chip_config):
       'inceptionv3_conv2d_6',
       'inceptionv3_conv2d_8',
       'layer_vgg16_block5_conv1',
-      # Big VGG16 conv layers: a single ~3.8 GMAC 3x3 conv takes ~36-39s of
-      # single-threaded sim alone, leaving no headroom for the 60s layer
-      # budget when CI's 18 workers oversubscribe the 16-vCPU runner.
+      # Big VGG16 conv layers: the 1.9-2.5 GMAC block*_conv2 3x3 convs take
+      # ~36-39s of single-threaded sim alone, leaving no headroom for the 60s
+      # layer budget when CI's 18 workers oversubscribe the 16-vCPU runner.
+      # The ~0.95 GMAC block*_conv1 convs take ~16-18s: same no-margin class.
       'layer_vgg16_block1_conv2',
       'layer_vgg16_block2_conv2',
       'layer_vgg16_block3_conv2',
@@ -116,7 +117,9 @@ def case_config(request, runtime_hw_type, chip_config):
       'vgg16_block2_conv1',
       'vgg16_block2_conv2',
       'vgg16_block1_conv2',
+      'vgg16_block3_conv1',
       'vgg16_block3_conv2',
+      'vgg16_block4_conv2',
       'inceptionv3_conv2d_30',
       'inceptionresnetv2_conv2d_173',
       'inceptionresnetv2_conv2d_170',
