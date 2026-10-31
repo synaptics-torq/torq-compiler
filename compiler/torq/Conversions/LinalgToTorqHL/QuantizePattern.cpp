@@ -151,7 +151,7 @@ static Value emitQuantizeChain(
     // FMAOp: int32 -> i8 clamp to [minI, maxI]
     Value fmaInit = createInitTensor(op, rewriter, outTy);
     Value weights = createI8Const(rewriter, op, {1}, llvm::ArrayRef<int64_t>{1});
-    Value biasScale = createI32Const(rewriter, op, interleave({0}, {1}));
+    Value biasScale = createI32Const(rewriter, op, interleave(std::vector<int32_t>{0}, std::vector<int32_t>{1}));
     return torq_hl::FMAOp::create(
                rewriter, loc, outTy, fmaInit, rewriter.getI32IntegerAttr(0),
                rewriter.getI32IntegerAttr(minI), rewriter.getI32IntegerAttr(maxI),

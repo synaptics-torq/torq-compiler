@@ -823,7 +823,6 @@ class PrefetchInputsPass : public impl::PrefetchInputsBase<PrefetchInputsPass> {
   public:
     using impl::PrefetchInputsBase<PrefetchInputsPass>::PrefetchInputsBase;
 
-    PrefetchInputsPass(const PrefetchInputsOptions &options) { this->lramSize = options.lramSize; }
     PrefetchInputsPass(const PrefetchInputsPass &pass) { this->lramSize = pass.lramSize; }
 
     void runOnOperation() override;

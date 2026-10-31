@@ -157,6 +157,14 @@ def case_config(request, runtime_hw_type, chip_config):
             "--torq-disable-host", "--torq-disable-css",
         ])
 
+    # f32 matmul + bias with the SL2610 full-model flags: the stream schedule's N tiling
+    # leaves a 7-column fc-fast tile whose bias read DEBR used to reject.
+    if 'matmul_bias_stream_' in request.param.data.name:
+        extra_args["torq_compiler_options"].extend([
+            "--torq-convert-dtypes", "--torq-convert-io-dtype",
+            "--torq-prefetch-algorithm=stream-schedule",
+        ])
+
     # The encoder conv1d runs through the host/CSS fallback: keep host/CSS enabled
     # (drop the default --torq-disable-host/--torq-disable-css) and compare loosely.
     if 'encoder.mlir.230.Conv_0_small.mlir' in request.param.data.name:
