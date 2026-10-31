@@ -794,8 +794,8 @@ class DecomposeConvForHardwarePattern : public OpRewritePattern<ConvOpT> {
         // these instead: it promotes them to stride-[s,1] conv2d, S2D-folds
         // the divisible ones into a single in-limits conv, and lets the prime
         // stride/kernel combos fall through to this pass' conv2d pattern as a
-        // residue split. A single-output-point conv (window == whole input)
-        // takes SinglePointConv1DtoMatmulPattern below. Dilated conv1ds keep
+        // residue split. A conv with one or a few output points takes
+        // Conv1DtoMatmulPattern below. Dilated conv1ds keep
         // the decomposition: the dilation rewrite emits disjoint slices (no
         // accumulation).
         if (ConvOpTrait<ConvOpT>::depthwise == false && info.strides.size() == 1 &&
@@ -815,17 +815,22 @@ class DecomposeConvForHardwarePattern : public OpRewritePattern<ConvOpT> {
     int64_t maxKernelDim;
 };
 
-// A conv1d that outputs a single point is a GEMM, not a convolution:
-//   out[n, o] = sum_c sum_l W[o, c, l] * x[n, c, l]
-// (dilation 1, the window covers the whole input; the stride is irrelevant
-// with one output position, which selects tap 0).  Lowering it to a
-// linalg.matmul over [N, C*kL] x [C*kL, O] lets the fully-connected kernel
-// take it, far cheaper than the S2D-inflated (C*b channels) or residue-split
-// conv forms on these degenerate geometries.  Restriction: no materialized
-// pad (input spatial size == window size); a SAME conv with a single output
-// point has an unknown forward-pad offset at this level and stays on the
-// decomposition path.
-struct SinglePointConv1DtoMatmulPattern : public OpRewritePattern<linalg::Conv1DNcwFcwOp> {
+// A conv1d with one or a few output points is a GEMM, not a convolution:
+//   out[n, o, p] = sum_c sum_l W[o, c, l] * x[n, c, p * stride + l]
+// (dilation 1).  Lowering it to a linalg.matmul over its input windows,
+// [rows, C*kL] x [C*kL, O], lets the fully-connected kernel take it, far
+// cheaper than the S2D-inflated (C*b channels) or residue-split conv forms on
+// these degenerate geometries.
+// - One output point: the window is the whole input (no materialized pad; a
+//   SAME conv with a single output point has an unknown forward-pad offset at
+//   this level and stays on the decomposition path), and the rows are the
+//   batch.  The stride is irrelevant: the only output position selects tap 0.
+// - A few output points (batch 1, stride > 2): the rows are the windows,
+//   gathered from the input.  The matmul result [points, O] is transposed and
+//   expanded back to [1, O, points], the layout Conv1DMatmulToTorqHlFCPattern
+//   folds a per-channel bias and requantization into.
+// isConv1dMatmulCandidate gives the exact conditions.
+struct Conv1DtoMatmulPattern : public OpRewritePattern<linalg::Conv1DNcwFcwOp> {
     using OpRewritePattern::OpRewritePattern;
 
     LogicalResult
@@ -834,20 +839,54 @@ struct SinglePointConv1DtoMatmulPattern : public OpRewritePattern<linalg::Conv1D
         if (!infoOr)
             return rewriter.notifyMatchFailure(op, "not a static conv1d");
         const ConvInfo &info = *infoOr;
-        if (!isSinglePointConv1dMatmulCandidate(op))
-            return rewriter.notifyMatchFailure(
-                op, "not the single-output-point zero-init GEMM form"
-            );
+        if (!isConv1dMatmulCandidate(op))
+            return rewriter.notifyMatchFailure(op, "not the zero-init conv1d GEMM form");
 
         int64_t N = info.batch, C = info.inC, O = info.outC, kL = info.kernel[0];
+        int64_t points = info.out[0];
+        auto inTy = cast<RankedTensorType>(info.input.getType());
         auto filterTy = cast<RankedTensorType>(info.filter.getType());
         auto outTy = cast<RankedTensorType>(info.init.getType());
+        int64_t rows = points == 1 ? N : points;
 
-        // [N, C, kL] -> [N, C*kL]
-        Value flatIn =
-            tensor::CollapseShapeOp::create(
-                rewriter, info.loc, info.input, SmallVector<ReassociationIndices>{{0}, {1, 2}}
-            ).getResult();
+        Value flatIn;
+        if (points == 1) {
+            // [N, C, kL] -> [N, C*kL]
+            flatIn =
+                tensor::CollapseShapeOp::create(
+                    rewriter, info.loc, info.input, SmallVector<ReassociationIndices>{{0}, {1, 2}}
+                ).getResult();
+        }
+        else {
+            // Gather window p, [1, C, kL] at p * stride, into row p of [points, C*kL].
+            auto rowsTy = RankedTensorType::get({points, C * kL}, inTy.getElementType());
+            flatIn = tensor::EmptyOp::create(rewriter, info.loc, rowsTy, ValueRange{}).getResult();
+            for (int64_t p = 0; p < points; ++p) {
+                Value window = tensor::ExtractSliceOp::create(
+                    rewriter, info.loc, info.input,
+                    ArrayRef<OpFoldResult>{
+                        rewriter.getIndexAttr(0), rewriter.getIndexAttr(0),
+                        rewriter.getIndexAttr(p * info.strides[0])
+                    },
+                    ArrayRef<OpFoldResult>{
+                        rewriter.getIndexAttr(1), rewriter.getIndexAttr(C),
+                        rewriter.getIndexAttr(kL)
+                    },
+                    ArrayRef<OpFoldResult>{
+                        rewriter.getIndexAttr(1), rewriter.getIndexAttr(1), rewriter.getIndexAttr(1)
+                    }
+                );
+                Value row = tensor::CollapseShapeOp::create(
+                    rewriter, info.loc, window, SmallVector<ReassociationIndices>{{0}, {1, 2}}
+                );
+                flatIn = tensor::InsertSliceOp::create(
+                    rewriter, info.loc, row, flatIn,
+                    ArrayRef<OpFoldResult>{rewriter.getIndexAttr(p), rewriter.getIndexAttr(0)},
+                    ArrayRef<OpFoldResult>{rewriter.getIndexAttr(1), rewriter.getIndexAttr(C * kL)},
+                    ArrayRef<OpFoldResult>{rewriter.getIndexAttr(1), rewriter.getIndexAttr(1)}
+                );
+            }
+        }
 
         // [O, C, kL] -> [C, kL, O] -> [C*kL, O]; canonicalization folds the
         // transpose into the weight constant when the filter is a constant.
@@ -862,11 +901,10 @@ struct SinglePointConv1DtoMatmulPattern : public OpRewritePattern<linalg::Conv1D
                           rewriter, info.loc, trans, SmallVector<ReassociationIndices>{{0, 1}, {2}}
         ).getResult();
 
-        // matmul [N, C*kL] x [C*kL, O] -> [N, O], accumulating in the conv's
-        // output element type (the pre-decomposition conv1d->matmul unfold
-        // had the same form; a zero fill init keeps the matmul's accumulating
-        // semantics explicit for the downstream patterns).
-        auto mmTy = RankedTensorType::get({N, O}, outTy.getElementType());
+        // matmul [rows, C*kL] x [C*kL, O] -> [rows, O], accumulating in the
+        // conv's output element type (a zero fill init keeps the matmul's
+        // accumulating semantics explicit for the downstream patterns).
+        auto mmTy = RankedTensorType::get({rows, O}, outTy.getElementType());
         Value mmInitEmpty =
             tensor::EmptyOp::create(rewriter, info.loc, mmTy, ValueRange{}).getResult();
         Value mmInit =
@@ -881,10 +919,28 @@ struct SinglePointConv1DtoMatmulPattern : public OpRewritePattern<linalg::Conv1D
             )
                 .getResult(0);
 
-        Value result =
-            tensor::ExpandShapeOp::create(
-                rewriter, info.loc, outTy, mm, SmallVector<ReassociationIndices>{{0}, {1, 2}}
+        Value result;
+        if (points == 1) {
+            // [N, O] -> [N, O, 1]
+            result =
+                tensor::ExpandShapeOp::create(
+                    rewriter, info.loc, outTy, mm, SmallVector<ReassociationIndices>{{0}, {1, 2}}
+                ).getResult();
+        }
+        else {
+            // [points, O] -> [O, points] -> [1, O, points]
+            auto transTy = RankedTensorType::get({O, points}, outTy.getElementType());
+            Value transInit =
+                tensor::EmptyOp::create(rewriter, info.loc, transTy, ValueRange{}).getResult();
+            Value transposed = linalg::TransposeOp::create(
+                                   rewriter, info.loc, mm, transInit, ArrayRef<int64_t>{1, 0}
+            )
+                                   .getResult()[0];
+            result = tensor::ExpandShapeOp::create(
+                         rewriter, info.loc, outTy, transposed,
+                         SmallVector<ReassociationIndices>{{0, 1}, {2}}
             ).getResult();
+        }
 
         rewriter.replaceOp(op, result);
         return success();
@@ -917,9 +973,9 @@ class DecomposeConvsForHardwarePass
         MLIRContext *context = funcOp.getContext();
         RewritePatternSet patterns(context);
         constexpr int64_t kMax = kMaxRegularKernelDim;
-        // The single-point matmul form wins over the decomposition for the
-        // convs it matches; the decomposition then sees nothing to do.
-        patterns.add<SinglePointConv1DtoMatmulPattern>(context, /*benefit=*/2);
+        // The matmul form wins over the decomposition for the convs it
+        // matches; the decomposition then sees nothing to do.
+        patterns.add<Conv1DtoMatmulPattern>(context, /*benefit=*/2);
         patterns.add<DecomposeConvForHardwarePattern<linalg::Conv1DNcwFcwOp>>(context, kMax);
         patterns.add<DecomposeConvForHardwarePattern<linalg::Conv2DNchwFchwOp>>(context, kMax);
         patterns.add<DecomposeConvForHardwarePattern<linalg::Conv3DNcdhwFcdhwOp>>(context, kMax);

@@ -1,9 +1,9 @@
 // Compile-only: single-output-point conv1d (window == whole input,
 // dilation 1) with a RUNTIME init.  Nothing pre-folds a runtime init, and
-// SinglePointConv1DtoMatmulPattern claims only the all-zero-init form, so
+// Conv1DtoMatmulPattern claims only the all-zero-init form, so
 // the conv1d->conv2d promotion must not bail on this shape as "matmul
 // territory" - before the bail was aligned with the claim (shared
-// isSinglePointConv1dMatmulCandidate predicate) the conv reached tiling
+// isConv1dMatmulCandidate predicate) the conv reached tiling
 // with no lowering and the compile failed ("linalg.conv_1d_ncw_fcw op
 // unsupported in function body").
 //

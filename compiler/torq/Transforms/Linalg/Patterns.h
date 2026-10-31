@@ -17,14 +17,15 @@ namespace mlir::syna::torq {
 
 void populateOptimizeConv1DPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 
-// Shared claim predicate for the single-output-point conv1d GEMM form
-// (window == whole input, dilation 1, all-zero init, no bias input):
+// Shared claim predicate for the conv1d GEMM form (dilation 1, all-zero init,
+// no bias input; a single output point whose window is the whole input, or a
+// few output points of a stride > 2 conv with batch 1):
 // DecomposeConvsForHardwarePass lowers it to linalg.matmul
-// (SinglePointConv1DtoMatmulPattern).  The conv1d->conv2d promotion must
-// bail exactly where this pattern claims, no wider and no narrower: a
-// single-output-point conv it does not claim (say, a bias folded into the
-// init) must still be promoted, or nothing lowers it.
-bool isSinglePointConv1dMatmulCandidate(linalg::Conv1DNcwFcwOp op);
+// (Conv1DtoMatmulPattern).  The conv1d->conv2d promotion must bail exactly
+// where this pattern claims, no wider and no narrower: a conv it does not
+// claim (say, a bias folded into the init) must still be promoted, or nothing
+// lowers it.
+bool isConv1dMatmulCandidate(linalg::Conv1DNcwFcwOp op);
 
 // Registers the conv1d->conv2d promotion patterns for strides in
 // [minStride, maxStride]; see the pattern for what the range means.

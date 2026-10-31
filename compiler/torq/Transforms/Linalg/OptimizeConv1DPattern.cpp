@@ -29,6 +29,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "torq-optimize-conv1d-pattern"
@@ -110,11 +111,23 @@ template <> struct Conv1DPromotionTrait<linalg::DepthwiseConv1DNcwCwOp> {
     static constexpr bool isDepthwise = true;
 };
 
-/// Shared claim predicate: a single-output-point regular conv1d (window ==
-/// whole input, dilation 1) with an all-zero init and no bias input is a
-/// GEMM, which DecomposeConvsForHardwarePass lowers to linalg.matmul
-/// (SinglePointConv1DtoMatmulPattern).
-bool isSinglePointConv1dMatmulCandidate(linalg::Conv1DNcwFcwOp op) {
+static llvm::cl::opt<int64_t> clConv1dMatmulMaxPoints(
+    "torq-conv1d-matmul-max-points",
+    llvm::cl::desc("Largest number of output points of a stride > 2 conv1d that is lowered "
+                   "to a matmul over its gathered input windows"),
+    llvm::cl::init(4), llvm::cl::Hidden
+);
+
+/// Shared claim predicate: a regular conv1d with dilation 1, an all-zero init and no bias
+/// input that is a GEMM over its input windows, which DecomposeConvsForHardwarePass lowers
+/// to linalg.matmul (Conv1DtoMatmulPattern):
+/// - a single output point whose window covers the whole input;
+/// - or, for a stride above 2 (which the conv2d form cannot take) that does not divide the
+///   kernel, batch 1 and at most --torq-conv1d-matmul-max-points output points.
+/// When the stride divides the kernel, the S2D fold needs no zero-padded kernel taps and is
+/// cheaper; otherwise the matmul is cheaper up to about 4 points (compile-time estimate of
+/// bf16 sweeps with C 1..128, K 5..127, stride 3..64, both sim chips).
+bool isConv1dMatmulCandidate(linalg::Conv1DNcwFcwOp op) {
     if (op.getNumDpsInputs() != 2)
         return false; // a bias input keeps the conv on the conv path
     auto inTy = dyn_cast<RankedTensorType>(op.getInputs()[0].getType());
@@ -123,12 +136,19 @@ bool isSinglePointConv1dMatmulCandidate(linalg::Conv1DNcwFcwOp op) {
     if (!inTy || !fltTy || !outTy || !inTy.hasStaticShape() || !fltTy.hasStaticShape() ||
         !outTy.hasStaticShape())
         return false; // not a static conv1d
-    if (outTy.getShape()[2] != 1)
-        return false; // output has more than one point
     if (op.getDilations().getValues<int64_t>()[0] != 1)
         return false;
-    if (inTy.getShape()[2] != fltTy.getShape()[2])
-        return false; // window does not cover the whole input (pad or dilation)
+    int64_t points = outTy.getShape()[2];
+    if (points == 1) {
+        if (inTy.getShape()[2] != fltTy.getShape()[2])
+            return false; // window does not cover the whole input (pad or dilation)
+    }
+    else {
+        int64_t stride = op.getStrides().getValues<int64_t>()[0];
+        if (stride <= 2 || fltTy.getShape()[2] % stride == 0 || outTy.getShape()[0] != 1 ||
+            points > clConv1dMatmulMaxPoints)
+            return false;
+    }
     return isAllZerosTensor(op.getOutputs()[0]);
 }
 
@@ -179,18 +199,16 @@ struct Conv1DtoConv2DPromotionPattern : public OpRewritePattern<Conv1DOp> {
             );
         }
 
-        // A single-output-point regular conv1d is a GEMM (the stride selects
-        // tap 0); DecomposeConvsForHardwarePass lowers it to a matmul for the
+        // A conv1d with one or a few output points is a GEMM over its input
+        // windows; DecomposeConvsForHardwarePass lowers it to a matmul for the
         // fully-connected kernel, which beats both the S2D stride-into-channels
         // fold (C-inflated conv) and the residue split.  Bail exactly where
-        // that pattern claims (isSinglePointConv1dMatmulCandidate): a
-        // single-output-point conv it does not claim (a bias folded into the
-        // init, say) must still be promoted, or nothing lowers it.
+        // that pattern claims (isConv1dMatmulCandidate): a conv it does not
+        // claim (a bias folded into the init, say) must still be promoted, or
+        // nothing lowers it.
         if (!Conv1DPromotionTrait<Conv1DOp>::isDepthwise &&
-            isSinglePointConv1dMatmulCandidate(cast<linalg::Conv1DNcwFcwOp>(convOp))) {
-            return rewriter.notifyMatchFailure(
-                convOp, "single-output-point conv1d is matmul territory"
-            );
+            isConv1dMatmulCandidate(cast<linalg::Conv1DNcwFcwOp>(convOp))) {
+            return rewriter.notifyMatchFailure(convOp, "conv1d is matmul territory");
         }
 
         // Append the unit extent: [N,C,W] -> [N,C,W,1], filter likewise.
