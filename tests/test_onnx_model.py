@@ -94,8 +94,7 @@ def reference_results(request, onnx_layer_model):
     llvmcpu_reference_results = request.getfixturevalue("llvmcpu_reference_results")
     return llvmcpu_reference_results
 
-# Not ready for that (Nan differs)
-# @pytest.mark.fpga_ci
-@pytest.mark.ci
+# Not in CI: it compares Torq with llvm-cpu, while the ground truth of these models is ONNX.
+# It stays for investigations (doc/dev-manual/model.md).
 def test_onnx_model_llvmcpu_torq(request, reference_results, torq_results, case_config, onnx_layer_model):
     compare_test_results(request, torq_results, reference_results, case_config)
