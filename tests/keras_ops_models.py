@@ -6,7 +6,9 @@ collector imports it and reads:
 - CASES: {case_stem: builder}, where builder() returns the Keras model (see
   torq.testing.keras_builder). CASES may be built with comprehensions, e.g. for sweeps.
 - QUANTIZE (optional): the quantizations of every case, default ("int8", "int16"). Each one
-  gives a test case named <case_stem>_<quantization>, with the int8 or int16 marker.
+  gives a test case named <case_stem>_<quantization>, with the int8 or int16 marker. A single
+  string ("int8") gives one test case named <case_stem>, with no suffix.
+- DEFAULT_CONFIG (optional): settings of every case of the module, under its CONFIG.
 - CONFIG (optional): {case_stem: {key: value}}, the settings of cases that need more than the
   defaults of test_keras_ops.py:
   - quantize: the quantizations of this case; a single string ("int8") gives one test case
@@ -67,7 +69,8 @@ def keras_ops_cases():
             raise ValueError(f"keras_ops/{family}.py: CONFIG for unknown cases "
                              f"{sorted(configs.keys() - module.CASES.keys())}")
         for stem in module.CASES:
-            config = _case_config(family, stem, configs.get(stem, {}))
+            config = {**getattr(module, "DEFAULT_CONFIG", {}), **configs.get(stem, {})}
+            config = _case_config(family, stem, config)
             quantize = config.get("quantize", getattr(module, "QUANTIZE", _QUANTIZATIONS))
             variants = ([(stem, quantize)] if isinstance(quantize, str)
                         else [(f"{stem}_{q}", q) for q in quantize])

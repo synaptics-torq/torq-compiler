@@ -79,3 +79,12 @@ Each case runs with int8 and int16 quantization, as `<case>_int8` and `<case>_in
 `tests/keras_ops_models.py`). Cases that must not run at all are listed in
 `keras_known_failures.py`; expected failures go in `test_keras_ops-xfails.txt`.
 
+### Cases ported from tosa_ops
+
+The `tosa_*` modules hold cases ported from `tests/testdata/tosa_ops`: each keeps the name of the
+MLIR file it replaced and its quantization (`QUANTIZE = "int8"`, with a few int16 cases in
+`CONFIG`), and `DEFAULT_CONFIG` makes them run on the slices only, as `test_tosa_ops` does. Port a
+tosa_ops case only when Keras and TFLite produce the same TOSA ops and attributes (pads, strides,
+perms, axes); keep the MLIR file when it tests explicit pads, constants, scales or zero points, an
+op TFLite never emits, or bf16.
+

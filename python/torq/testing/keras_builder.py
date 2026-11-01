@@ -44,17 +44,21 @@ def sequential(shape, *specs, batch_size=1, seed=42):
     return partial(_build_sequential, tuple(shape), specs, batch_size, seed)
 
 
-def _build_functional(shape, build, batch_size, seed):
+def _build_functional(shapes, build, batch_size, seed):
     import tensorflow as tf
 
     tf.keras.utils.set_random_seed(seed)
-    inputs = tf.keras.layers.Input(batch_size=batch_size, shape=shape)
-    return tf.keras.Model(inputs=inputs, outputs=build(inputs))
+    inputs = [tf.keras.layers.Input(batch_size=batch_size, shape=s) for s in shapes]
+    return tf.keras.Model(inputs=inputs if len(inputs) > 1 else inputs[0], outputs=build(*inputs))
 
 
 def functional(shape, build, batch_size=1, seed=42):
-    """A builder of a functional model: build(inputs) creates the layers and returns the outputs."""
-    return partial(_build_functional, tuple(shape), build, batch_size, seed)
+    """A builder of a functional model: build(*inputs) creates the layers and returns the outputs.
+
+    shape is the shape of the input, or a list of shapes for several inputs.
+    """
+    shapes = [tuple(s) for s in shape] if isinstance(shape, list) else [tuple(shape)]
+    return partial(_build_functional, shapes, build, batch_size, seed)
 
 
 def _strides_or_padding(strides, padding):
