@@ -190,3 +190,11 @@ test_keras_model_llvm[model138_mult_mult_inp1x3x3x1_int16-aws_fpga-sl2610-v1] sy
 test_keras_model_llvm[model138_mult_mult_inp1x3x3x1_int16-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1390
 test_keras_model_llvm[model138_mult_mult_inp1x3x3x1_int16-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#1390
 test_keras_model_llvm[model138_mult_mult_inp1x3x3x1_int16-sim-sr200-v1] synaptics-torq/torq-compiler-dev#1390
+test_keras_model_torq[model155_sub_v2s_1x6x8x4_int16-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#2794
+test_keras_model_torq[model155_sub_v2s_1x6x8x4_int16-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#2794
+test_keras_model_torq[model155_sub_v2s_1x6x8x4_int16-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#2794
+test_keras_model_torq[model155_sub_v2s_1x6x8x4_int16-sim-sr200-v1] synaptics-torq/torq-compiler-dev#2794
+test_keras_model_torq[conv2d_transpose_k4x3_s2x2_same_7x7x2_oc3_int8-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#2794
+test_keras_model_torq[conv2d_transpose_k4x3_s2x2_same_7x7x2_oc3_int8-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#2794
+test_keras_model_torq[conv2d_transpose_k4x3_s2x2_same_7x7x2_oc3_int8-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#2794
+test_keras_model_torq[conv2d_transpose_k4x3_s2x2_same_7x7x2_oc3_int8-sim-sr200-v1] synaptics-torq/torq-compiler-dev#2794

@@ -7,8 +7,10 @@ from torq.testing.onnx import (
     ModelWithMetadata,
     OnnxLayerCase,
     generate_onnx_layers_from_file,
+    onnx_layer_key,
     onnx_reference_results,
 )
+from torq.testing.cases import drop_duplicate_cases
 from torq.testing.hf import get_hf_model_file
 from torq.testing.iree import get_dtype
 from torq.lab.model_tools.extraction.onnx.decoder_components import extract_representative_components
@@ -174,6 +176,8 @@ def pytest_generate_tests(metafunc):
         cases += generate_onnx_layers_from_file(
             metafunc.config.cache, comp_path, dedup=True
         )
+    # a layer with the same definition as one of another component is the same test
+    cases = drop_duplicate_cases(cases, onnx_layer_key)
 
     # Load lazily so collection does not pull the ~800MB model into memory.
     cases.append(

@@ -2,10 +2,12 @@ import fnmatch
 import pytest
 import torch
 
+from torq.testing.cases import drop_duplicate_cases
 from torq.testing.comparison import compare_test_results
 from torq.testing.torch import (
     generate_traced_torch_model_layers,
     register_torch_model_loader,
+    traced_layer_key,
     _disable_inplace_ops,
 )
 from torq.testing.versioned_fixtures import versioned_hashable_object_fixture
@@ -126,6 +128,10 @@ def pytest_generate_tests(metafunc):
             loader,
             tuple(x.to(torch.bfloat16) for x in example_inputs),
         )
+
+    # a layer with the same definition and input shapes as an earlier one (a repeated block, or
+    # the same layer in another model) is the same test
+    cases = drop_duplicate_cases(cases, traced_layer_key)
 
     metafunc.parametrize("torch_zoo_turbine_case", cases, indirect=True, ids=[c.name for c in cases])
 

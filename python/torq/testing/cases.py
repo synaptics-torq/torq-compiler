@@ -4,13 +4,16 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+import json
+
 import pytest
 
 from typing import List, Dict
 
 from torq.lab import Case, get_test_cases_from_files
 
-__all__ = ["Case", "get_test_cases_from_files", "get_test_cases_from_tf_model"]
+__all__ = ["Case", "get_test_cases_from_files", "get_test_cases_from_tf_model",
+           "drop_duplicate_cases", "keras_layer_key"]
 
 """
 
@@ -103,3 +106,31 @@ def get_test_cases_from_tf_model(model, model_name, full_model=False) -> List[Ca
             cases.append(Case(f"layer_{model_name}_" + layer_name, layer_config))
 
     return cases
+
+
+def keras_layer_key(case):
+    """Key of a case of get_test_cases_from_tf_model for drop_duplicate_cases: the configuration
+    of its one-layer model (layer name normalized); None for a full model."""
+    if case.name.startswith("full_model_"):
+        return None
+    return json.dumps(case.data, sort_keys=True)
+
+
+def drop_duplicate_cases(cases, key):
+    """The cases without those whose key an earlier case already has.
+
+    Layer cases generated from several models often test the same layer twice (a block
+    repeated in a model, or the same layer in two models). key(case) returns a hashable that is
+    equal for two cases with the same definition, or None to always keep the case (e.g. a full
+    model).
+    """
+    seen = set()
+    kept = []
+    for case in cases:
+        k = key(case)
+        if k is not None:
+            if k in seen:
+                continue
+            seen.add(k)
+        kept.append(case)
+    return kept

@@ -42,7 +42,7 @@ if torch:
 
 # Bump when the cached case shape changes; v2 qualifies case names with the
 # model file stem.
-_TORCH_LAYER_CACHE_VERSION = 2
+_TORCH_LAYER_CACHE_VERSION = 3  # 3: traced cases record the module definition
 
 # Registry for lazy model loaders (used by tests that avoid keeping the model
 # object in every pytest-xdist worker during collection, e.g. torchvision zoo
@@ -816,6 +816,9 @@ class TorchLayerCase(Case):
     """A test case for a layer extracted from a Torch model."""
     layer_name: str
     is_full_model: bool
+    # repr() of the module (its type and constructor arguments, and those of its children),
+    # set for traced cases; see traced_layer_key
+    definition: str = ""
 
 
 def _disable_inplace_ops(model):
@@ -1231,9 +1234,21 @@ def build_traced_torch_cases(model, example_inputs):
             },
             layer_name=name,
             is_full_model=False,
+            definition=repr(module),
         ))
 
     return cases
+
+
+def traced_layer_key(case):
+    """Key of a traced layer case for torq.testing.cases.drop_duplicate_cases: the module
+    definition and the call signature (shapes and dtypes of the arguments), so two layers with
+    the same definition called on the same shapes are the same test whatever their weights.
+    None (always kept) for a full model or a case without a definition."""
+    if case.is_full_model or not case.definition:
+        return None
+    return json.dumps([case.definition, case.data.get("layer_arg_specs"),
+                       case.data.get("layer_kwarg_specs")], sort_keys=True)
 
 
 def _load_model_from_pt(filepath):
@@ -1383,6 +1398,8 @@ def _save_torch_metadata_cache(key_dir: Path, model_version: str, cases, node_gr
         if c.data.get("layer_arg_specs") is not None:
             entry["layer_arg_specs"] = c.data["layer_arg_specs"]
             entry["layer_kwarg_specs"] = c.data.get("layer_kwarg_specs", {})
+        if getattr(c, "definition", ""):
+            entry["definition"] = c.definition
         entries.append(entry)
     atomic_write_json_manifest(key_dir, {
         "version": _TORCH_LAYER_CACHE_VERSION,
@@ -1428,6 +1445,7 @@ def _load_torch_metadata_cases(manifest: dict, model_loader_key: str):
             data=data,
             layer_name=entry["layer_name"],
             is_full_model=entry["is_full_model"],
+            definition=entry.get("definition", ""),
         ))
     return cases
 

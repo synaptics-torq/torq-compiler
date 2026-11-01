@@ -3,7 +3,7 @@ import pytest
 from torq.testing.comparison import compare_test_results
 from torq.testing.tensorflow import generate_layers_from_model
 from torq.testing.iree import llvmcpu_reference_results
-from torq.testing.cases import get_test_cases_from_tf_model
+from torq.testing.cases import drop_duplicate_cases, get_test_cases_from_tf_model, keras_layer_key
 from torq.testing.versioned_fixtures import versioned_hashable_object_fixture
 
 import tensorflow as tf
@@ -69,6 +69,9 @@ test_cases = [
     # (tensor<1x14x14x1xi32>, tensor<1x1x1x384xi32>) -> tensor<1x14x14x384xi32>
     # *get_model_cases("convnext_tiny", (224, 224, 3))
 ]
+# a layer with the same configuration and input shapes as an earlier one (in the same model or
+# another one) is the same test
+test_cases = drop_duplicate_cases(test_cases, keras_layer_key)
 
 
 @pytest.fixture(params=test_cases)

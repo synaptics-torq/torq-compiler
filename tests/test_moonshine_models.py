@@ -2,11 +2,14 @@ import numpy as np
 import pytest
 
 from torq.testing.comparison import compare_test_results
-from torq.testing.onnx import generate_onnx_layers_from_model, get_full_model, numpy_reference_results, has_bf16_matmul
+from torq.testing.onnx import (
+    generate_onnx_layers_from_model, get_full_model, numpy_reference_results, has_bf16_matmul,
+    onnx_layer_key,
+)
 from torq.testing.iree import llvmcpu_reference_results
 from torq.lab.pipeline.io import get_dtype
 from torq.testing.hf import get_hf_model_file
-from torq.testing.cases import Case
+from torq.testing.cases import Case, drop_duplicate_cases
 
 from torq.testing.versioned_fixtures import versioned_hashable_object_fixture, versioned_cached_data_fixture
 
@@ -157,6 +160,10 @@ def pytest_generate_tests(metafunc):
             layers = generate_onnx_layers_from_model(model, quantize=quantize)
 
             cases += [Case(f"{t}_{ttype}_{key}", layer) for key, layer in layers.items()] + [ Case(f"{t}_{ttype}_full_model", model) ]
+
+    # a layer with the same definition as an earlier one (in the encoder or the decoder) is the
+    # same test
+    cases = drop_duplicate_cases(cases, onnx_layer_key)
 
     skip_cmodel = [
         # timeout on CModel

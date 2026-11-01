@@ -1,4 +1,5 @@
 import copy as _copy
+import json
 from functools import wraps
 from pathlib import Path
 
@@ -6,6 +7,7 @@ import ml_dtypes
 import numpy as np
 import onnx
 import onnxruntime
+from onnx import helper as onnx_helper, numpy_helper
 import pytest
 
 from torq.lab.model_tools.dtype_conversion.onnx import convert_model
@@ -71,6 +73,39 @@ def generate_onnx_layers_from_hf(cache, repo_id, filename, node_groups=None, ded
     model_file = get_hf_model_file(cache, repo_id, filename)
     return _load_cached_layers(
         cache, model_file, Path(filename).stem, node_groups, dedup)
+
+
+def _tensor_key(tensor):
+    arr = numpy_helper.to_array(tensor)
+    # the values of small constants (shapes, axes, pads, slice bounds) are part of the definition
+    return [str(arr.dtype), list(arr.shape), arr.tolist() if arr.size <= 16 else None]
+
+
+def _attribute_key(attr):
+    value = onnx_helper.get_attribute_value(attr)
+    values = value if isinstance(value, (list, tuple)) else [value]
+    keys = [_tensor_key(v) if isinstance(v, onnx.TensorProto)
+            else v.decode(errors="replace") if isinstance(v, bytes)
+            else "graph" if isinstance(v, onnx.GraphProto)
+            else v for v in values]
+    return keys if isinstance(value, (list, tuple)) else keys[0]
+
+
+def onnx_layer_key(case):
+    """Key of an ONNX layer case for torq.testing.cases.drop_duplicate_cases.
+
+    It is model_signature (inputs, outputs, op types, constant shapes) plus the node attributes
+    and the values of small constants, so two layers with the same definition are the same test
+    whatever their weights. None (always kept) for a full model.
+    """
+    if getattr(case, "is_full_model", False) or case.name.endswith("full_model"):
+        return None
+    model = case.data.model if isinstance(case.data, ModelWithMetadata) else case.data
+    graph = model.graph
+    nodes = [(n.op_type, sorted((a.name, _attribute_key(a)) for a in n.attribute))
+             for n in graph.node]
+    return json.dumps([model_signature(model), nodes,
+                       [_tensor_key(t) for t in graph.initializer]], default=str)
 
 
 # ---- Pytest fixtures ----
