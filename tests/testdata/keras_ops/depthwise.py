@@ -6,6 +6,10 @@ activation after the conv, e.g. dw_k3x3_s1x1_valid_6x42x16_relu.
 
 from torq.testing.keras_builder import layers, sequential, depthwise
 
+# int8 only: the TFLite converter fails to quantize DepthwiseConv2D to int16 ("Quantized dimension
+# for tensor property and quantization parameters do not match").
+QUANTIZE = ("int8",)
+
 # (input H, W, C), kernel (h, w), padding; each followed by ReLU
 _LAYERS = [
     ((6, 42, 16), (3, 3), "valid"),
