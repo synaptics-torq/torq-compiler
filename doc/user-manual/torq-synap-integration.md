@@ -151,7 +151,7 @@ This section details how the SyNAP and Torq runtimes, libraries, and kernel modu
 - **Torq:**
   - `torq-runtime` (core runtime and inference tools)
   - `torq-hosttools` (host-side utilities)
-  - `torq-kernel-module` (NPU kernel driver)
+  - `torq-kernel-module` (NPU kernel driver, see [NPU Kernel Driver](npu_driver.md))
 - **SyNAP:**
   - `synap-runtime` (core SyNAP runtime libraries)
   - `synap-prebuilts` (prebuilt SyNAP libraries and headers)
