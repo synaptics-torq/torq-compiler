@@ -6,7 +6,6 @@
 
 #include "PassesDetail.h"
 #include "torq/Conversions/LinalgToTorqHL/MatchingFunctions.h"
-#include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Utils/ExecutorAssignment.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -106,11 +105,13 @@ class LinalgOpPattern : public OpInterfaceRewritePattern<linalg::LinalgOp> {
             else if (isTorqCeilOp(srcOp, failReason)) {
                 canExecuteOnTorq = true;
             }
+            // Only the clamp forms isTorqClampOp accepts stay on the NPU. The other f32 clamps
+            // (e.g. a ReLU fused with the f32 -> bf16 truncf after an f32 BatchNorm) follow f32
+            // work that this pass sends to the host: running them alone on the NPU costs a DMA
+            // round trip of the f32 tensor.
             else if (isTorqClampOp(
                          srcOp, minIntValue, maxIntValue, minFloatValue, maxFloatValue, failReason
-                     ) ||
-                     matchFloatClampRange(dyn_cast_or_null<linalg::GenericOp>(srcOp.getOperation()))
-                         .has_value()) {
+                     )) {
                 canExecuteOnTorq = true;
             }
             else if (isTorqFloorOp(srcOp, failReason)) {

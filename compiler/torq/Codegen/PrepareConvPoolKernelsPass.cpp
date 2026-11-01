@@ -545,6 +545,12 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
         if (!inputType || inputType.getRank() != 4)
             return failure();
 
+        // The padded buffers below are built from static shapes. The tile-size probe of
+        // TileAndFuse can reach this pattern with dynamic tile shapes.
+        if (!inputType.hasStaticShape() ||
+            !cast<RankedTensorType>(op.getResult(0).getType()).hasStaticShape())
+            return failure();
+
         auto shape = inputType.getShape();
         auto strides = op.getStride();
         auto pads = op.getPad();
