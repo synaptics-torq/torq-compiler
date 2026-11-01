@@ -1,122 +1,54 @@
-"""Keras test models: AveragePooling2D and MaxPooling2D."""
+"""Keras test models: AveragePooling2D and MaxPooling2D.
+
+Each case name says what it tests: pool size, strides, padding and input shape (H x W x C),
+e.g. avgpool_k3x3_s3x3_valid_10x10x4.
+"""
 
 from torq.testing.keras_builder import layers, sequential
 
-CASES = {
-    "model030_avgpool_inp1x10x10x4_pool3x3_stride3x3_valid": sequential(
-        (10, 10, 4),
-        layers.AveragePooling2D(pool_size=(3, 3), strides=(3, 3), padding="valid"),
-    ),
-    "model031_avgpool_inp1x10x10x4_pool4x4_stride4x4_valid": sequential(
-        (10, 10, 4),
-        layers.AveragePooling2D(pool_size=(4, 4), strides=(4, 4), padding="valid"),
-    ),
-    "model032_avgpool_inp1x10x10x4_pool5x5_stride5x5_valid": sequential(
-        (10, 10, 4),
-        layers.AveragePooling2D(pool_size=(5, 5), strides=(5, 5), padding="valid"),
-    ),
-    "model033_avgpool_inp1x10x10x4_pool5x5_stride1x1_valid": sequential(
-        (10, 10, 4),
-        layers.AveragePooling2D(pool_size=(5, 5), strides=(5, 5), padding="valid"),
-    ),
-    "model034_avgpool_inp1x10x10x4_pool1x3_stride1x3_valid": sequential(
-        (10, 10, 4),
-        layers.AveragePooling2D(pool_size=(1, 3), strides=(1, 3), padding="valid"),
-    ),
-    "model035_avgpool_inp1x10x10x4_pool3x3_stride3x3_same": sequential(
-        (10, 10, 4),
-        layers.AveragePooling2D(pool_size=(3, 3), strides=(3, 3), padding="same"),
-    ),
-    "model036_avgpool_inp1x10x10x4_pool4x4_stride4x4_same": sequential(
-        (10, 10, 4),
-        layers.AveragePooling2D(pool_size=(4, 4), strides=(4, 4), padding="same"),
-    ),
-    "model037_avgpool_inp1x10x10x4_pool5x5_stride5x5_same": sequential(
-        (10, 10, 4),
-        layers.AveragePooling2D(pool_size=(5, 5), strides=(5, 5), padding="same"),
-    ),
-    "model038_avgpool_inp1x10x10x4_pool5x5_stride1x1_same": sequential(
-        (10, 10, 4),
-        layers.AveragePooling2D(pool_size=(5, 5), strides=(5, 5), padding="same"),
-    ),
-    "model039_avgpool_inp1x10x10x4_pool1x3_stride1x1_same": sequential(
-        (10, 10, 4),
-        layers.AveragePooling2D(pool_size=(1, 3), strides=(1, 3), padding="same"),
-    ),
-    "model040_maxpool_inp1x10x10x4_pool3x3_stride3x3_valid": sequential(
-        (10, 10, 4),
-        layers.MaxPooling2D(pool_size=(3, 3), strides=(3, 3), padding="valid"),
-    ),
-    "model041_maxpool_inp1x10x10x4_pool4x4_stride4x4_valid": sequential(
-        (10, 10, 4),
-        layers.MaxPooling2D(pool_size=(4, 4), strides=(4, 4), padding="valid"),
-    ),
-    "model042_maxpool_inp1x10x10x4_pool5x5_stride5x5_valid": sequential(
-        (10, 10, 4),
-        layers.MaxPooling2D(pool_size=(5, 5), strides=(5, 5), padding="valid"),
-    ),
-    "model043_maxpool_inp1x10x10x4_pool5x5_stride1x1_valid": sequential(
-        (10, 10, 4),
-        layers.MaxPooling2D(pool_size=(5, 5), strides=(5, 5), padding="valid"),
-    ),
-    "model044_maxpool_inp1x10x10x4_pool1x3_stride1x3_valid": sequential(
-        (10, 10, 4),
-        layers.MaxPooling2D(pool_size=(1, 3), strides=(1, 3), padding="valid"),
-    ),
-    "model045_maxpool_inp1x10x10x4_pool3x3_stride3x3_same": sequential(
-        (10, 10, 4),
-        layers.MaxPooling2D(pool_size=(3, 3), strides=(3, 3), padding="same"),
-    ),
-    "model046_maxpool_inp1x10x10x4_pool4x4_stride4x4_same": sequential(
-        (10, 10, 4),
-        layers.MaxPooling2D(pool_size=(4, 4), strides=(4, 4), padding="same"),
-    ),
-    "model047_maxpool_inp1x10x10x4_pool5x5_stride5x5_same": sequential(
-        (10, 10, 4),
-        layers.MaxPooling2D(pool_size=(5, 5), strides=(5, 5), padding="same"),
-    ),
-    "model048_maxpool_inp1x10x10x4_pool5x5_stride1x1_same": sequential(
-        (10, 10, 4),
-        layers.MaxPooling2D(pool_size=(5, 5), strides=(5, 5), padding="same"),
-    ),
-    "model049_maxpool_inp1x10x10x4_pool1x3_stride1x1_same": sequential(
-        (10, 10, 4),
-        layers.MaxPooling2D(pool_size=(1, 3), strides=(1, 3), padding="same"),
-    ),
-    "model055_avgpool_inp1x10x10x4_pool2x2_stride2x2_valid": sequential(
-        (10, 10, 4),
-        layers.AveragePooling2D(pool_size=(2, 2), strides=(2, 2), padding="valid"),
-    ),
-    "model056_avgpool_inp1x100x100x1_pool2x2_stride2x2_valid": sequential(
-        (100, 100, 1),
-        layers.AveragePooling2D(pool_size=(2, 2), strides=(2, 2), padding="valid"),
-    ),
-    "model057_avgpool_inp1x100x100x4_pool2x2_stride2x2_valid": sequential(
-        (100, 100, 4),
-        layers.AveragePooling2D(pool_size=(2, 2), strides=(2, 2), padding="valid"),
-    ),
-    "model058_avgpool_inp1x134x158x5_pool2x2_stride2x2_valid": sequential(
-        (134, 158, 5),
-        layers.AveragePooling2D(pool_size=(2, 2), strides=(2, 2), padding="valid"),
-    ),
-    "model065_SmartAve_1x25x5x4": sequential(
-        (25, 5, 4),
-        layers.AveragePooling2D(pool_size=(25, 5), strides=(25, 5), padding="valid"),
-    ),
-    "model066_SmartAve_1x5x25x4": sequential(
-        (5, 25, 4),
-        layers.AveragePooling2D(pool_size=(5, 25), strides=(5, 25), padding="valid"),
-    ),
-    "model117_avgpool_valid_model70_L1": sequential(
-        (134, 158, 5),
-        layers.AveragePooling2D(pool_size=(2, 2), strides=(2, 2), padding="valid"),
-    ),
-    "model118_avgpool_valid_model70_L3": sequential(
-        (65, 77, 10),
-        layers.AveragePooling2D(pool_size=(2, 2), strides=(2, 2), padding="valid"),
-    ),
-    "model119_avgpool_valid_model70_L6": sequential(
-        (30, 36, 15),
-        layers.AveragePooling2D(pool_size=(2, 2), strides=(2, 2), padding="valid"),
-    ),
-}
+_POOLS = {"avgpool": layers.AveragePooling2D, "maxpool": layers.MaxPooling2D}
+
+# pool, pool size (h, w), strides (h, w), padding, input (H, W, C)
+_LAYERS = [
+    ("avgpool", (3, 3), (3, 3), "valid", (10, 10, 4)),
+    ("avgpool", (4, 4), (4, 4), "valid", (10, 10, 4)),
+    ("avgpool", (5, 5), (5, 5), "valid", (10, 10, 4)),
+    ("avgpool", (1, 3), (1, 3), "valid", (10, 10, 4)),
+    ("avgpool", (3, 3), (3, 3), "same", (10, 10, 4)),
+    ("avgpool", (4, 4), (4, 4), "same", (10, 10, 4)),
+    ("avgpool", (5, 5), (5, 5), "same", (10, 10, 4)),
+    ("avgpool", (1, 3), (1, 3), "same", (10, 10, 4)),
+    ("maxpool", (3, 3), (3, 3), "valid", (10, 10, 4)),
+    ("maxpool", (4, 4), (4, 4), "valid", (10, 10, 4)),
+    ("maxpool", (5, 5), (5, 5), "valid", (10, 10, 4)),
+    ("maxpool", (1, 3), (1, 3), "valid", (10, 10, 4)),
+    ("maxpool", (3, 3), (3, 3), "same", (10, 10, 4)),
+    ("maxpool", (4, 4), (4, 4), "same", (10, 10, 4)),
+    ("maxpool", (5, 5), (5, 5), "same", (10, 10, 4)),
+    ("maxpool", (1, 3), (1, 3), "same", (10, 10, 4)),
+    ("avgpool", (2, 2), (2, 2), "valid", (10, 10, 4)),
+    ("avgpool", (2, 2), (2, 2), "valid", (100, 100, 1)),
+    ("avgpool", (2, 2), (2, 2), "valid", (100, 100, 4)),
+    ("avgpool", (2, 2), (2, 2), "valid", (134, 158, 5)),
+    # a pool over the whole frame
+    ("avgpool", (25, 5), (25, 5), "valid", (25, 5, 4)),
+    ("avgpool", (5, 25), (5, 25), "valid", (5, 25, 4)),
+    # EMZA 70 layers
+    ("avgpool", (2, 2), (2, 2), "valid", (65, 77, 10)),
+    ("avgpool", (2, 2), (2, 2), "valid", (30, 36, 15)),
+]
+
+
+def _name(pool, size, strides, padding, shape):
+    h, w, c = shape
+    return f"{pool}_k{size[0]}x{size[1]}_s{strides[0]}x{strides[1]}_{padding}_{h}x{w}x{c}"
+
+
+CASES = {}
+for _layer in _LAYERS:
+    _key = _name(*_layer)
+    if _key in CASES:
+        raise ValueError(f"pooling: {_key} is listed twice")
+    _pool, _size, _strides, _padding, _shape = _layer
+    CASES[_key] = sequential(_shape, _POOLS[_pool](pool_size=_size, strides=_strides,
+                                                   padding=_padding))

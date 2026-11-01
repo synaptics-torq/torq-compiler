@@ -43,7 +43,7 @@ pytest test_keras_ops.py -m "depthwise and int8" --collect-only
 ## Available Markers
 
 **Operation Types:**
-one per family module in `tests/testdata/keras_ops/` (the module name): `add_mul_sub`, `conv`, `conv_transpose`, `depthwise`, `fc`, `mean`, `pointwise`, `pooling`, `resize`, `activation`, `softmax`, `transpose`, `emza70_conv2d`, `emza75_conv2d`, `mobilenetv2_conv2d`, `nnr301_conv2d`, `nnr301_convtranspose`, `audio_vision_depthwise`
+one per family module in `tests/testdata/keras_ops/` (the module name): `add_mul_sub`, `conv`, `conv_transpose`, `depthwise`, `fc`, `mean`, `pointwise`, `pooling`, `resize`, `activation`, `softmax`, `transpose`, `conv2d_layers`, `nnr301_convtranspose`, `audio_vision_depthwise`
 
 **Quantization:**
 `int8`, `int16`
