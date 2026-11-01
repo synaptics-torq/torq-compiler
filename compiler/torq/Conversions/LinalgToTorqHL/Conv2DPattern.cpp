@@ -254,7 +254,7 @@ static FailureOr<InterleaveConversion> convertToInterleaved(
 
     // Keep upsample border padding as fill+insert_slice when it is not a HW-legal
     // SAME pad (common for ConvTranspose output_padding). TorqHL conv stays VALID
-    // (pad=0) on the padded tensor. ValidToSamePad only peels when pads are legal.
+    // (pad=0) on the padded tensor. PrepareConvPoolKernelsPass only peels when pads are legal.
     bool needsPad = false;
     for (size_t i = 0; i < destShape.size(); ++i) {
         if (interleavedShape4D[i] != destShape[i] || staticOffsets[i] != 0)
@@ -514,8 +514,8 @@ static bool convImageIsPrePadded(Value image) {
 // A kernel taller than the width cap reaches the EK path only when the border is already in
 // memory and the stride is one that path takes.
 //
-// ValidToSamePadPass only reaches ops the pre-conversion already turned into torq_hl, so a conv
-// matched here has not been through it: a genuinely valid one arrives unpadded and
+// PrepareConvPoolKernelsPass only reaches ops the pre-conversion already turned into torq_hl, so a
+// conv matched here has not been through it: a genuinely valid one arrives unpadded and
 // convAdjustPadding aborts on pad.left != kernelBorder.left. A stride above 2 is refused by
 // hasEkLoweringConv, and there is no other lowering. Neither was reachable while the axes shared
 // one cap, and this stays dormant while the height cap equals the width cap.

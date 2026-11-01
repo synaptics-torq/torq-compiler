@@ -4,6 +4,11 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+// Prepares the conv2d, depthwise_conv2d and max_pool2d ops for their kernels, after tiling: gives
+// each op a padding the kernels support, then the weight layout and input segmentation they read
+// (ConvPoolKernelLayout.cpp).
+
+#include "ConvPoolKernelLayout.h"
 #include "PassesDetail.h"
 
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
@@ -26,7 +31,7 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
 
-#define DEBUG_TYPE "torq-valid-pad"
+#define DEBUG_TYPE "torq-prepare-conv-pool-kernels"
 
 namespace mlir::syna::torq {
 
@@ -165,6 +170,55 @@ bool chainHasInterleavedInsert(Value start, int maxDepth) {
     return false;
 }
 
+// Creates a copy of `op` that reads `input` with the padding `pads` into a new output of shape
+// `outShape`. `inputZp`, when given, replaces the input zero point (the padding value) of `op`.
+template <class TorqConvPoolOp>
+TorqConvPoolOp createWithPadding(
+    PatternRewriter &rewriter, TorqConvPoolOp op, Value input, ArrayRef<int64_t> pads,
+    ArrayRef<int64_t> outShape, std::optional<int32_t> inputZp = std::nullopt
+) {
+    Location loc = op.getLoc();
+    Type elemType = cast<RankedTensorType>(op.getInit().getType()).getElementType();
+    auto outType = RankedTensorType::get(outShape, elemType);
+    Value init = tensor::EmptyOp::create(rewriter, loc, outShape, elemType);
+    auto padAttr = rewriter.getDenseI64ArrayAttr(pads);
+    int32_t zp = inputZp.value_or(op.getInputZp());
+    if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
+        return TorqConvPoolOp::create(
+            rewriter, loc, outType, init, zp, op.getOutputMin(), op.getOutputMax(), op.getStride(),
+            padAttr, op.getKernel(), op.getWeights(), op.getScaleBias(), input
+        );
+    }
+    else {
+        return TorqConvPoolOp::create(
+            rewriter, loc, outType, init, zp, op.getWeightZp(), op.getOutputZp(), op.getOutputMin(),
+            op.getOutputMax(), op.getShiftFactor(), op.getGroups(), padAttr, op.getStride(),
+            op.getDilation(), op.getVectorizationMode(), op.getWeights(), op.getScaleBias(), input
+        );
+    }
+}
+
+// Where the original windows of an axis converted from VALID to SAME padding start on the SAME
+// padded op.
+//
+// `prepend` is the number of extra input elements to prepend so that the expanded SAME padding has
+// the window phase that `strideOffset` selects: for stride 2, (centre - leadPad) must have the same
+// parity as strideOffset, so XOR-ing the two and masking to 1 bit gives 0 (aligned) or 1 (one extra
+// element). E.g. 3x3 (centre 1), leadPad 1, strideOffset 1: ((1 - 1) ^ 1) & 1 = 1.
+//
+// `firstOutput` is the first output of the SAME padded op that is an output of the original op: the
+// original window starts at input (centre + prepend - leadPad), divided by the stride. E.g. 5x5
+// (centre 2), leadPad 0, prepend 1: (2 + 1 - 0) / 2 = 1, the first output is dropped.
+struct ValidAxisShift {
+    int64_t prepend;
+    int64_t firstOutput;
+};
+ValidAxisShift getValidAxisShift(int64_t ksize, int64_t leadPad, int64_t stride, int strideOffset) {
+    int64_t centre = (ksize - 1) / 2;
+    int64_t prepend = ((centre - leadPad) ^ strideOffset) & (stride - 1);
+    return {prepend, (centre + prepend - leadPad) / stride};
+}
+
 template <class TorqConvPoolOp>
 class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPoolOp> {
   public:
@@ -273,36 +327,10 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPool
         // this because both axes always share the same orientation.
         int stride_offset = computeStrideOffset(stride_h, ksize_h, ksize_w, pads);
 
-        int offsetH = 0, offsetW = 0;
-        int extractOffsetH = 0, extractOffsetW = 0;
+        int64_t extractOffsetH = 0, extractOffsetW = 0;
         if (has_valid_pad_h) {
-            int centre = (ksize_h - 1) / 2;
-
-            // offsetH: number of extra input rows to prepend at the top so that the expanded
-            // SAME padding aligns with the hardware's expected stride_offset parity.
-            //
-            // For stride=2, (centre - pad_top) must have the same parity as stride_offset.
-            // XOR-ing the difference with stride_offset and masking to 1 bit gives the
-            // misalignment: 0 = already aligned, 1 = one extra row needed at the top.
-            //
-            // Example — 3x3 (centre=1), pad_top=1, stride_offset=1:
-            //   ((1-1) ^ 1) & 1 = 1  →  insert 1 row at top, shifting pad from (1,0) to (2,0).
-            // Example — 5x5 (centre=2), pad_top=0, stride_offset=1:
-            //   ((2-0) ^ 1) & 1 = 1  →  insert 1 row at top, shifting pad from (0,2) to (1,2).
-            offsetH = ((centre - pads[LRTBDim::Top]) ^ stride_offset) & (stride_h - 1);
-
-            // extractOffsetH: the SAME-padded conv output includes extra leading rows produced
-            // by the expanded top padding. This is the index of the first output row that maps
-            // back to the original valid output, i.e., the number of output rows to skip.
-            //
-            // The correct output origin lies at input position (centre + offsetH - pad_top);
-            // dividing by stride gives the output row index.
-            //
-            // Example — 5x5 (centre=2), pad_top=0, offsetH=1:
-            //   (2+1-0)/2 = 1  →  skip the first output row; valid output begins at row 1.
-            // Example — 3x3 (centre=1), pad_top=1, offsetH=1 (new top pad becomes 2):
-            //   (1+1-1)/2 = 0  →  no rows to skip; valid output begins at row 0.
-            extractOffsetH = (centre + offsetH - pads[LRTBDim::Top]) / stride_h;
+            extractOffsetH =
+                getValidAxisShift(ksize_h, pads[LRTBDim::Top], stride_h, stride_offset).firstOutput;
 
             // Distribute total SAME padding symmetrically (half top, remainder bottom), then
             // swap if the W axis is already top/left-heavy to keep both axes consistent.
@@ -314,11 +342,9 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPool
         }
 
         if (has_valid_pad_w) {
-            int centre = (ksize_w - 1) / 2;
-            // Same parity-alignment logic as offsetH, applied to the W axis.
-            offsetW = ((centre - pads[LRTBDim::Left]) ^ stride_offset) & (stride_w - 1);
-            // Same output-origin calculation as extractOffsetH, applied to the W axis.
-            extractOffsetW = (centre + offsetW - pads[LRTBDim::Left]) / stride_w;
+            extractOffsetW =
+                getValidAxisShift(ksize_w, pads[LRTBDim::Left], stride_w, stride_offset)
+                    .firstOutput;
             // Distribute W SAME padding symmetrically, swap if H axis is top/left-heavy.
             newPads[LRTBDim::Left] = total_pad_w / 2;
             newPads[LRTBDim::Right] = total_pad_w - newPads[LRTBDim::Left];
@@ -352,33 +378,9 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPool
             return failure();
         }
 
-        auto new_output_type =
-            RankedTensorType::get(same_pad_conv_output_shape, output_type.getElementType());
-
-        // Create new SAME pad attribute
-        auto newPadAttr = rewriter.getDenseI64ArrayAttr(newPads);
         auto loc = op.getLoc();
-
-        auto ConvInit = tensor::EmptyOp::create(
-            rewriter, op.getLoc(), new_output_type.getShape(), new_output_type.getElementType()
-        );
-
-        TorqConvPoolOp samepadOp;
-        if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
-            samepadOp = TorqConvPoolOp::create(
-                rewriter, loc, new_output_type, ConvInit.getResult(), op.getInputZp(),
-                op.getOutputMin(), op.getOutputMax(), op.getStride(), newPadAttr, op.getKernel(),
-                op.getWeights(), op.getScaleBias(), op.getInput()
-            );
-        }
-        else {
-            samepadOp = TorqConvPoolOp::create(
-                rewriter, loc, new_output_type, ConvInit.getResult(), op.getInputZp(),
-                op.getWeightZp(), op.getOutputZp(), op.getOutputMin(), op.getOutputMax(),
-                op.getShiftFactor(), op.getGroups(), newPadAttr, op.getStride(), op.getDilation(),
-                op.getVectorizationMode(), op.getWeights(), op.getScaleBias(), op.getInput()
-            );
-        }
+        auto samepadOp =
+            createWithPadding(rewriter, op, op.getInput(), newPads, same_pad_conv_output_shape);
 
         // Extract slice offsets: only offset dimensions that were converted from VALID to SAME
         int64_t offset_h = has_valid_pad_h ? extractOffsetH : 0;
@@ -476,42 +478,11 @@ class ConvertConvValidToSamePadDirectPattern : public OpRewritePattern<TorqConvP
         auto output_type = llvm::dyn_cast<RankedTensorType>(op.getInit().getType());
         if (!output_type || !output_type.hasStaticShape())
             return failure();
-        auto output_shape = output_type.getShape();
-
-        SmallVector<int64_t, 4> new_output_shape = {
-            output_shape[NCHW::N], output_shape[NCHW::C], output_shape[NCHW::H],
-            output_shape[NCHW::W]
-        };
-
-        auto new_output_type =
-            RankedTensorType::get(new_output_shape, output_type.getElementType());
 
         SmallVector<int64_t, 4> newPads{new_pad_left, new_pad_right, new_pad_top, new_pad_bottom};
-        auto newPadAttr = rewriter.getDenseI64ArrayAttr(newPads);
-
         rewriter.setInsertionPoint(op);
-        auto loc = op.getLoc();
-
-        auto ConvInit = tensor::EmptyOp::create(
-            rewriter, loc, new_output_shape, new_output_type.getElementType()
-        );
-
-        TorqConvPoolOp samepadOp;
-        if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
-            samepadOp = TorqConvPoolOp::create(
-                rewriter, loc, new_output_type, ConvInit.getResult(), op.getInputZp(),
-                op.getOutputMin(), op.getOutputMax(), op.getStride(), newPadAttr, op.getKernel(),
-                op.getWeights(), op.getScaleBias(), sourceData
-            );
-        }
-        else {
-            samepadOp = TorqConvPoolOp::create(
-                rewriter, loc, new_output_type, ConvInit.getResult(), op.getInputZp(),
-                op.getWeightZp(), op.getOutputZp(), op.getOutputMin(), op.getOutputMax(),
-                op.getShiftFactor(), op.getGroups(), newPadAttr, op.getStride(), op.getDilation(),
-                op.getVectorizationMode(), op.getWeights(), op.getScaleBias(), sourceData
-            );
-        }
+        auto samepadOp =
+            createWithPadding(rewriter, op, sourceData, newPads, output_type.getShape());
 
         rewriter.replaceOp(op, samepadOp.getOutput());
         return success();
@@ -657,15 +628,9 @@ class EliminateTrailingConvRowPattern : public OpRewritePattern<TorqConvPoolOp> 
         auto inputShape = inputType.getShape();
         int32_t stride_h = op.getStride()[0];
 
-        int64_t kh = 1;
-        if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
-            kh = op.getKernel()[0];
-        }
-        else {
-            auto wt = llvm::cast<RankedTensorType>(op.getWeights().getType());
-            auto ws = wt.getShape();
-            kh = (wt.getRank() == 4) ? ws[2] : ws[1];
-        }
+        int64_t kh, kw;
+        if (failed(getConvPoolKernelSize(op, kh, kw)))
+            return failure();
 
         // Check: does reducing padB by 1 produce exactly targetH?
         int64_t newPadB = padB - 1;
@@ -675,32 +640,10 @@ class EliminateTrailingConvRowPattern : public OpRewritePattern<TorqConvPoolOp> 
 
         SmallVector<int64_t, 4> newPads(pads.begin(), pads.end());
         newPads[LRTBDim::Bottom] = newPadB;
-        auto newPadAttr = rewriter.getDenseI64ArrayAttr(newPads);
-
-        auto loc = op.getLoc();
-        auto outputElType = convOutType.getElementType();
         SmallVector<int64_t, 4> newOutShape = {
             convOutShape[NCHW::N], convOutShape[NCHW::C], targetH, convOutShape[NCHW::W]
         };
-        auto newOutType = RankedTensorType::get(newOutShape, outputElType);
-        auto newInit = tensor::EmptyOp::create(rewriter, loc, newOutShape, outputElType);
-
-        TorqConvPoolOp newOp;
-        if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
-            newOp = TorqConvPoolOp::create(
-                rewriter, loc, newOutType, newInit.getResult(), op.getInputZp(), op.getOutputMin(),
-                op.getOutputMax(), op.getStride(), newPadAttr, op.getKernel(), op.getWeights(),
-                op.getScaleBias(), op.getInput()
-            );
-        }
-        else {
-            newOp = TorqConvPoolOp::create(
-                rewriter, loc, newOutType, newInit.getResult(), op.getInputZp(), op.getWeightZp(),
-                op.getOutputZp(), op.getOutputMin(), op.getOutputMax(), op.getShiftFactor(),
-                op.getGroups(), newPadAttr, op.getStride(), op.getDilation(),
-                op.getVectorizationMode(), op.getWeights(), op.getScaleBias(), op.getInput()
-            );
-        }
+        auto newOp = createWithPadding(rewriter, op, op.getInput(), newPads, newOutShape);
 
         rewriter.replaceOp(extractSlice, newOp.getOutput());
         rewriter.eraseOp(op);
@@ -786,35 +729,7 @@ class EliminateRedundantConvPaddingPattern : public OpRewritePattern<TorqConvPoo
         if (destType != llvm::cast<RankedTensorType>(input.getType()))
             return failure();
 
-        auto convOutputType = llvm::cast<RankedTensorType>(op.getResult(0).getType());
-
-        SmallVector<int64_t, 4> newOutputShape = {
-            sourceShape[NCHW::N], sourceShape[NCHW::C], sourceShape[NCHW::H], sourceShape[NCHW::W]
-        };
-
-        auto newOutputType = RankedTensorType::get(newOutputShape, convOutputType.getElementType());
-        auto loc = op.getLoc();
-
-        auto newInit =
-            tensor::EmptyOp::create(rewriter, loc, newOutputShape, convOutputType.getElementType());
-
-        TorqConvPoolOp newOp;
-        if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
-            newOp = TorqConvPoolOp::create(
-                rewriter, loc, newOutputType, newInit.getResult(), op.getInputZp(),
-                op.getOutputMin(), op.getOutputMax(), op.getStride(), op.getPad(), op.getKernel(),
-                op.getWeights(), op.getScaleBias(), sourceData
-            );
-        }
-        else {
-            newOp = TorqConvPoolOp::create(
-                rewriter, loc, newOutputType, newInit.getResult(), op.getInputZp(),
-                op.getWeightZp(), op.getOutputZp(), op.getOutputMin(), op.getOutputMax(),
-                op.getShiftFactor(), op.getGroups(), op.getPadAttr(), op.getStride(),
-                op.getDilation(), op.getVectorizationMode(), op.getWeights(), op.getScaleBias(),
-                sourceData
-            );
-        }
+        auto newOp = createWithPadding(rewriter, op, sourceData, op.getPad(), sourceShape);
 
         // Update extract_slice if present
         if (auto extractSliceOp = getSingleUser<tensor::ExtractSliceOp>(op.getOutput())) {
@@ -977,26 +892,7 @@ class AlignEvenKernelStride2PaddingPattern : public OpRewritePattern<TorqConvPoo
             SmallVector<OpFoldResult>(4, rewriter.getIndexAttr(1))
         );
 
-        Type outElemType = outputType.getElementType();
-        auto newOutputType = RankedTensorType::get(newOutShape, outElemType);
-        Value newInit = tensor::EmptyOp::create(rewriter, loc, newOutShape, outElemType);
-        auto newPadsAttr = rewriter.getDenseI64ArrayAttr(newPads);
-        TorqConvPoolOp newOp;
-        if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
-            newOp = TorqConvPoolOp::create(
-                rewriter, loc, newOutputType, newInit, padValue, op.getOutputMin(),
-                op.getOutputMax(), op.getStride(), newPadsAttr, op.getKernel(), op.getWeights(),
-                op.getScaleBias(), newInput
-            );
-        }
-        else {
-            newOp = TorqConvPoolOp::create(
-                rewriter, loc, newOutputType, newInit, op.getInputZp(), op.getWeightZp(),
-                op.getOutputZp(), op.getOutputMin(), op.getOutputMax(), op.getShiftFactor(),
-                op.getGroups(), newPadsAttr, op.getStride(), op.getDilation(),
-                op.getVectorizationMode(), op.getWeights(), op.getScaleBias(), newInput
-            );
-        }
+        auto newOp = createWithPadding(rewriter, op, newInput, newPads, newOutShape, padValue);
         rewriter.replaceOpWithNewOp<tensor::ExtractSliceOp>(
             op, newOp.getOutput(), createVector(dropOffsets, rewriter),
             createVector({outShape[0], outShape[1], outShape[2], outShape[3]}, rewriter),
@@ -1060,8 +956,6 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
         auto loc = op.getLoc();
         auto elemType = inputType.getElementType();
 
-        int offsetH = 0, offsetW = 0;
-        int extractOffsetH = 0, extractOffsetW = 0;
         SmallVector<int64_t, 4> newPads(pads.begin(), pads.end());
 
         // This calculation always returns dominant bottom & right padding: (1, 2, 1, 2) for 5x5,
@@ -1099,20 +993,14 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
             }
         }
 
-        // A VALID conv is emulated on the SAME-padded (grown) buffer. Relative to the
-        // kernel centre, the original VALID window starts `centre - pad` samples in; the
-        // sub-stride phase of that start (mod stride, XOR stride_offset for interleave
-        // parity) is `offset`, and `extractOffset` is the index of the first SAME-conv
-        // output element that coincides with the VALID output (used by a later extract).
+        // A VALID conv is emulated on the SAME-padded (grown) buffer: the input is placed after
+        // `prepend` elements and the outputs from `firstOutput` on are the VALID outputs.
+        ValidAxisShift shiftH{0, 0}, shiftW{0, 0};
         if (validPadH) {
-            int centre = (kh - 1) / 2;
-            offsetH = ((centre - pads[LRTBDim::Top]) ^ stride_offset) & (strides[0] - 1);
-            extractOffsetH = (centre + offsetH - pads[LRTBDim::Top]) / strides[0];
+            shiftH = getValidAxisShift(kh, pads[LRTBDim::Top], strides[0], stride_offset);
         }
         if (validPadW) {
-            int centre = (kw - 1) / 2;
-            offsetW = ((centre - pads[LRTBDim::Left]) ^ stride_offset) & (strides[1] - 1);
-            extractOffsetW = (centre + offsetW - pads[LRTBDim::Left]) / strides[1];
+            shiftW = getValidAxisShift(kw, pads[LRTBDim::Left], strides[1], stride_offset);
         }
 
         SmallVector<int64_t, 4> convOutShape;
@@ -1135,8 +1023,8 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
         }
 
         SmallVector<OpFoldResult> offsets(4, rewriter.getIndexAttr(0));
-        offsets[NCHW::H] = rewriter.getIndexAttr(offsetH);
-        offsets[NCHW::W] = rewriter.getIndexAttr(offsetW);
+        offsets[NCHW::H] = rewriter.getIndexAttr(shiftH.prepend);
+        offsets[NCHW::W] = rewriter.getIndexAttr(shiftW.prepend);
         SmallVector<OpFoldResult> sizes;
         for (int64_t dim : shape)
             sizes.push_back(rewriter.getIndexAttr(dim));
@@ -1168,33 +1056,12 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
             SmallVector<OpFoldResult>(4, rewriter.getIndexAttr(1))
         );
 
-        auto outputElType = outputType.getElementType();
-        auto newOutputType = RankedTensorType::get(convOutShape, outputElType);
-        auto newInitTensor = tensor::EmptyOp::create(rewriter, loc, convOutShape, outputElType);
-        auto newPadsAttr = rewriter.getDenseI64ArrayAttr(newPads);
-        TorqConvPoolOp newOp;
-        if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
-            newOp = TorqConvPoolOp::create(
-                rewriter, loc, newOutputType, newInitTensor, op.getInputZp(), op.getOutputMin(),
-                op.getOutputMax(), op.getStride(), newPadsAttr, op.getKernel(), op.getWeights(),
-                op.getScaleBias(), insertOp
-            );
-        }
-        else {
-            newOp = TorqConvPoolOp::create(
-                rewriter, loc, newOutputType, newInitTensor, op.getInputZp(), op.getWeightZp(),
-                op.getOutputZp(), op.getOutputMin(), op.getOutputMax(), op.getShiftFactor(),
-                op.getGroups(), newPadsAttr, op.getStride(), op.getDilation(),
-                op.getVectorizationMode(), op.getWeights(), op.getScaleBias(), insertOp
-            );
-        }
+        auto newOp = createWithPadding(rewriter, op, insertOp, newPads, convOutShape);
 
         if (convertToSame) {
             rewriter.replaceOpWithNewOp<tensor::ExtractSliceOp>(
                 op, newOp.getOutput(),
-                createVector(
-                    {0, 0, validPadH ? extractOffsetH : 0, validPadW ? extractOffsetW : 0}, rewriter
-                ),
+                createVector({0, 0, shiftH.firstOutput, shiftW.firstOutput}, rewriter),
                 createVector(
                     {origOutShape[NCHW::N], origOutShape[NCHW::C], origOutShape[NCHW::H],
                      origOutShape[NCHW::W]},
@@ -1299,14 +1166,7 @@ class ConvertMixedPadPhasePoolPattern : public OpRewritePattern<torq_hl::MaxPool
             SmallVector<OpFoldResult>(4, rewriter.getIndexAttr(1))
         );
 
-        auto newOutputType = RankedTensorType::get(newOutShape, outputType.getElementType());
-        auto newInitTensor =
-            tensor::EmptyOp::create(rewriter, loc, newOutShape, outputType.getElementType());
-        auto newOp = torq_hl::MaxPool2dOp::create(
-            rewriter, loc, newOutputType, newInitTensor, op.getInputZp(), op.getOutputMin(),
-            op.getOutputMax(), op.getStride(), rewriter.getDenseI64ArrayAttr(newPads),
-            op.getKernel(), op.getWeights(), op.getScaleBias(), insertOp
-        );
+        auto newOp = createWithPadding(rewriter, op, insertOp, newPads, newOutShape);
 
         SmallVector<int64_t, 4> extractOffsets(4, 0);
         extractOffsets[axis] = extractOffset;
@@ -1327,77 +1187,70 @@ class ConvertMixedPadPhasePoolPattern : public OpRewritePattern<torq_hl::MaxPool
     }
 };
 
-class ValidToSamePadPass : public impl::ValidToSamePadPassBase<ValidToSamePadPass> {
+// Adds `Pattern<Conv2DOp>`, `Pattern<DepthwiseConv2DOp>` and `Pattern<MaxPool2dOp>`
+template <template <class> class Pattern> void addConvPoolPatterns(RewritePatternSet &patterns) {
+    MLIRContext *ctx = patterns.getContext();
+    patterns.add<Pattern<torq_hl::Conv2DOp>>(ctx);
+    patterns.add<Pattern<torq_hl::DepthwiseConv2DOp>>(ctx);
+    patterns.add<Pattern<torq_hl::MaxPool2dOp>>(ctx);
+}
+
+class PrepareConvPoolKernelsPass
+    : public impl::PrepareConvPoolKernelsBase<PrepareConvPoolKernelsPass> {
   public:
-    using ValidToSamePadPassBase<ValidToSamePadPass>::ValidToSamePadPassBase;
+    using PrepareConvPoolKernelsBase<PrepareConvPoolKernelsPass>::PrepareConvPoolKernelsBase;
     void runOnOperation() override;
 };
 
-void ValidToSamePadPass::runOnOperation() {
+void PrepareConvPoolKernelsPass::runOnOperation() {
     MLIRContext *ctx = getOperation().getContext();
 
-    // Phase 0: give the stride-2 ops with an even kernel the leading padding the kernels support
-    {
-        RewritePatternSet patterns(ctx);
-        patterns.add<AlignEvenKernelStride2PaddingPattern<torq_hl::Conv2DOp>>(ctx);
-        patterns.add<AlignEvenKernelStride2PaddingPattern<torq_hl::DepthwiseConv2DOp>>(ctx);
-        patterns.add<AlignEvenKernelStride2PaddingPattern<torq_hl::MaxPool2dOp>>(ctx);
+    auto applyPhase = [&](RewritePatternSet &&patterns, bool existingOpsOnly) {
         GreedyRewriteConfig cfg;
-        cfg.setStrictness(GreedyRewriteStrictness::ExistingOps);
-        if (failed(applyPatternsGreedily(getOperation(), std::move(patterns), cfg))) {
-            return signalPassFailure();
+        if (existingOpsOnly) {
+            cfg.setStrictness(GreedyRewriteStrictness::ExistingOps);
         }
+        return applyPatternsGreedily(getOperation(), std::move(patterns), cfg);
+    };
+
+    // Phase 0: give the stride-2 ops with an even kernel the leading padding the kernels support
+    RewritePatternSet alignPatterns(ctx);
+    addConvPoolPatterns<AlignEvenKernelStride2PaddingPattern>(alignPatterns);
+    if (failed(applyPhase(std::move(alignPatterns), /*existingOpsOnly=*/true))) {
+        return signalPassFailure();
     }
 
     // Phase 1: Apply odd-dimension stride fixing first (highest priority)
     // This ensures explicit padding is added for odd dimensions before other patterns run
-    {
-        RewritePatternSet oddDimPatterns(ctx);
-        oddDimPatterns.add<ConvertOddDimensionStrideConvPattern<torq_hl::Conv2DOp>>(ctx);
-        oddDimPatterns.add<ConvertOddDimensionStrideConvPattern<torq_hl::DepthwiseConv2DOp>>(ctx);
-        oddDimPatterns.add<ConvertOddDimensionStrideConvPattern<torq_hl::MaxPool2dOp>>(ctx);
-
-        GreedyRewriteConfig cfg;
-        cfg.setStrictness(GreedyRewriteStrictness::ExistingOps);
-        if (failed(applyPatternsGreedily(getOperation(), std::move(oddDimPatterns), cfg))) {
-            return signalPassFailure();
-        }
+    RewritePatternSet oddDimPatterns(ctx);
+    addConvPoolPatterns<ConvertOddDimensionStrideConvPattern>(oddDimPatterns);
+    if (failed(applyPhase(std::move(oddDimPatterns), /*existingOpsOnly=*/true))) {
+        return signalPassFailure();
     }
 
     // Phase 2: Apply other padding transformations after odd-dimension fixing is complete
-    {
-        RewritePatternSet patterns(ctx);
-        // Register patterns for Conv2DOp
-        patterns.add<ConvertConvValidToSamePadDirectPattern<torq_hl::Conv2DOp>>(ctx);
-        patterns.add<ConvertConvValidPadToSamePadPattern<torq_hl::Conv2DOp>>(ctx);
-        patterns.add<EliminateTrailingConvRowPattern<torq_hl::Conv2DOp>>(ctx);
-        patterns.add<EliminateRedundantConvPaddingPattern<torq_hl::Conv2DOp>>(ctx);
+    RewritePatternSet padPatterns(ctx);
+    padPatterns.add<ConvertMixedPadPhasePoolPattern>(ctx);
+    addConvPoolPatterns<ConvertConvValidToSamePadDirectPattern>(padPatterns);
+    addConvPoolPatterns<ConvertConvValidPadToSamePadPattern>(padPatterns);
+    addConvPoolPatterns<EliminateTrailingConvRowPattern>(padPatterns);
+    addConvPoolPatterns<EliminateRedundantConvPaddingPattern>(padPatterns);
+    if (failed(applyPhase(std::move(padPatterns), /*existingOpsOnly=*/true))) {
+        return signalPassFailure();
+    }
 
-        // Register patterns for DepthwiseConv2DOp
-        patterns.add<ConvertConvValidToSamePadDirectPattern<torq_hl::DepthwiseConv2DOp>>(ctx);
-        patterns.add<ConvertConvValidPadToSamePadPattern<torq_hl::DepthwiseConv2DOp>>(ctx);
-        patterns.add<EliminateTrailingConvRowPattern<torq_hl::DepthwiseConv2DOp>>(ctx);
-        patterns.add<EliminateRedundantConvPaddingPattern<torq_hl::DepthwiseConv2DOp>>(ctx);
-
-        // Register patterns for MaxPool2dOp
-        patterns.add<ConvertMixedPadPhasePoolPattern>(ctx);
-        patterns.add<ConvertConvValidToSamePadDirectPattern<torq_hl::MaxPool2dOp>>(ctx);
-        patterns.add<ConvertConvValidPadToSamePadPattern<torq_hl::MaxPool2dOp>>(ctx);
-        patterns.add<EliminateTrailingConvRowPattern<torq_hl::MaxPool2dOp>>(ctx);
-        patterns.add<EliminateRedundantConvPaddingPattern<torq_hl::MaxPool2dOp>>(ctx);
-
-        GreedyRewriteConfig cfg;
-        cfg.setStrictness(GreedyRewriteStrictness::ExistingOps);
-        if (failed(applyPatternsGreedily(getOperation(), std::move(patterns), cfg))) {
-            return signalPassFailure();
-        }
+    // Phase 3: the weight layout and input segmentation of the kernels, on the final padding
+    RewritePatternSet layoutPatterns(ctx);
+    populateConvPoolKernelLayoutPatterns(layoutPatterns);
+    if (failed(applyPhase(std::move(layoutPatterns), /*existingOpsOnly=*/false))) {
+        return signalPassFailure();
     }
 }
 
 } // namespace
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createValidToSamePadPass() {
-    return std::make_unique<ValidToSamePadPass>();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createPrepareConvPoolKernelsPass() {
+    return std::make_unique<PrepareConvPoolKernelsPass>();
 }
 
 } // namespace mlir::syna::torq

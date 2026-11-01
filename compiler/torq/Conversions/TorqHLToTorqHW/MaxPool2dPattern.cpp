@@ -397,9 +397,9 @@ static torq_hw::SliceTaskOp lowerMaxPool2DStride2ToHw(
 }
 
 // 1x1 stride-2 maxpool: a subsampling of the input. The input of a stride-2 maxpool is segmented in
-// 4 quadrants (even rows and columns first, see KernelSelectionPass and lowerMaxPool2DStride2ToHw),
-// so the result is the first quadrant of each channel: copy it. The stride-2 kernel doesn't support
-// 1x1 kernels (the NPU hangs).
+// 4 quadrants (even rows and columns first, see ConvPoolKernelLayout.cpp and
+// lowerMaxPool2DStride2ToHw), so the result is the first quadrant of each channel: copy it. The
+// stride-2 kernel doesn't support 1x1 kernels (the NPU hangs).
 static torq_hw::SliceTaskOp lowerMaxPool1x1Stride2ToHw(
     torq_hl::MaxPool2dOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset,
     int chCount
@@ -484,11 +484,12 @@ MaxPool2dPattern::transform(torq_hl::MaxPool2dOp op, PatternRewriter &rewriter) 
         else if (stride[0] == 2) {
             // A single stride_offset cannot encode different H and W window phases (e.g.
             // pad=[1,0,0,1] from H-tiling an odd-height pool) and would corrupt silently;
-            // ValidToSamePadPass normalizes these, so fail loudly if one slips through.
+            // PrepareConvPoolKernelsPass normalizes these, so fail loudly if one slips through.
             if ((pad[0] != (kernel[1] - 1) / 2) != (pad[2] != (kernel[0] - 1) / 2)) {
                 return op.emitError("stride-2 maxpool with mixed H/W pad phase (pad=[")
                        << pad[0] << "," << pad[1] << "," << pad[2] << "," << pad[3]
-                       << "]) is not lowerable; ValidToSamePadPass should have normalized it";
+                       << "]) is not lowerable; PrepareConvPoolKernelsPass should have normalized "
+                          "it";
             }
             LLVM_DEBUG(llvm::dbgs() << "Lowering MaxPool 2D stride-2 case\n");
             if (!(hwOp = lowerMaxPool2DStride2ToHw(op, rewriter, initValue, 0, outChCount))) {

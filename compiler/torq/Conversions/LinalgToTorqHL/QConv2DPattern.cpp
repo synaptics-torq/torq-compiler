@@ -236,7 +236,7 @@ std::vector<int64_t> applyQConvDilations(Operation *op, Value &weights, PatternR
 
 // True if the EK conv kernel can lower this conv once it is torq_hl.conv2d. Once an op is torq_hl
 // there is no fallback, so a conv refused here stays in linalg (CSS or host).
-// - strides equal and up to 2, or [SH, 1] (KernelSelection turns it into stride 1)
+// - strides equal and up to 2, or [SH, 1] (PrepareConvPoolKernelsPass turns it into stride 1)
 // - kernel up to the HW limit after dilation, or a 1D kernel of any width without dilation
 //   (isWideKernel1DValidConv)
 static bool isQConvLowerable(linalg::Conv2DNchwFchwQOp op) {

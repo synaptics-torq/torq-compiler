@@ -12,26 +12,29 @@
 
 ### Example
 
-Example with implementation details of the KernelSelectionPass.
+Example with implementation details of the NarrowFloatSelectPass.
 The complete set of code is available under *compiler/torq/Codegen*
 1. Create a copy of any pass available in the Passes.td.
-   Change the name of the pass to `KernelSelection` 
-   Change the first template argument of InterfacePass. The first argument of InterfacePass is the 
-   commandline argument used to identify the pass. Here changed the name to *torq-kernel-selection*
+   Change the name of the pass to `NarrowFloatSelect`
+   Change the first template argument of InterfacePass. The first argument of InterfacePass is the
+   commandline argument used to identify the pass. Here changed the name to *torq-narrow-float-select*
    Change summary to provide a brief summary of the pass.
-   Change the `constructor` to a custom construction name, here changed to *mlir::syna::torq::createKernelSelectionPass()*.
+   Change the `constructor` to a custom construction name, here changed to *mlir::syna::torq::createNarrowFloatSelectPass()*.
    Add the dependentDialects as needed.
    Refer [Passes.td](https://github.com/synaptics-torq/torq-compiler/blob/main/compiler/torq/Codegen/Passes.td)
-2. In Passes.h add declaration for the constructor we have named above. 
-   `std::unique_ptr<InterfacePass<FunctionOpInterface>> createKernelSelectionPass()`
-3. Add pass to the `TORQLowerExecutableTargetPass` inside the *TORQLowerExecutableTargetPass.cpp*  pipeline using `addPass` method.
-   Here `pipeline.addPass(createKernelSelectionPass())`
-4. Create the file `KernelSelectionPass.cpp` in the folder *compiler/torq/Codegen* 
-5. Define the ***KernelSelectionPass*** class in the file. It should inherit the *KernelSelectionBase* using CRTP
-   `class KernelSelectionPass : public KernelSelectionBase<KernelSelectionPass>`
-6. Define the `runOnOperation()` function. Refer 
-   [KernelSelectionPass](https://github.com/synaptics-torq/torq-compiler/blob/main/compiler/torq/Codegen/KernelSelectionPass.cpp) 
-7. Define the `createKernelSelectionPass()` constructor. It should return a unique_ptr to InterfacePass. 
-   Refer the *KernelSelectionPass.cpp* for more info.
-8. Define the pattern rewrite class as needed. Here the class name is `MaxPool2dKernelSelectionOp`. It inherits from *OpRewritePattern*.
-   Define its `matchAndRewrite()` function. Refer the `MaxPool2dKernelSelectionOp` class inside KernelSelectionPass.cpp.
+2. In Passes.h add declaration for the constructor we have named above.
+   `std::unique_ptr<InterfacePass<FunctionOpInterface>> createNarrowFloatSelectPass()`
+   In PassesDetail.h add `#define GEN_PASS_DEF_NARROWFLOATSELECT` to generate the base class of the pass.
+3. Add the pass to a pipeline using the `addPass` method, for example in *TORQLowerExecutableTargetPass.cpp*.
+   NarrowFloatSelect is added to the CPU program pipeline in *CompileCpuProgramsPass.cpp*.
+4. Create the file `NarrowFloatSelectPass.cpp` in the folder *compiler/torq/Codegen*
+5. Define the ***NarrowFloatSelectPass*** class in the file. It should inherit the generated
+   *impl::NarrowFloatSelectBase* using CRTP
+   `class NarrowFloatSelectPass : public impl::NarrowFloatSelectBase<NarrowFloatSelectPass>`
+6. Define the `runOnOperation()` function. Refer
+   [NarrowFloatSelectPass](https://github.com/synaptics-torq/torq-compiler/blob/main/compiler/torq/Codegen/NarrowFloatSelectPass.cpp)
+7. Define the `createNarrowFloatSelectPass()` constructor. It should return a unique_ptr to InterfacePass.
+   Refer the *NarrowFloatSelectPass.cpp* for more info.
+8. Define the pattern rewrite class as needed. Here the class name is `NarrowSelectOfExtF`. It inherits from *OpRewritePattern*.
+   Define its `matchAndRewrite()` function. Refer the `NarrowSelectOfExtF` class inside NarrowFloatSelectPass.cpp.
+9. Add `NarrowFloatSelectPass.cpp` to the source list in *compiler/torq/Codegen/CMakeLists.txt*.

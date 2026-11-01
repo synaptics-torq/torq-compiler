@@ -45,7 +45,7 @@ std::unique_ptr<OperationPass<func::FuncOp>> createConvertTensorPadToLinalgPass(
 
 std::unique_ptr<OperationPass<func::FuncOp>> createDecomposeTensorConcatPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createValidToSamePadPass();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createPrepareConvPoolKernelsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createCheckCssStackSizePass();
 
@@ -121,8 +121,6 @@ std::unique_ptr<InterfacePass<FunctionOpInterface>> createAddDeallocationPass();
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAnnotateDmaAndSliceCyclesPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createProfilingPass();
-
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createKernelSelectionPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createResolveAddressesPass();
 

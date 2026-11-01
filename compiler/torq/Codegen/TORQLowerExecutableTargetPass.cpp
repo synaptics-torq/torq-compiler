@@ -202,11 +202,8 @@ void addPostTileAndFuseLoweringPasses(
     // lower the linalg operators to torq_hl before tiling
     funcPm.addPass(createLinalgToTorqHLPreConversionPass());
 
-    // Handles valid pad operations
-    funcPm.addPass(createValidToSamePadPass());
-
-    funcPm.addPass(createCanonicalizerPass());
-    funcPm.addPass(createKernelSelectionPass());
+    // Padding, weight layout and input segmentation of the conv and pool kernels
+    funcPm.addPass(createPrepareConvPoolKernelsPass());
 
     funcPm.addPass(createCanonicalizerPass());
 

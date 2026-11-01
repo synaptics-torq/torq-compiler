@@ -61,16 +61,23 @@ def DecomposeTensorConcat
   ];
 }
 
-def ValidToSamePadPass
-    : InterfacePass<"torq-convert-conv-valid-to-same", "mlir::FunctionOpInterface"> {
+def PrepareConvPoolKernels
+    : InterfacePass<"torq-prepare-conv-pool-kernels", "mlir::FunctionOpInterface"> {
 
-  let summary = "Converts ops with VALID padding into SAME padding by inserting padding and slicing.";
-  
-  let constructor = "mlir::syna::torq::createValidToSamePadPass()";
+  let summary = "Prepares the conv2d, depthwise_conv2d and max_pool2d ops for their kernels.";
+  let description = [{
+    Runs after tiling, on the torq_hl ops of each tile. Gives each op a padding its kernel
+    supports (VALID to SAME padding, even inputs for stride 2, aligned window phases), adding
+    explicit padding and slicing where needed, then the weight layout and the input segmentation
+    the kernel reads.
+  }];
+
+  let constructor = "mlir::syna::torq::createPrepareConvPoolKernelsPass()";
 
   let dependentDialects = [
     "syna::torq_hl::TorqHLDialect",
-    "mlir::tensor::TensorDialect"
+    "mlir::tensor::TensorDialect",
+    "bufferization::BufferizationDialect"
   ];
 }
 
@@ -701,16 +708,6 @@ def Profiling:
         let constructor = "mlir::syna::torq::createProfilingPass()";
         let dependentDialects = [
             "syna::torq_hl::TorqHLDialect", "syna::torq_hw::TorqHWDialect"
-        ];
-}
-
-def KernelSelection :
-    InterfacePass<"torq-kernel-selection", "mlir::FunctionOpInterface"> {
-        let summary = "Kernel selection";
-        let constructor = "mlir::syna::torq::createKernelSelectionPass()";
-        let dependentDialects = [
-            "syna::torq_hl::TorqHLDialect",
-            "bufferization::BufferizationDialect"
         ];
 }
 

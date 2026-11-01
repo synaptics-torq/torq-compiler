@@ -4,7 +4,7 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "PassesDetail.h"
+#include "ConvPoolKernelLayout.h"
 
 #include "torq/Dialect/TorqHL/EncodingRequirements.h"
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
@@ -20,15 +20,14 @@
 
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
 
-#include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
-#include "mlir/Interfaces/FunctionInterfaces.h"
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
 
-#define DEBUG_TYPE "torq-kernel-selection"
+#define DEBUG_TYPE "torq-conv-pool-kernel-layout"
 
 namespace mlir::syna::torq {
 
@@ -158,21 +157,6 @@ static mlir::Value weights_OIHW_to_OIHWO(
         torq_hl::TransposeOp::create(rewriter, loc, transposedType, initTensor, permAttr, expanded);
 
     return createCompileTimeConstOp(transposeOp, rewriter).value_or(transposeOp.getOutput());
-}
-
-// FIXME: remove and use createI8Const from CoversionUtils.h
-arith::ConstantOp createI8Const2(
-    PatternRewriter &rewriter, Location loc, ArrayRef<char> values, llvm::ArrayRef<int64_t> shape
-) {
-    int64_t count = std::accumulate(shape.begin(), shape.end(), 1LL, std::multiplies<int64_t>());
-    assert(
-        static_cast<int64_t>(values.size()) == count &&
-        "Mismatch in number of elements vs tensor shape"
-    );
-
-    auto type = RankedTensorType::get(shape, rewriter.getI8Type());
-    auto attr = DenseIntElementsAttr::get(type, values);
-    return arith::ConstantOp::create(rewriter, loc, attr);
 }
 
 // Get the vectorization mode from the Op
@@ -382,7 +366,7 @@ static mlir::Value weights_ChHW_to_ChHW32(
     return createCompileTimeConstOp(res, rewriter).value_or(res.getResult());
 }
 
-template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePattern<ConvOpT> {
+template <typename ConvOpT> class ConvLikeKernelLayoutPattern : public OpRewritePattern<ConvOpT> {
   public:
     using OpRewritePattern<ConvOpT>::OpRewritePattern;
 
@@ -548,7 +532,7 @@ template <typename ConvOpT> class ConvLikeKernelSelection : public OpRewritePatt
     }
 };
 
-class MaxPool2dKernelSelectionOp : public OpRewritePattern<torq_hl::MaxPool2dOp> {
+class MaxPool2dSegmentationPattern : public OpRewritePattern<torq_hl::MaxPool2dOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
 
@@ -576,32 +560,13 @@ class MaxPool2dKernelSelectionOp : public OpRewritePattern<torq_hl::MaxPool2dOp>
     }
 };
 
-class KernelSelectionPass : public impl::KernelSelectionBase<KernelSelectionPass> {
-  public:
-    using KernelSelectionBase<KernelSelectionPass>::KernelSelectionBase;
-    void runOnOperation() override;
-};
-
-void KernelSelectionPass::runOnOperation() {
-    auto funcOp = getOperation();
-
-    MLIRContext *ctx = funcOp.getContext();
-
-    RewritePatternSet patterns(ctx);
-
-    patterns.add<ConvLikeKernelSelection<torq_hl::Conv2DOp>>(ctx);
-    patterns.add<ConvLikeKernelSelection<torq_hl::DepthwiseConv2DOp>>(ctx);
-    patterns.add<MaxPool2dKernelSelectionOp>(ctx);
-
-    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
-        return signalPassFailure();
-    }
-}
-
 } // namespace
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createKernelSelectionPass() {
-    return std::make_unique<KernelSelectionPass>();
+void populateConvPoolKernelLayoutPatterns(RewritePatternSet &patterns) {
+    MLIRContext *ctx = patterns.getContext();
+    patterns.add<ConvLikeKernelLayoutPattern<torq_hl::Conv2DOp>>(ctx);
+    patterns.add<ConvLikeKernelLayoutPattern<torq_hl::DepthwiseConv2DOp>>(ctx);
+    patterns.add<MaxPool2dSegmentationPattern>(ctx);
 }
 
 } // namespace mlir::syna::torq
