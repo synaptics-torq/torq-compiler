@@ -544,45 +544,100 @@ class JenkinsBoardsControl(BoardsControl):
         self._release_boards(build_id, general_result="pass", reason="Manually forced")
 
 
-    def release_boards(self, general_result="pass", reason="Boards no longer needed"):
+    def _cancel_queue_item(self, queue_item_url):
+        queue_id = queue_item_url.rstrip("/").split("/")[-1]
+        res = requests.post(f"{self.jenkins_url}/queue/cancelItem", params={"id": queue_id},
+                            auth=(self.user, self.token), allow_redirects=False)
+
+        # Jenkins typically returns 302 after a successful cancel
+        if res.status_code not in (200, 201, 202, 204, 302):
+            raise Exception(f"Failed to cancel queue item {queue_id}, status code: {res.status_code}, response: {res.text}")
+
+
+    def _stop_build(self, build_item_url):
+        res = requests.post(f"{build_item_url}stop", auth=(self.user, self.token), allow_redirects=False)
+
+        if res.status_code not in (200, 201, 202, 204, 302):
+            raise Exception(f"Failed to stop build {build_item_url}, status code: {res.status_code}, response: {res.text}")
+
+
+    def release_boards(self, general_result="pass", reason="Boards no longer needed", ready_timeout=120):
         """
         Release the boards by sending a request to Jenkins. This will allow the boards to be reused for future requests.
+
+        If the boards are not ready yet, the request is cancelled instead: a request still in the Jenkins
+        queue is removed from it, and a build that doesn't reach the release step within *ready_timeout*
+        seconds (boards still being set up) is stopped. Otherwise the request would keep the boards
+        until it times out, and block the requests queued after it.
 
         WARNING: this will release the boards even if they are currently in use, any connection will be terminated.
         """
 
-        # we can release only boards that are ready
-        build_failed = False
-        try:
-            self.wait_boards_ready()        
-        except BuildFailedException:
-            build_failed = True
-        
         with open(self.control_file, "a+") as f:
-            
+
             fcntl.flock(f, fcntl.LOCK_EX)
 
-            data = self._read_control_data_locked(f)                
+            data = self._read_control_data_locked(f)
 
-            if not build_failed:
+            try:
+                build_item_url = data.get("build_item_url")
 
-                if data.get("build_item_url") is None:
+                # the request may have started since we last checked
+                if build_item_url is None and data.get("queue_item_url") is not None:
+                    status = self._fetch_queue_item_status(data["queue_item_url"])
+                    if "executable" in status:
+                        build_item_url = status["executable"]["url"]
+                    else:
+                        self._cancel_queue_item(data["queue_item_url"])
+                        print("Boards request was still queued, cancelled it")
+
+                if build_item_url is not None:
+                    self._release_build(build_item_url, general_result, reason, ready_timeout)
+
+                elif data.get("queue_item_url") is None:
                     print("No build item URL found, cannot release boards")
+
+            finally:
+                if data.get("board_tmp_key_path"):
+                    try:
+                        shutil.rmtree(data["board_tmp_key_path"])  # clean up the temporary key pair
+                    except Exception as e:
+                        print(f"Failed to clean up temporary key pair at {data['board_tmp_key_path']}: {e}")
+
+                self._write_control_data_locked(f, {})  # clear the control file data
+
+
+    def _release_build(self, build_item_url, general_result, reason, ready_timeout):
+        """
+        Release the boards of a started build, or stop the build if it doesn't reach the release
+        step (WaitForGithubPytest) within *ready_timeout* seconds.
+        """
+
+        build_id = build_item_url.rstrip("/").split("/")[-1]
+        deadline = time.monotonic() + ready_timeout
+
+        while True:
+            try:
+                if not self._fetch_build_item_status(build_item_url).get("inProgress", False):
+                    print("Boards build is no longer running, nothing to release")
+                    return
+            except Exception as e:
+                print(f"Failed to fetch build status, trying to release anyway: {e}")
+
+            try:
+                self._release_boards(build_id, general_result, reason)
+                print("Board released successfully")
+                return
+            except Exception as e:
+                # the release step is not reached yet while the boards are being set up
+                if time.monotonic() >= deadline:
+                    print(f"Boards build did not reach the release step in {ready_timeout} s ({e}), stopping it")
+                    self._stop_build(build_item_url)
+                    print("Boards build stopped")
                     return
 
-                build_id = data["build_item_url"].rstrip("/").split("/")[-1]
+            time.sleep(10)
 
-                self._release_boards(build_id, general_result, reason)
-                
-                print("Board released successfully")
-
-            if data.get("board_tmp_key_path"):
-                try:
-                    shutil.rmtree(data["board_tmp_key_path"])  # clean up the temporary key pair
-                except Exception as e:
-                    print(f"Failed to clean up temporary key pair at {data['board_tmp_key_path']}: {e}")
-
-            self._write_control_data_locked(f, {})  # clear the control file data
 
     def connect_to_board(self, board_user, board_id, private_key_path=None, verbose=False):
         remote_address = self.get_remote_address(board_user, board_id)

@@ -67,7 +67,8 @@ jobs:
   test_aws_fpga:
     needs: [docker_image_fpga_tests, test_cmodel]
     name: Test with AWS FPGA
-    if: ${{ inputs.test_aws_fpga }}
+    # run also when the C model tests are skipped (skip-test-cmodel label), but not when they fail
+    if: ${{ !failure() && !cancelled() && inputs.test_aws_fpga }}
     uses: ./.github/workflows/test-aws-fpga.yml
     with:
       docker_image_fpga_tests_name: ${{ needs.docker_image_fpga_tests.outputs.image_name }}
@@ -78,7 +79,8 @@ jobs:
   test_astra_machina_sl:
     needs: [docker_image_tests, test_cmodel]
     name: Test with Astra Machina SL
-    if: ${{ inputs.test_astra_machina_sl }}
+    # run also when the C model tests are skipped (skip-test-cmodel label), but not when they fail
+    if: ${{ !failure() && !cancelled() && inputs.test_astra_machina_sl }}
     uses: ./.github/workflows/test-astra-machina-sl.yml
     with:
       docker_image_tests_name: ${{ needs.docker_image_tests.outputs.image_name }}
