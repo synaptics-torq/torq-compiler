@@ -1522,9 +1522,17 @@ static bool isPerTileSlice(tensor::ExtractSliceOp extract) {
 // read (for example the halves of a slice + concat that feed
 // tensor.insert_slice), inside or outside the tile loop; its size does not
 // change with the tile, so charging it can make every tile fail the probe.
+// A full-position probe also leaves a slice that a tensor.pad reads: the conv lowering folds
+// that pad into the conv's own padding only when it reads the slice, and an explicit pad of
+// the placeholder would make the probe allocate a padded copy of the input that the real
+// compile never has.
 static void chargeLiveActivationSlices(func::FuncOp funcOp, bool preserveDynamicSizes) {
     OpBuilder builder(funcOp.getContext());
     for (tensor::ExtractSliceOp extract : keepInnermostSlices(findPayloadSlices(funcOp))) {
+        if (preserveDynamicSizes && llvm::any_of(extract->getUsers(), [](Operation *user) {
+                return isa<tensor::PadOp>(user);
+            }))
+            continue;
         if (isPerTileSlice(extract))
             chargeSliceInLram(builder, extract, preserveDynamicSizes);
     }
