@@ -4,9 +4,6 @@ Each case name says what it tests: kernel, strides, padding, input shape (H x W 
 channels and the activation after the conv, e.g. conv2d_k3x3_s2x2_same_24x32x1_oc4_relu6.
 """
 
-from functools import partial
-
-from tests.models.keras_models import build_conv_model, conv_model_params
 from torq.testing.keras_builder import layers, sequential, conv2d
 
 _ACTIVATIONS = {"relu": lambda: layers.ReLU(), "relu6": lambda: layers.ReLU(6.0)}
@@ -54,6 +51,13 @@ _CONVS_ACT = [
 # two "same" convs with 2 output channels on a 4x4x2 input, each followed by ReLU: the kernels
 _TWO_CONVS = [((3, 3), (2, 2)), ((3, 3), (3, 3)), ((2, 2), (3, 3))]
 
+# int8 only, with the weights of seed 21321: the two default convs of the opt-in conv sweep
+# (tests/test_conv_sweep.py)
+_SWEEP_CONVS = [
+    ((12, 12, 64), 5, (1, 1), (1, 1), "same"),
+    ((100, 100, 4), 5, (6, 6), (1, 1), "same"),
+]
+
 
 def _name(shape, filters, kernel, strides, padding, after=""):
     h, w, c = shape
@@ -90,9 +94,9 @@ for *_c, _act in _CONVS_ACT:
 for _k1, _k2 in _TWO_CONVS:
     _add(_name((4, 4, 2), 2, _k1, (1, 1), "same", f"_relu_then_k{_k2[0]}x{_k2[1]}_relu"),
          _two_convs(_k1, _k2))
-# The conv_model of test_conv_sweep, with the two default parameter sets.
-for _p in conv_model_params:
-    _add(f"conv_model_{_p.idfn()}", partial(build_conv_model, _p))
-
-# A string quantize gives a single case with no _int8/_int16 suffix.
-CONFIG = {f"conv_model_{p.idfn()}": {"quantize": "int8"} for p in conv_model_params}
+CONFIG = {}
+for _shape, _filters, _kernel, _strides, _padding in _SWEEP_CONVS:
+    _key = _name(_shape, _filters, _kernel, _strides, _padding, "_seed21321")
+    _add(_key, sequential(_shape, layers.Conv2D(filters=_filters, kernel_size=_kernel,
+                                                strides=_strides, padding=_padding), seed=21321))
+    CONFIG[_key] = {"quantize": ("int8",)}

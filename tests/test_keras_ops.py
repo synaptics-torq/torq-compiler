@@ -26,7 +26,6 @@ def case_config(request, runtime_hw_type, chip_config):
     cfg = {
         "_case": data,
         "keras_model": "keras_ops_model",
-        "keras_model_params": {},
         "mlir_model_file": "tflite_mlir_model_file",
         "tflite_model_file": "quantized_tflite_model_file",
         "input_data": "tweaked_random_input_data",
