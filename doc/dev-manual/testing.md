@@ -102,6 +102,16 @@ It is also possible to run all tests associated with a issue:
 pytest --issue synaptics-torq/torq-compiler#1387  --recompute-cache
 ``` 
 
+An entry whose test case no longer exists (renamed or removed) is stale. The C model CI job
+runs with `--check-xfails`, which fails the collection when an entry of a collected test
+function matches no test case. Entries are compared without their runtime and chip ids, so
+an entry for `aws_fpga` or for another chip group is not reported by a run on `sim` or on one
+chip group. To check locally:
+
+```
+pytest tests/test_module.py -m ci --check-xfails --collect-only
+```
+
 It is possible to automatically update the xfail files based
 on the results of tests. To do so you can first create a report of the 
 execution of tests with the following command:

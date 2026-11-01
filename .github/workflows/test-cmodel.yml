@@ -68,7 +68,7 @@ jobs:
           extra_repo: ${{ vars.EXTRAS_REPO }}
           hf_token: ${{ secrets.HF_TOKEN }}
           pytest_args: >-
-            -m ci -n 18 --dist worksteal --show-capture=no --tb=short
+            -m ci -n 18 --dist worksteal --show-capture=no --tb=short --check-xfails
             --torq-chips ${{ matrix.chip_group }}
             --tflite-layer-test-generate-full-model-only
             --ignore-binary-mtime

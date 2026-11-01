@@ -2,10 +2,23 @@
 This module provides xfail utilities
 """
 
+import re
 from pathlib import Path
 
 import pytest
 from dataclasses import dataclass
+
+# The runtime and chip ids at the end of a test id: test_x[case-sim-sl2610-v1]
+_RUNTIME_CHIP_IDS = re.compile(
+    r"-(?:sim|aws_fpga|soc_fpga|astra_machina)-[a-z0-9_]+-(?:v\d+|latest)\]$")
+
+
+def _case_key(test_name: str) -> str:
+    """The test name without its runtime and chip ids.
+
+    For example test_x[case-sim-sl2610-v1] -> test_x[case].
+    """
+    return _RUNTIME_CHIP_IDS.sub("]", test_name)
 
 
 @dataclass
@@ -185,6 +198,22 @@ def pytest_addoption(parser):
         default=None,
         help="Run only tests related to the specified issue (e.g., --issue=1234)"
     )
+    parser.addoption(
+        "--check-xfails",
+        action="store_true",
+        default=False,
+        help="Fail when an entry of the -xfails.txt file of a collected test function matches no "
+             "test case, on any runtime or chip",
+    )
+
+
+_collected_key = pytest.StashKey[set]()
+
+
+def pytest_deselected(items):
+    # deselected tests (-m, -k) still exist: --check-xfails must not report their entries
+    if items:
+        items[0].config.stash.setdefault(_collected_key, set()).update(i.nodeid for i in items)
 
 
 def pytest_configure(config):
@@ -242,4 +271,33 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         if issue:
             item.add_marker(pytest.mark.issue(issue))
             item.user_properties.append(("issue", issue))
+
+    if config.getoption("--check-xfails", default=False):
+        nodeids = config.stash.get(_collected_key, set()) | {item.nodeid for item in items}
+        _check_xfails(nodeids)
+
+
+def _check_xfails(nodeids):
+    """Raise when an xfail entry of a collected test function matches none of the nodeids.
+
+    Entries are compared without their runtime and chip ids, so an entry for aws_fpga or another
+    chip group is not reported by a run on sim or on one chip group.
+    """
+    cases = {}  # module -> test function -> case keys
+    for nodeid in nodeids:
+        module, test_name = nodeid.split("::", 1)
+        cases.setdefault(module, {}).setdefault(test_name.split("[", 1)[0], set()).add(
+            _case_key(test_name))
+
+    stale = []
+    for module, functions in sorted(cases.items()):
+        for entry in load_xfails(module).values():
+            function = entry.test_name.split("[", 1)[0]
+            if function in functions and _case_key(entry.test_name) not in functions[function]:
+                stale.append(f"{module}: {entry.test_name}")
+
+    if stale:
+        raise pytest.UsageError(
+            f"{len(stale)} xfail entries match no test case (remove them from the -xfails.txt "
+            "files):\n  " + "\n  ".join(stale))
 
