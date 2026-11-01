@@ -314,24 +314,6 @@ static mlir::Value weights_swap_even_odd(
     return createCompileTimeConstOp(res, rewriter).value_or(res.getResult());
 }
 
-// Insert a dimension of size 1 at the specified position
-static mlir::Value
-weights_insert_dimension(PatternRewriter &rewriter, Location loc, Value weights, int insertDim) {
-    auto wtRankedTy = dyn_cast<RankedTensorType>(weights.getType());
-    SmallVector<int64_t> shape(wtRankedTy.getShape());
-    const int rank = shape.size();
-    assert(insertDim <= rank && "weight insert dimension: insertDim exceeds rank\n");
-    SmallVector<ReassociationIndices> reassoc;
-    for (int i = 0; i < rank + 1; ++i) {
-        reassoc.push_back({i <= insertDim ? i : i - 1});
-    }
-    SmallVector<int64_t> newShape = shape;
-    newShape.insert(newShape.begin() + insertDim, 1);
-    auto newTy = RankedTensorType::get(newShape, wtRankedTy.getElementType());
-    auto res = tensor::ExpandShapeOp::create(rewriter, loc, newTy, weights, reassoc);
-    return createCompileTimeConstOp(res, rewriter).value_or(res.getResult());
-}
-
 // Pack depthwise 1D weights from [Ch, Kh, Kw] to [(Ch/32), Kh, Kw, 32]
 // Used for depthwise 1D stride=1 special case
 static mlir::Value weights_ChHW_to_ChHW32(

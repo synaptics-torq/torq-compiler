@@ -254,7 +254,7 @@ static FailureOr<InterleaveConversion> convertToInterleaved(
 
     // Keep upsample border padding as fill+insert_slice when it is not a HW-legal
     // SAME pad (common for ConvTranspose output_padding). TorqHL conv stays VALID
-    // (pad=0) on the padded tensor. PrepareConvPoolKernelsPass only peels when pads are legal.
+    // (pad=0) on the padded tensor; PrepareConvPoolKernelsPass then converts it to SAME padding.
     bool needsPad = false;
     for (size_t i = 0; i < destShape.size(); ++i) {
         if (interleavedShape4D[i] != destShape[i] || staticOffsets[i] != 0)

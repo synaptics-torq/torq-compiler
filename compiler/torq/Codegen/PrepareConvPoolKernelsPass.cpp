@@ -24,7 +24,6 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
-#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/STLExtras.h"
@@ -91,8 +90,8 @@ bool isValid1DStride2Conv(
 }
 
 // Extracts the H/W kernel size for a conv/pool op: MaxPool from its kernel attribute,
-// Conv2D from rank-4 weights [out_ch, in_ch, kh, kw], DepthwiseConv2D from rank-3
-// weights [ch, kh, kw]. Returns failure for unexpected weight ranks.
+// Conv2D and DepthwiseConv2D from rank-4 weights [out_ch, in_ch, kh, kw]. Returns failure for
+// other weight ranks.
 template <class TorqConvPoolOp>
 LogicalResult getConvPoolKernelSize(TorqConvPoolOp op, int64_t &ksizeH, int64_t &ksizeW) {
     if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
@@ -108,11 +107,6 @@ LogicalResult getConvPoolKernelSize(TorqConvPoolOp op, int64_t &ksizeH, int64_t 
         if (weightType.getRank() == 4) {
             ksizeH = weightShape[2];
             ksizeW = weightShape[3];
-            return success();
-        }
-        if (weightType.getRank() == 3) {
-            ksizeH = weightShape[1];
-            ksizeW = weightShape[2];
             return success();
         }
         return failure();
@@ -144,30 +138,6 @@ int64_t totalSamePad(int64_t stride, int64_t ksize, int64_t inExtent) {
         return ksize - 1;
     int64_t out = (inExtent + stride - 1) / stride;
     return std::max((out - 1) * stride + ksize - inExtent, int64_t(0));
-}
-
-// Walks up to maxDepth defining ops from `start` and reports whether an InterleavedInsertOp is
-// reached. Follows the data producer at each step: for a destination-style op operand(0) is the
-// init/destination, so its first DPS input is used instead of blindly taking operand(0).
-bool chainHasInterleavedInsert(Value start, int maxDepth) {
-    Value current = start;
-    for (int i = 0; i < maxDepth && current; ++i) {
-        Operation *def = current.getDefiningOp();
-        if (!def)
-            break;
-        if (isa<torq_hl::InterleavedInsertOp>(def))
-            return true;
-        if (auto dps = dyn_cast<DestinationStyleOpInterface>(def)) {
-            if (dps.getNumDpsInputs() == 0)
-                break;
-            current = dps.getDpsInputOperand(0)->get();
-            continue;
-        }
-        if (def->getNumOperands() == 0)
-            break;
-        current = def->getOperand(0);
-    }
-    return false;
 }
 
 // Creates a copy of `op` that reads `input` with the padding `pads` into a new output of shape
@@ -254,17 +224,6 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPool
         if (ksize_h < 1 || ksize_w < 1 || ksize_h > HwInfo::nss_max_kernel_height ||
             ksize_w > HwInfo::nss_max_kernel_width)
             return failure();
-
-        // Skip only when the conv input is directly interleaved_insert.
-        // DirectPattern converts that case. When interleaved sits under an
-        // insert_slice border (ConvTranspose upsample + output_padding), this
-        // generic SAME rewrite on the padded tensor is required: it yields
-        // EK-legal pads (e.g. [0,1,2,2]) plus extract_slice. Peeling the border
-        // into attrs as [1,1,...] is not EK-legal for even kw and breaks NDL.
-        if (ksize_w <= 7 && ksize_h <= 7) {
-            if (isa_and_nonnull<torq_hl::InterleavedInsertOp>(op.getInput().getDefiningOp()))
-                return failure();
-        }
 
         auto output_type = llvm::dyn_cast<RankedTensorType>(op.getInit().getType());
         if (!output_type || !output_type.hasStaticShape())
@@ -402,163 +361,6 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPool
     }
 };
 
-// Convert VALID padding to hardware SAME padding when interleaved_insert is present.
-// Handles both cases:
-//   1. Direct: interleaved_insert -> conv (prevents explicit padding creation)
-//   2. Cleanup: interleaved_insert -> fill+insert_slice -> conv (removes explicit padding)
-// Only applies within the per-axis kernel caps.
-template <class TorqConvPoolOp>
-class ConvertConvValidToSamePadDirectPattern : public OpRewritePattern<TorqConvPoolOp> {
-  public:
-    using OpRewritePattern<TorqConvPoolOp>::OpRewritePattern;
-
-    LogicalResult matchAndRewrite(TorqConvPoolOp op, PatternRewriter &rewriter) const override {
-
-        auto inputType = llvm::cast<RankedTensorType>(op.getInput().getType());
-        if (!inputType)
-            return failure();
-
-        auto input_shape = inputType.getShape();
-        if (input_shape.size() != 4 || !inputType.hasStaticShape())
-            return failure();
-
-        int64_t ksize_h, ksize_w;
-        if (failed(getConvPoolKernelSize(op, ksize_h, ksize_w)))
-            return failure();
-
-        if (ksize_h > HwInfo::nss_max_kernel_height || ksize_w > HwInfo::nss_max_kernel_width)
-            return failure();
-
-        int32_t stride_h = op.getStride()[0];
-        int32_t stride_w = op.getStride()[1];
-
-        int32_t pad_left = op.getPad()[LRTBDim::Left];
-        int32_t pad_right = op.getPad()[LRTBDim::Right];
-        int32_t pad_top = op.getPad()[LRTBDim::Top];
-        int32_t pad_bottom = op.getPad()[LRTBDim::Bottom];
-
-        if (!(pad_top == 0 && pad_left == 0 && pad_right == 0 && pad_bottom == 0 && ksize_h > 1 &&
-              ksize_w > 1))
-            return failure();
-
-        BorderPeel peel;
-        if (failed(
-                tryPeelConvTransposeBorder(op, rewriter, ksize_h, ksize_w, stride_h, stride_w, peel)
-            ))
-            return failure();
-
-        // Without a peelable border the conv input chain must still originate from an
-        // interleaved_insert for this pattern to apply.
-        Value sourceData = peel.peeled ? peel.sourceData : op.getInput();
-        if (!peel.peeled && !chainHasInterleavedInsert(sourceData, 5))
-            return failure();
-
-        int64_t new_pad_top, new_pad_bottom, new_pad_left, new_pad_right;
-        if (peel.peeled) {
-            new_pad_top = peel.padTop;
-            new_pad_bottom = peel.padBottom;
-            new_pad_left = peel.padLeft;
-            new_pad_right = peel.padRight;
-        }
-        else {
-            // DirectPattern only supports stride 1 and 2.
-            if ((stride_h != 1 && stride_h != 2) || (stride_w != 1 && stride_w != 2))
-                return failure();
-            int64_t total_pad_h = totalSamePad(stride_h, ksize_h, input_shape[NCHW::H]);
-            int64_t total_pad_w = totalSamePad(stride_w, ksize_w, input_shape[NCHW::W]);
-            if (total_pad_h == 0 && total_pad_w == 0)
-                return failure();
-
-            new_pad_top = total_pad_h / 2;
-            new_pad_bottom = total_pad_h - new_pad_top;
-            new_pad_left = total_pad_w / 2;
-            new_pad_right = total_pad_w - new_pad_left;
-        }
-
-        auto output_type = llvm::dyn_cast<RankedTensorType>(op.getInit().getType());
-        if (!output_type || !output_type.hasStaticShape())
-            return failure();
-
-        SmallVector<int64_t, 4> newPads{new_pad_left, new_pad_right, new_pad_top, new_pad_bottom};
-        rewriter.setInsertionPoint(op);
-        auto samepadOp =
-            createWithPadding(rewriter, op, sourceData, newPads, output_type.getShape());
-
-        rewriter.replaceOp(op, samepadOp.getOutput());
-        return success();
-    }
-
-  private:
-    struct BorderPeel {
-        Value sourceData;
-        int64_t padTop = 0, padBottom = 0, padLeft = 0, padRight = 0;
-        bool peeled = false;
-    };
-
-    // ConvTranspose upsample produces interleaved_insert -> insert_slice into a zero border (the
-    // fill may already be outlined to a block arg). When that border is EK-legal (symmetric(k) or
-    // swapped in W, and within kernel extent in H) it is peeled into TorqHL pad attributes and
-    // returned via `out` (out.peeled == true). Borders that are present but not EK-legal, or whose
-    // pads do not reproduce the conv output shape, are rejected with failure() so the generic SAME
-    // pattern can rewrite them on the padded tensor instead. When there is no peelable insert
-    // border, success() is returned with out.peeled == false.
-    LogicalResult tryPeelConvTransposeBorder(
-        TorqConvPoolOp op, PatternRewriter &rewriter, int64_t ksize_h, int64_t ksize_w,
-        int32_t stride_h, int32_t stride_w, BorderPeel &out
-    ) const {
-        auto insertSlice = op.getInput().template getDefiningOp<tensor::InsertSliceOp>();
-        if (!insertSlice)
-            return success();
-
-        auto offsets = insertSlice.getStaticOffsets();
-        auto destShape = cast<RankedTensorType>(insertSlice.getDest().getType()).getShape();
-        auto srcType = dyn_cast<RankedTensorType>(insertSlice.getSource().getType());
-        if (offsets.size() != 4 || !srcType || srcType.getRank() != 4 ||
-            ShapedType::isDynamicShape(offsets))
-            return success();
-
-        auto srcShape = srcType.getShape();
-        int64_t top = offsets[NCHW::H];
-        int64_t left = offsets[NCHW::W];
-        int64_t bottom = destShape[NCHW::H] - offsets[NCHW::H] - srcShape[NCHW::H];
-        int64_t right = destShape[NCHW::W] - offsets[NCHW::W] - srcShape[NCHW::W];
-        if (bottom < 0 || right < 0)
-            return success();
-
-        if (!chainHasInterleavedInsert(insertSlice.getSource(), 5))
-            return success();
-
-        auto outTy = cast<RankedTensorType>(op.getInit().getType());
-        auto outShape = outTy.getShape();
-        int64_t expectH = (srcShape[NCHW::H] + top + bottom - ksize_h) / stride_h + 1;
-        int64_t expectW = (srcShape[NCHW::W] + left + right - ksize_w) / stride_w + 1;
-        if (expectH != outShape[NCHW::H] || expectW != outShape[NCHW::W]) {
-            return rewriter.notifyMatchFailure(
-                op, "insert border pads do not reproduce conv output shape"
-            );
-        }
-
-        int64_t kernLeft = (ksize_w - 1) / 2;
-        int64_t kernRight = ksize_w - kernLeft - 1;
-        int64_t kernTop = (ksize_h - 1) / 2;
-        int64_t kernBottom = ksize_h - kernTop - 1;
-        bool wOk =
-            (left == kernLeft && right == kernRight) || (left == kernRight && right == kernLeft);
-        bool hOk = top <= kernTop && bottom <= kernBottom;
-        // Border not EK-legal — defer to generic SAME on the padded tensor.
-        if (!wOk || !hOk)
-            return failure();
-
-        out.sourceData = insertSlice.getSource();
-        out.peeled = true;
-        out.padTop = top;
-        out.padBottom = bottom;
-        out.padLeft = left;
-        out.padRight = right;
-        return success();
-    }
-};
-
 // Clean up the one-extra-row artifact created by ConvertOddDimensionStrideConvPattern.
 // Phase 1 pads an odd-H input to even, then converts to SAME padding which inflates the
 // output H by 1 (e.g. H=58 becomes H=59). It then adds an extract_slice to trim back.
@@ -647,119 +449,6 @@ class EliminateTrailingConvRowPattern : public OpRewritePattern<TorqConvPoolOp> 
 
         rewriter.replaceOp(extractSlice, newOp.getOutput());
         rewriter.eraseOp(op);
-        return success();
-    }
-};
-
-// Remove redundant explicit padding when conv already has matching SAME padding.
-template <class TorqConvPoolOp>
-class EliminateRedundantConvPaddingPattern : public OpRewritePattern<TorqConvPoolOp> {
-  public:
-    using OpRewritePattern<TorqConvPoolOp>::OpRewritePattern;
-
-    LogicalResult matchAndRewrite(TorqConvPoolOp op, PatternRewriter &rewriter) const override {
-
-        auto input = op.getInput();
-
-        auto insertSliceOp = input.template getDefiningOp<tensor::InsertSliceOp>();
-        if (!insertSliceOp)
-            return failure();
-
-        auto fillOp = insertSliceOp.getDest().template getDefiningOp<linalg::FillOp>();
-        if (!fillOp)
-            return failure();
-
-        auto sourceData = insertSliceOp.getSource();
-        auto sourceType = llvm::cast<RankedTensorType>(sourceData.getType());
-        auto destType = llvm::cast<RankedTensorType>(insertSliceOp.getType());
-
-        if (!sourceType || !destType || sourceType.getRank() != 4 || destType.getRank() != 4)
-            return failure();
-
-        auto sourceShape = sourceType.getShape();
-        auto destShape = destType.getShape();
-
-        auto weightType = llvm::cast<RankedTensorType>(op.getWeights().getType());
-        if (!weightType || weightType.getRank() != 4)
-            return failure();
-
-        auto weightShape = weightType.getShape();
-        const int64_t ksize_h = weightShape[2];
-        const int64_t ksize_w = weightShape[3];
-
-        if (ksize_h > HwInfo::nss_max_kernel_height || ksize_w > HwInfo::nss_max_kernel_width)
-            return failure();
-
-        auto offsets = insertSliceOp.getMixedOffsets();
-        if (offsets.size() != 4)
-            return failure();
-
-        SmallVector<int64_t, 4> offsetValues;
-        for (auto offset : offsets) {
-            if (auto val = getConstantIntValue(offset))
-                offsetValues.push_back(*val);
-            else
-                return failure();
-        }
-
-        // Prevent the pattern from triggering on unsupported stride-2 cases
-        bool rank4 = sourceType && destType && sourceType.getRank() == 4 && destType.getRank() == 4;
-        if (!rank4 || op.getStride()[0] != 1 || op.getStride()[1] != 1)
-            return failure();
-
-        // Verify padding only in height dimension: offsets = [0, 0, pad_top, 0]
-        int64_t pad_top = offsetValues[NCHW::H];
-        int64_t pad_bottom = destShape[NCHW::H] - sourceShape[NCHW::H] - pad_top;
-        if (pad_bottom < 0)
-            return failure();
-
-        if (destShape[NCHW::W] != sourceShape[NCHW::W])
-            return failure();
-
-        auto padAttr = op.getPad();
-        if (padAttr.size() != 4)
-            return failure();
-
-        int64_t conv_pad_top = padAttr[LRTBDim::Top];
-        int64_t conv_pad_bottom = padAttr[LRTBDim::Bottom];
-
-        if (conv_pad_top != pad_top || conv_pad_bottom != pad_bottom)
-            return failure();
-
-        if (destType != llvm::cast<RankedTensorType>(input.getType()))
-            return failure();
-
-        auto newOp = createWithPadding(rewriter, op, sourceData, op.getPad(), sourceShape);
-
-        // Update extract_slice if present
-        if (auto extractSliceOp = getSingleUser<tensor::ExtractSliceOp>(op.getOutput())) {
-            auto extractOffsets = extractSliceOp.getMixedOffsets();
-            auto extractSizes = extractSliceOp.getMixedSizes();
-            auto extractStrides = extractSliceOp.getMixedStrides();
-
-            if (extractOffsets.size() == 4) {
-                SmallVector<OpFoldResult, 4> newExtractOffsets;
-                for (size_t i = 0; i < extractOffsets.size(); ++i) {
-                    if (i == NCHW::H) {
-                        newExtractOffsets.push_back(rewriter.getIndexAttr(0));
-                    }
-                    else {
-                        newExtractOffsets.push_back(extractOffsets[i]);
-                    }
-                }
-
-                auto newExtractSlice = tensor::ExtractSliceOp::create(
-                    rewriter, extractSliceOp.getLoc(), newOp.getOutput(), newExtractOffsets,
-                    extractSizes, extractStrides
-                );
-
-                rewriter.replaceOp(extractSliceOp, newExtractSlice.getResult());
-                rewriter.eraseOp(op);
-                return success();
-            }
-        }
-
-        rewriter.replaceOp(op, newOp.getOutput());
         return success();
     }
 };
@@ -1231,10 +920,8 @@ void PrepareConvPoolKernelsPass::runOnOperation() {
     // Phase 2: Apply other padding transformations after odd-dimension fixing is complete
     RewritePatternSet padPatterns(ctx);
     padPatterns.add<ConvertMixedPadPhasePoolPattern>(ctx);
-    addConvPoolPatterns<ConvertConvValidToSamePadDirectPattern>(padPatterns);
     addConvPoolPatterns<ConvertConvValidPadToSamePadPattern>(padPatterns);
     addConvPoolPatterns<EliminateTrailingConvRowPattern>(padPatterns);
-    addConvPoolPatterns<EliminateRedundantConvPaddingPattern>(padPatterns);
     if (failed(applyPhase(std::move(padPatterns), /*existingOpsOnly=*/true))) {
         return signalPassFailure();
     }
