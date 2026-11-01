@@ -20,6 +20,16 @@
 
 #define TORQ_MAX_FREQ	1000000000UL
 
+/*
+ * Releasing the boost as soon as a job completes races with the next job: when the release runs
+ * first, the next job start waits for the clock and voltage to be raised again (~3.6 ms on
+ * SL2610). Keep the boost for a while after the last job instead.
+ */
+static unsigned int boost_hold_ms = 100;
+module_param(boost_hold_ms, uint, 0644);
+MODULE_PARM_DESC(boost_hold_ms,
+		 "Time in ms the NPU frequency boost is kept after the last job completes (0: release at once)");
+
 struct torq_opp_entry {
 	unsigned long freq;
 	unsigned long min_uV;
@@ -38,7 +48,7 @@ struct torq_devfreq {
 
 	struct devfreq_simple_ondemand_data ondemand_data;
 	struct dev_pm_qos_request boost_min_freq_req;
-	struct work_struct boost_release_work;
+	struct delayed_work boost_release_work;
 
 	unsigned int opp_count;
 	unsigned long cur_freq;
@@ -229,7 +239,8 @@ static void torq_devfreq_release_boost(struct work_struct *work)
 	bool busy;
 	int ret;
 
-	tdf = container_of(work, struct torq_devfreq, boost_release_work);
+	tdf = container_of(to_delayed_work(work), struct torq_devfreq,
+			   boost_release_work);
 
 	spin_lock_irqsave(&tdf->stats_lock, flags);
 	busy = tdf->active_jobs != 0;
@@ -248,7 +259,7 @@ static void torq_devfreq_remove_boost_request(void *data)
 {
 	struct torq_devfreq *tdf = data;
 
-	cancel_work_sync(&tdf->boost_release_work);
+	cancel_delayed_work_sync(&tdf->boost_release_work);
 	if (dev_pm_qos_request_active(&tdf->boost_min_freq_req))
 		dev_pm_qos_remove_request(&tdf->boost_min_freq_req);
 }
@@ -504,7 +515,7 @@ int torq_devfreq_job_start(struct torq_module *torq_dev)
 		return 0;
 
 	/* Serialize against boost release from the preceding completion. */
-	cancel_work_sync(&tdf->boost_release_work);
+	cancel_delayed_work_sync(&tdf->boost_release_work);
 
 	ret = dev_pm_qos_update_request(&tdf->boost_min_freq_req,
 					tdf->boost_freq_khz);
@@ -561,7 +572,8 @@ void torq_devfreq_job_complete(struct torq_module *torq_dev)
 	spin_unlock_irqrestore(&tdf->stats_lock, flags);
 
 	if (release_boost)
-		schedule_work(&tdf->boost_release_work);
+		mod_delayed_work(system_wq, &tdf->boost_release_work,
+				 msecs_to_jiffies(READ_ONCE(boost_hold_ms)));
 }
 EXPORT_SYMBOL_GPL(torq_devfreq_job_complete);
 
@@ -582,7 +594,7 @@ int torq_devfreq_init(struct torq_module *torq_dev)
 	tdf->dev = dev;
 
 	spin_lock_init(&tdf->stats_lock);
-	INIT_WORK(&tdf->boost_release_work, torq_devfreq_release_boost);
+	INIT_DELAYED_WORK(&tdf->boost_release_work, torq_devfreq_release_boost);
 	tdf->last_sample = ktime_get();
 	tdf->busy_start = 0;
 	tdf->busy_time_ns = 0;

@@ -10,6 +10,7 @@ torq_runtime.md
 ops.md
 profiling.md
 inference_time.md
+npu_driver.md
 css_host_fallback.md
 custom_hw.md
 debug_tips.md
