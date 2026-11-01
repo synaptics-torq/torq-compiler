@@ -94,6 +94,13 @@ using namespace mlir::iree_compiler;
 
 namespace mlir::syna::torq {
 
+static llvm::cl::opt<bool> clValidateTilePositions(
+    "torq-validate-tile-positions",
+    llvm::cl::desc("Validate selected tiles without midpoint sampling; retry the search with "
+                   "full-position checks if a sampled fit was unsafe"),
+    llvm::cl::init(true)
+);
+
 static llvm::cl::opt<int> clPrefetchTileBudgetPercent(
     "torq-prefetch-tile-budget-percent",
     llvm::cl::desc("with --torq-prefetch-algorithm=stream-schedule, the percent of LRAM the "
@@ -1037,6 +1044,9 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
     // Set while fitTileToMemory probes a group whose spills count, see clProbeAvoidSpills.
     bool probeCountsSpills_ = false;
 
+    // Full validation and its retry must retain position-dependent producer shapes.
+    bool probeAllTilePositions_ = false;
+
     // Bytes the LRAM plan of the last tile the probe accepted relocates.
     int64_t lastFitRelocatedBytes_ = 0;
 
@@ -1403,14 +1413,25 @@ keepInnermostSlices(const llvm::SetVector<tensor::ExtractSliceOp> &payloadSlices
     return innermost;
 }
 
-// Replace `extract` with an LRAM-encoded alloc_tensor of its size at the first
-// iteration, so the LRAM planner charges the slice the real pipeline keeps live.
-// Leaves `extract` in place when its size cannot be resolved.
-static void chargeSliceInLram(OpBuilder &builder, tensor::ExtractSliceOp extract) {
+// Full-position placeholders must remain unencoded until shape specialization.
+// AllocTensor's static-shape canonicalization preserves its location, but not
+// arbitrary attributes. A probe-only name tracks these allocations across peeling.
+// Between chargeLiveActivationSlices and encodeSpecializedProbePayloads, only
+// FuseGroupPreservingCanonicalizerPass and PeelTileLoopsPass run (see
+// checkTileFitsInMemory). A pattern added there that rebuilds an alloc_tensor
+// with another location (e.g. a fused one) drops this name: that payload is then
+// left unencoded, and the probe does not charge it to LRAM.
+static constexpr StringLiteral kProbePayloadLocation = "torq.probe_lram_payload";
+
+// Charge the slice the real pipeline keeps live. Sampled probes use its size at
+// the first iteration; full-position probes specialize an unencoded placeholder
+// before adding the LRAM encoding. Leave unresolved sampled slices in place.
+static void
+chargeSliceInLram(OpBuilder &builder, tensor::ExtractSliceOp extract, bool preserveDynamicSizes) {
     auto ty = dyn_cast<RankedTensorType>(extract.getType());
     if (!ty)
         return;
-    if (!ty.hasStaticShape()) {
+    if (!ty.hasStaticShape() && !preserveDynamicSizes) {
         SmallVector<int64_t> sizes;
         sizes.reserve(extract.getMixedSizes().size());
         for (OpFoldResult size : extract.getMixedSizes()) {
@@ -1432,9 +1453,21 @@ static void chargeSliceInLram(OpBuilder &builder, tensor::ExtractSliceOp extract
     auto encodedTy = RankedTensorType::get(
         ty.getShape(), ty.getElementType(), createDenseEncoding(ty, torq_hl::MemorySpace::Lram)
     );
-    Value alloc =
-        bufferization::AllocTensorOp::create(builder, extract.getLoc(), encodedTy, ValueRange{})
-            .getResult();
+    // Full-position probes must specialize this allocation with the loop, not
+    // freeze it at the first iteration before peeling has resolved the halo.
+    SmallVector<Value> dynamicSizes;
+    for (auto [dim, size] : llvm::enumerate(extract.getMixedSizes())) {
+        if (ty.isDynamicDim(dim))
+            dynamicSizes.push_back(getValueOrCreateConstantIndexOp(builder, extract.getLoc(), size)
+            );
+    }
+    Location loc = extract.getLoc();
+    if (preserveDynamicSizes)
+        loc = NameLoc::get(builder.getStringAttr(kProbePayloadLocation), loc);
+    Value alloc = bufferization::AllocTensorOp::create(
+                      builder, loc, preserveDynamicSizes ? ty : encodedTy, dynamicSizes
+    )
+                      .getResult();
     extract.replaceAllUsesWith(alloc);
     extract.erase();
 }
@@ -1489,12 +1522,43 @@ static bool isPerTileSlice(tensor::ExtractSliceOp extract) {
 // read (for example the halves of a slice + concat that feed
 // tensor.insert_slice), inside or outside the tile loop; its size does not
 // change with the tile, so charging it can make every tile fail the probe.
-static void chargeLiveActivationSlices(func::FuncOp funcOp) {
+static void chargeLiveActivationSlices(func::FuncOp funcOp, bool preserveDynamicSizes) {
     OpBuilder builder(funcOp.getContext());
     for (tensor::ExtractSliceOp extract : keepInnermostSlices(findPayloadSlices(funcOp))) {
         if (isPerTileSlice(extract))
-            chargeSliceInLram(builder, extract);
+            chargeSliceInLram(builder, extract, preserveDynamicSizes);
     }
+}
+
+// Charge only the placeholders selected as per-tile reads BEFORE peeling: fully
+// peeled reads no longer depend on a loop, and fixed non-tile reads must stay free.
+// Delaying encoding also lets pad/cast shape inference run on ordinary tensors.
+static LogicalResult encodeSpecializedProbePayloads(func::FuncOp funcOp) {
+    bool unresolved = false;
+    funcOp.walk([&](bufferization::AllocTensorOp alloc) {
+        auto loc = dyn_cast<NameLoc>(alloc.getLoc());
+        if (!loc || loc.getName().getValue() != kProbePayloadLocation)
+            return;
+        auto ty = alloc.getType();
+        if (!ty.hasStaticShape()) {
+            unresolved = true;
+            return;
+        }
+        alloc->setLoc(loc.getChildLoc());
+        // A payload can also be the init of a DPS op that writes over it (e.g. an elementwise
+        // op on its own input). Its tied result would need the encoded type too, which the
+        // lowering of the op does not accept, so leave such a payload unencoded, like a sampled
+        // probe leaves a slice it cannot resolve.
+        for (OpOperand &use : alloc->getUses()) {
+            auto dps = dyn_cast<DestinationStyleOpInterface>(use.getOwner());
+            if (dps && dps.isDpsInit(&use))
+                return;
+        }
+        alloc.getResult().setType(RankedTensorType::get(
+            ty.getShape(), ty.getElementType(), createDenseEncoding(ty, torq_hl::MemorySpace::Lram)
+        ));
+    });
+    return failure(unresolved);
 }
 
 // Return true iff the tile fits in memory
@@ -1541,8 +1605,27 @@ llvm::FailureOr<bool> TileAndFusePass::checkTileFitsInMemory(
     }
 
     // Tile sizes were function args. Charge live-activation slices at the tile
-    // shape; mixed sizes are now constants (or affine of constants).
-    chargeLiveActivationSlices(funcOp);
+    // shape, preserving position-dependent sizes for full-position checks.
+    chargeLiveActivationSlices(funcOp, probeAllTilePositions_);
+
+    if (probeAllTilePositions_) {
+        // Do this BEFORE the shared optimized pipeline samples middle iterations.
+        // Repeated peeling resolves the actual producer halos at each boundary;
+        // loops whose shapes are already invariant need not be expanded.
+        // The extracted module is detached, so use a standalone pass manager,
+        // just like the allocation pipeline, rather than a nested dynamic pipeline.
+        PassManager shapes(fixedModuleOp->getContext());
+        auto &funcPm = shapes.nest<func::FuncOp>();
+        funcPm.addPass(createFuseGroupPreservingCanonicalizerPass());
+        funcPm.addPass(createPeelTileLoopsPass());
+        if (failed(applyPassManagerCLOptions(shapes)) || failed(shapes.run(*fixedModuleOp)))
+            return llvm::failure();
+        if (failed(encodeSpecializedProbePayloads(funcOp)))
+            return llvm::failure();
+        // The check asks whether the real compile can place the tile, so plan its LRAM like
+        // the real compile does.
+        (*fixedModuleOp)->setAttr(kTileFitReplanAttr, UnitAttr::get(fixedModuleOp->getContext()));
+    }
 
     return checkModuleFitsInMemory(*fixedModuleOp, true);
 }
@@ -1936,33 +2019,105 @@ TileFit TileAndFusePass::fitTileToMemory(
 ) {
     probeCountsSpills_ = clProbeAvoidSpills && isElementwiseGroup(consumerOp, producerOps);
     llvm::scope_exit resetCountSpills([&] { probeCountsSpills_ = false; });
-    TileFit fit = fitTileToMemoryAnyPlan(
-        consumerOp, producerOps, tilingInfo, iterDomainSizes, offsets, sizes
-    );
-    // The returned tile is the last one the probe accepted.
-    // A small relocation costs less than the extra tile, see clProbeRelocationMinBytes.
-    if (!clProbeAvoidRelocation || fit != TileFit::FitsShrunk || lastFitRelocatedBytes_ == 0 ||
-        lastFitRelocatedBytes_ < clProbeRelocationMinBytes)
+    SmallVector<OpFoldResult> originalOffsets(offsets.begin(), offsets.end());
+    SmallVector<OpFoldResult> originalSizes(sizes.begin(), sizes.end());
+    auto search = [&]() -> TileFit {
+        TileFit fit = fitTileToMemoryAnyPlan(
+            consumerOp, producerOps, tilingInfo, iterDomainSizes, offsets, sizes
+        );
+        // The returned tile is the last one the probe accepted.
+        // A small relocation costs less than the extra tile, see clProbeRelocationMinBytes.
+        if (!clProbeAvoidRelocation || fit != TileFit::FitsShrunk || lastFitRelocatedBytes_ == 0 ||
+            lastFitRelocatedBytes_ < clProbeRelocationMinBytes)
+            return fit;
+
+        int64_t count = countTiles(fit, sizes, tilingInfo, iterDomainSizes);
+        SmallVector<OpFoldResult> strictSizes(sizes.begin(), sizes.end());
+        FailureOr<std::optional<int64_t>> strictCount = findRelocationFreeTile(
+            consumerOp, producerOps, tilingInfo, iterDomainSizes, offsets, strictSizes,
+            maxRelocationFreeTiles(count, lastFitRelocatedBytes_, probeCountsSpills_)
+        );
+        // The relocating tile is valid, so a broken strict probe keeps it.
+        if (failed(strictCount)) {
+            LLVM_DEBUG(llvm::dbgs() << "relocation-free probe failed, keeping the tile\n");
+            return fit;
+        }
+        LLVM_DEBUG({
+            llvm::dbgs() << "relocating tile: " << count << " tiles, relocation-free: "
+                         << (*strictCount ? std::to_string(**strictCount) : "none") << "\n";
+        });
+        if (*strictCount)
+            llvm::copy(strictSizes, sizes.begin());
+        return fit;
+    };
+
+    TileFit fit = search();
+    if (!clValidateTilePositions || fit != TileFit::FitsShrunk)
         return fit;
 
-    int64_t count = countTiles(fit, sizes, tilingInfo, iterDomainSizes);
-    SmallVector<OpFoldResult> strictSizes(sizes.begin(), sizes.end());
-    FailureOr<std::optional<int64_t>> strictCount = findRelocationFreeTile(
-        consumerOp, producerOps, tilingInfo, iterDomainSizes, offsets, strictSizes,
-        maxRelocationFreeTiles(count, lastFitRelocatedBytes_, probeCountsSpills_)
+    OwningOpRef<ModuleOp> validation = extractOpsForMemoryCheck(
+        "validate_tile_positions", cast<TilingInterface>(consumerOp), tilingInfo, producerOps
     );
-    // The relocating tile is valid, so a broken strict probe keeps it.
-    if (failed(strictCount)) {
-        LLVM_DEBUG(llvm::dbgs() << "relocation-free probe failed, keeping the tile\n");
+    // The sampled tile is valid on its own, so a check that cannot run keeps it, as before this
+    // check existed: returning ProbeFail would leave the op untiled.
+    if (failed(tileModuleForMemoryCheck(*validation, tilingInfo, iterDomainSizes.size()))) {
+        LLVM_DEBUG(llvm::dbgs() << "full-position validation failed to tile, keeping the tile\n");
         return fit;
     }
-    LLVM_DEBUG({
-        llvm::dbgs() << "relocating tile: " << count << " tiles, relocation-free: "
-                     << (*strictCount ? std::to_string(**strictCount) : "none") << "\n";
-    });
-    if (*strictCount)
-        llvm::copy(strictSizes, sizes.begin());
-    return fit;
+
+    probeAllTilePositions_ = true;
+    llvm::scope_exit restoreSampling([&] { probeAllTilePositions_ = false; });
+    FailureOr<bool> allPositionsFit =
+        checkTileFitsInMemory(*validation, tilingInfo, offsets, sizes);
+    if (failed(allPositionsFit)) {
+        LLVM_DEBUG(llvm::dbgs() << "full-position validation probe failed, keeping the tile\n");
+        return fit;
+    }
+    if (*allPositionsFit)
+        return fit;
+
+    // Shrink the rejected tile first: a smaller tile in the domains the search shrank is the
+    // likely fit, and each full-position probe peels the tile loops, so restarting the search
+    // from the full domain costs many of them. Binary-search each shrunk domain, in tiling
+    // order, between its rejected size and its minimum, stopping at the first one whose
+    // minimum fits; a domain whose minimum does not fit stays at its minimum.
+    LLVM_DEBUG(llvm::dbgs() << "sampled tile fails full-position validation; shrinking it\n");
+    auto shrinkRejectedTile = [&]() -> FailureOr<bool> {
+        IRRewriter rewriter(validation->getContext());
+        for (int64_t domain : tilingInfo.tilingOrder) {
+            int64_t domainSize = iterDomainSizes[domain];
+            int64_t rejected = *getConstantIntValue(sizes[domain]);
+            int64_t minSize = tilingInfo.minSize[domain];
+            if (rejected == domainSize || rejected <= minSize)
+                continue;
+            sizes[domain] = rewriter.getIndexAttr(minSize);
+            FailureOr<bool> minFits =
+                checkTileFitsInMemory(*validation, tilingInfo, offsets, sizes);
+            if (failed(minFits))
+                return failure();
+            if (!*minFits)
+                continue;
+            if (failed(searchTileSizeForDim(
+                    rewriter, *validation, tilingInfo, offsets, sizes, domain, domainSize,
+                    /*minFactor=*/div_ceil(domainSize, rejected),
+                    /*maxFactor=*/div_ceil(domainSize, minSize)
+                )))
+                return failure();
+            return true;
+        }
+        return false;
+    };
+    FailureOr<bool> shrunk = shrinkRejectedTile();
+    if (succeeded(shrunk) && *shrunk)
+        return TileFit::FitsShrunk;
+
+    // Retry once with the SAME search strategies and objective, but the sound
+    // predicate. Do not repeatedly shrink the winning dimension or reselect the
+    // same sampled false fit. All candidates of this retry see the full shapes.
+    LLVM_DEBUG(llvm::dbgs() << "shrinking the rejected tile found no fit; retrying search\n");
+    llvm::copy(originalOffsets, offsets.begin());
+    llvm::copy(originalSizes, sizes.begin());
+    return search();
 }
 
 // Find a tile for `consumerOp` that the memory probe accepts, and write it to

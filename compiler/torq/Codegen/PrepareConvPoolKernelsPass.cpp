@@ -72,6 +72,35 @@ bool needsSamePadConversionW(llvm::ArrayRef<int64_t> pads, int64_t ksize_w) {
     );
 }
 
+// The stride-1 conv2d and depthwise_conv2d kernels accept a top and a bottom padding of either 0
+// or the kernel border, each on its own: with 0 they start reading the input later or read fewer
+// rows (a padding between 0 and the border isn't supported by the HW). Keeping it avoids
+// computing the padding rows and slicing them off (e.g. the H tiles of a 3x3 conv, with padding
+// [1,1,0,0] inside the frame and [1,1,1,0] at its top). Not for max_pool2d, whose stride-1 kernel
+// needs a padding of 0 or the border, nor for the 1D and NHWC depthwise kernels. Not for int16
+// inputs either: an int16 conv with a top padding of 0 gives an all-zero output.
+template <class TorqConvPoolOp>
+bool keepsPartialPadH(TorqConvPoolOp op, llvm::ArrayRef<int64_t> pads, int64_t ksize_h) {
+    if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
+        return false;
+    }
+    else {
+        if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::DepthwiseConv2DOp>) {
+            if (op.getIsDw1dStride1())
+                return false;
+        }
+        if (op.getNhwcInput() || op.getStride()[0] != 1 || op.getStride()[1] != 1)
+            return false;
+        auto inputType = cast<RankedTensorType>(op.getInput().getType());
+        if (inputType.getElementType().isInteger(16))
+            return false;
+        int64_t kernel_top = (ksize_h - 1) / 2;
+        int64_t kernel_bottom = ksize_h - kernel_top - 1;
+        return (pads[LRTBDim::Top] == 0 || pads[LRTBDim::Top] == kernel_top) &&
+               (pads[LRTBDim::Bottom] == 0 || pads[LRTBDim::Bottom] == kernel_bottom);
+    }
+}
+
 // A conv/pool that is effectively 1D: one spatial axis is degenerate (extent 1, kernel 1,
 // stride 1) while the other carries stride 2 with zero (valid) padding. The NPU executes such
 // a valid stride-2 op correctly, but mis-executes the asymmetric SAME padding that the
@@ -215,6 +244,8 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPool
         // Check which dimensions need conversion to hardware same-padding
         bool has_valid_pad_h = needsSamePadConversionH(pads, ksize_h);
         bool has_valid_pad_w = needsSamePadConversionW(pads, ksize_w);
+        if (has_valid_pad_h && keepsPartialPadH(op, pads, ksize_h))
+            has_valid_pad_h = false;
 
         if (!(has_valid_pad_h || has_valid_pad_w))
             return failure();

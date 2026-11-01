@@ -897,7 +897,10 @@ struct FillOpConversion : public OpConversionPattern<linalg::FillOp> {
 
         auto srcResultType = mlir::cast<RankedTensorType>(srcOp.getResult(0).getType());
         rewriter.replaceOpWithNewOp<torq_hl::FillOp>(
-            srcOp, srcOp.getResult(0).getType(), createInitTensor(srcOp, rewriter, srcResultType),
+            srcOp, srcResultType,
+            createInitTensor(
+                rewriter, srcOp.getLoc(), srcResultType, srcOp.getDpsInitOperand(0)->get()
+            ),
             bitPatternAttr
         );
 

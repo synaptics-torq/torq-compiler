@@ -18,7 +18,6 @@ TIGHT_LRAM_HW = "0:8:2:coral_v1:nss_v1"
 NO_FIT_MODELS = [
     "linalg_ops/conv1d-ncw-fcw-multichannel-kw3-bias-bf16",
     "linalg_ops/conv1d-ncw-fcw-multichannel-kw3-f32out-bf16",
-    "linalg_ops/conv1d-ncw-fcw-multichannel-kw7-bf16",
     "linalg_ops/conv1d-ncw-fcw-nnnr3-convtranspose-im2col-bf16",
     "linalg_ops/conv1d-ncw-fcw-pointwise-bias-bf16",
     "tosa_ops/maxpool2d-stride1-k3x3-32x32x4",
@@ -33,7 +32,7 @@ def test_no_probe_tile_fits_uses_minimum_tile(model_name, torq_compiler, tmp_pat
     tile and let the real pipeline decide, not leave the op untiled.
 
     An untiled op is never smaller than the minimum tile, so leaving it untiled
-    only moves the failure to the real allocation. Before the fix these eight
+    only moves the failure to the real allocation. Before the fix these seven
     models fail at 8KB LRAM with "operation can't be tiled: no more domains to
     tile" followed by "cannot allocate ...".
     """

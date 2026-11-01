@@ -1624,9 +1624,13 @@ class AssignLramAddressesPass : public impl::AssignLramAddressesBase<AssignLramA
 
             // only a strict tile-fit probe rejects relocations; it never re-plans
             BoolAttr probe = getTileFitProbeAttr(funcOp);
-            bool allowRelocation = replan || !probe || !probe.getValue();
-            result =
-                allocateLramAddresses(funcOp, replan, allowRelocation, placementFailure, lramSize);
+            // a probe module marked kTileFitReplanAttr plans like a real compile
+            auto moduleOp = funcOp->getParentOfType<ModuleOp>();
+            bool planAsReal = replan || (moduleOp && moduleOp->hasAttr(kTileFitReplanAttr));
+            bool allowRelocation = planAsReal || !probe || !probe.getValue();
+            result = allocateLramAddresses(
+                funcOp, planAsReal, allowRelocation, placementFailure, lramSize
+            );
         } // destruct diagHandler;
 
         if (failed(result)) {
