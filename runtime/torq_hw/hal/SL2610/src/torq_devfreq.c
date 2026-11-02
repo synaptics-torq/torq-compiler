@@ -538,6 +538,46 @@ int torq_devfreq_job_start(struct torq_module *torq_dev)
 }
 EXPORT_SYMBOL_GPL(torq_devfreq_job_start);
 
+/*
+ * Raise the frequency when a network is created, which the runtime does when it loads a model, so
+ * the first job doesn't wait for the clock and voltage change. Unless a job starts, the boost is
+ * released boost_hold_ms later.
+ */
+void torq_devfreq_network_create(struct torq_module *torq_dev)
+{
+	struct torq_devfreq *tdf;
+	unsigned long flags;
+	bool idle;
+	int ret;
+
+	if (!torq_dev)
+		return;
+
+	tdf = torq_dev->devfreq_data;
+	if (!tdf)
+		return;
+
+	cancel_delayed_work_sync(&tdf->boost_release_work);
+
+	ret = dev_pm_qos_update_request(&tdf->boost_min_freq_req,
+					tdf->boost_freq_khz);
+	if (ret < 0) {
+		/* not fatal: the first job requests the boost again */
+		dev_warn(tdf->dev, "failed to request frequency boost: %d\n",
+			 ret);
+		return;
+	}
+
+	spin_lock_irqsave(&tdf->stats_lock, flags);
+	idle = tdf->active_jobs == 0;
+	spin_unlock_irqrestore(&tdf->stats_lock, flags);
+
+	if (idle)
+		mod_delayed_work(system_wq, &tdf->boost_release_work,
+				 msecs_to_jiffies(READ_ONCE(boost_hold_ms)));
+}
+EXPORT_SYMBOL_GPL(torq_devfreq_network_create);
+
 void torq_devfreq_job_complete(struct torq_module *torq_dev)
 {
 	struct torq_devfreq *tdf;
