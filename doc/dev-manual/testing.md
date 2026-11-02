@@ -156,6 +156,21 @@ where ´${RUN_ID}´ is id of the workflow run (it can be found by inspecting the
 run).
 
 
+## Slow tests and the CI jobs
+
+The C model and FPGA CI jobs run the tests on many pytest-xdist workers and end when their slowest
+test ends. The tests listed in ``tests/slow-tests.txt`` (and ``extras/tests/slow-tests.txt``) are
+started first, spread over the workers, with ``--slow-tests-first``. When a test takes minutes in
+CI, add it to the list; the C model job prints the 30 slowest tests (``--durations=30``).
+
+A test with the ``release_only`` marker runs in the C model job on pushes (``main`` and release
+branches), not on pull requests, unless the pull request has the ``run-gemma3-cmodel`` label. Use
+it for tests that are too slow for every pull request; today, the Gemma3 full model.
+
+A test with the ``not_fpga_ci`` marker doesn't run in the FPGA job, even when its test function is
+``fpga_ci``. Use it for cases of a parametrized test that the C model job is enough for, when the
+FPGA job has no time left (for example ``tests/keras_ops-not-fpga-ci.txt``).
+
 ## How test code works
 
 A Pytest test invocation works in two phases: in the first phase called collection pytest finds all

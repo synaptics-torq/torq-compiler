@@ -65,7 +65,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
 
           pytest_args: >-
-            -m fpga_ci -n auto 
+            -m "fpga_ci and not not_fpga_ci" -n auto --dist worksteal --slow-tests-first
             --torq-runtime-hw-type aws_fpga
             --torq-runtime-timeout=20
             --torq-chips ${{ matrix.chip_group }}

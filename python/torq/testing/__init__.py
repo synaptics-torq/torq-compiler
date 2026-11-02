@@ -15,6 +15,7 @@ pytest_plugins = [
     "torq.testing.reporting",
     "torq.testing.issues",
     "torq.testing.xfail",
+    "torq.testing.scheduling",
     "torq.testing.engines",
     "torq.testing.dtype_utils",
     "torq.testing.quantization",

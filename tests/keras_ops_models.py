@@ -17,7 +17,8 @@ collector imports it and reads:
   - comparison: comparison tolerances (torq.testing.comparison keys);
   - int8, int16: settings for one quantization only, merged over the others.
 
-Cases listed in keras_known_failures.SKIP_TESTS (by test case name) are skipped.
+Cases listed in keras_known_failures.SKIP_TESTS (by test case name) are skipped. Cases listed in
+keras_ops-not-fpga-ci.txt get the not_fpga_ci marker: the FPGA CI job doesn't run them.
 """
 
 import hashlib
@@ -38,6 +39,7 @@ from .keras_known_failures import should_skip
 KERAS_OPS_DIR = TOPDIR / "tests" / "testdata" / "keras_ops"
 
 _QUANTIZATIONS = ("int8", "int16")
+_NOT_FPGA_CI_FILE = TOPDIR / "tests" / "keras_ops-not-fpga-ci.txt"
 _CONFIG_KEYS = {"quantize", "compiler_options", "comparison", *_QUANTIZATIONS}
 
 
@@ -62,6 +64,8 @@ def _case_config(family, stem, config):
 
 def keras_ops_cases():
     """The pytest params of every keras_ops case, with their markers."""
+    lines = _NOT_FPGA_CI_FILE.read_text().splitlines()
+    not_fpga_ci = {line.strip() for line in lines if line.strip() and not line.startswith("#")}
     params, seen = [], {}
     for family, module in _family_modules().items():
         configs = getattr(module, "CONFIG", {})
@@ -88,7 +92,12 @@ def keras_ops_cases():
                 skip, reason = should_skip(name)
                 if skip:
                     marks.append(pytest.mark.skip(reason=reason))
+                if name in not_fpga_ci:
+                    marks.append(pytest.mark.not_fpga_ci)
+                    not_fpga_ci.discard(name)
                 params.append(pytest.param(Case(name, data), marks=marks))
+    if not_fpga_ci:
+        raise ValueError(f"{_NOT_FPGA_CI_FILE.name}: unknown cases {sorted(not_fpga_ci)}")
     return params
 
 

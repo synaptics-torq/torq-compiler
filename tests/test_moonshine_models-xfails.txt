@@ -3,3 +3,6 @@ test_onnx_model_torq[encoder_float_full_model-aws_fpga-sl2610-v1] synaptics-torq
 test_onnx_model_torq[encoder_float_full_model-sim-sl2610-v1] synaptics-torq/torq-compiler-dev/issues/1994
 test_onnx_model_torq[encoder_float_full_model-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev/issues/1876
 test_onnx_model_torq[encoder_float_full_model-sim-sr200-v1] synaptics-torq/torq-compiler-dev/issues/1876
+
+# hangs on the SR200 FPGA (Timeout waiting for interrupt)
+test_onnx_model_torq[decoder_float_full_model-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev/issues/2863

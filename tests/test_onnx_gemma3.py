@@ -230,7 +230,25 @@ def pytest_generate_tests(metafunc):
         )
     )
 
-    metafunc.parametrize("onnx_layer_model", cases, indirect=True)
+    # The full models take minutes of compile and simulation. The source model is not run:
+    # hybrid_int4_int8_full_model covers the same decoder. The C model CI runs the hybrid full model
+    # on pushes, and on pull requests only with the run-gemma3-cmodel label (release_only marker).
+    marks = {
+        "source_full_model": pytest.mark.skip(
+            reason="too long, hybrid_int4_int8_full_model covers it"),
+        "hybrid_int4_int8_full_model": pytest.mark.release_only,
+    }
+    params = [pytest.param(c, marks=marks[c.name]) if c.name in marks else c for c in cases]
+    metafunc.parametrize("onnx_layer_model", params, indirect=True)
+
+
+@pytest.fixture(autouse=True)
+def skip_hybrid_full_model_on_fpga_sl2610(request, runtime_hw_type, chip_config):
+    # it doesn't fit in the time budget of the FPGA CI job for SL2610
+    if ("hybrid_int4_int8_full_model" in request.node.name and runtime_hw_type.data == "aws_fpga"
+            and chip_config.data["target"] == "SL2610"):
+        pytest.skip("too long for the FPGA CI on SL2610")
+
 
 @versioned_hashable_object_fixture
 def onnx_fake_quantize_config(request):

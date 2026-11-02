@@ -1,0 +1,35 @@
+# Tests that take minutes in the CI jobs, slowest first. With --slow-tests-first (C model and FPGA
+# CI jobs), they start first, spread over the pytest-xdist workers, so that a job doesn't end
+# waiting for a slow test that started last (see torq/testing/scheduling.py).
+#
+# One pattern per line: test file name::test id, with * as the only wildcard. A test matches the
+# first pattern it fits. Times from the --durations output of the C model job; update the list
+# when a test becomes slow or fast.
+
+# Gemma3 full model and decoder head (5 to 12 minutes)
+test_onnx_gemma3.py::test_onnx_model_torq[hybrid_int4_int8_full_model-*]
+test_onnx_gemma3.py::test_onnx_model_torq[hybrid_lm_head-*]
+# full models (1.5 to 4 minutes)
+test_torch_zoo_turbine.py::test_torch_zoo_turbine[efficientnet_b0_features_Sequential-*]
+test_torch_zoo_turbine.py::test_torch_zoo_turbine[efficientnet_b0_full_model-*]
+test_tflite_yolo_od.py::test_yolo_od_tflite_torq[*_full_model-*]
+test_keras_app.py::test_keras_app_tflite_torq[full_model_*]
+test_tflite_yolo_pose.py::test_yolo_pose_tflite_torq[*_full_model-*]
+test_moonshine_models.py::test_onnx_model_torq[*_full_model-*]
+test_torch_zoo_turbine.py::test_torch_zoo_turbine[*_full_model-*]
+test_onnx_rtdetr.py::test_onnx_rtdetr_model_torq[*_full_model-*]
+# rtdetr convolutions (1.5 to 4 minutes each)
+test_onnx_rtdetr.py::test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_Conv_*]
+# op tests and mbv2 (1.5 to 2.5 minutes)
+test_torch_ops.py::test_mlir_files[topk-1x2100-bf16.mlir-*]
+test_tflite_mbv2.py::test_mbv2_tflite_torq[mbv2_full_model-*]
+test_torqrt.py::test_test_vectors[mbv2_full_model-*]
+test_heterogeneous.py::test_heterogeneous_compare[mbv2_full_model-*]
+test_linalg_ops.py::test_mlir_files[decompose-dwconv2d-all.mlir-*]
+test_tile_fit_probe.py::test_probe_keeps_relocation_without_tile_budget
+# torch zoo stages and blocks
+test_torch_zoo_turbine.py::test_torch_zoo_turbine[*_Sequential-*]
+test_torch_zoo_turbine.py::test_torch_zoo_turbine[*_InvertedResidual-*]
+test_torch_zoo_turbine.py::test_torch_zoo_turbine[*_MBConv-*]
+# Gemma3 hybrid components
+test_onnx_gemma3.py::test_onnx_model_torq[hybrid_*]

@@ -18,6 +18,9 @@ permissions:
 
 env:
   GENERATE_STATUS_REPORT: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name || '', 'generate-test-status-report') && 'true' || 'false' }}
+  # the release_only tests (the Gemma3 full model) run on pushes, and on pull requests with the
+  # run-gemma3-cmodel label
+  RUN_RELEASE_ONLY: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name || '', 'run-gemma3-cmodel')) && 'true' || 'false' }}
   DASHBOARD_SERVER: ${{ contains(github.event.pull_request.labels.*.name || '', 'test-stage-dashboard') && vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_STAGE || vars.DASHBOARD_URL_TORQ_COMPILER_DEV_DASHBOARD_PROD }}
 
 jobs:
@@ -68,7 +71,9 @@ jobs:
           extra_repo: ${{ vars.EXTRAS_REPO }}
           hf_token: ${{ secrets.HF_TOKEN }}
           pytest_args: >-
-            -m ci -n 18 --dist worksteal --show-capture=no --tb=short --check-xfails
+            -m "${{ env.RUN_RELEASE_ONLY == 'true' && 'ci' || 'ci and not release_only' }}"
+            -n 18 --dist worksteal --slow-tests-first --durations=30
+            --show-capture=no --tb=short --check-xfails
             --torq-chips ${{ matrix.chip_group }}
             --tflite-layer-test-generate-full-model-only
             --ignore-binary-mtime
