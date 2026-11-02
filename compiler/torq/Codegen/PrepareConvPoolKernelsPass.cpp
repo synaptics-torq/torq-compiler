@@ -77,11 +77,7 @@ bool needsSamePadConversionW(llvm::ArrayRef<int64_t> pads, int64_t ksize_w) {
 // rows (a padding between 0 and the border isn't supported by the HW). Keeping it avoids
 // computing the padding rows and slicing them off (e.g. the H tiles of a 3x3 conv, with padding
 // [1,1,0,0] inside the frame and [1,1,1,0] at its top). Not for max_pool2d, whose stride-1 kernel
-// needs a padding of 0 or the border, nor for the 1D and NHWC depthwise kernels. Not for int16
-// inputs either: an int16 conv with a top padding of 0 gives an all-zero output. Nor for a
-// depthwise_conv2d with a kernel of 7 rows or more: a model with 7x5 int8 ones gives an all-zero
-// output when they keep it, although each of these layers alone is correct
-// (synaptics-torq/torq-compiler-dev#2853).
+// needs a padding of 0 or the border, nor for the 1D and NHWC depthwise kernels.
 template <class TorqConvPoolOp>
 bool keepsPartialPadH(TorqConvPoolOp op, llvm::ArrayRef<int64_t> pads, int64_t ksize_h) {
     if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
@@ -89,13 +85,10 @@ bool keepsPartialPadH(TorqConvPoolOp op, llvm::ArrayRef<int64_t> pads, int64_t k
     }
     else {
         if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::DepthwiseConv2DOp>) {
-            if (op.getIsDw1dStride1() || ksize_h >= 7)
+            if (op.getIsDw1dStride1())
                 return false;
         }
         if (op.getNhwcInput() || op.getStride()[0] != 1 || op.getStride()[1] != 1)
-            return false;
-        auto inputType = cast<RankedTensorType>(op.getInput().getType());
-        if (inputType.getElementType().isInteger(16))
             return false;
         int64_t kernel_top = (ksize_h - 1) / 2;
         int64_t kernel_bottom = ksize_h - kernel_top - 1;

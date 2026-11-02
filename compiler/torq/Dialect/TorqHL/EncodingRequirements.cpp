@@ -469,7 +469,30 @@ KernelEncoding InterleavedInsertOp::getKernelEncoding() { return getNoEncoding()
 
 KernelEncoding IdentityOp::getKernelEncoding() { return getNoEncoding(); }
 
-KernelEncoding ElementWiseBinaryOp::getKernelEncoding() { return getNoEncoding(); }
+// Inputs with different layouts are read by two DEDR sets, one after the other. The comparison
+// modes load the first value of each set instead of comparing it, so the second set would discard
+// the result of the first: these ops need both inputs dense (a slice of a larger buffer is copied).
+KernelEncoding ElementWiseBinaryOp::getKernelEncoding() {
+    KernelEncoding encoding = getNoEncoding();
+    switch (getOpType()) {
+    case ElementwiseOpEnum::MINIMUM:
+    case ElementwiseOpEnum::MAXIMUM:
+    case ElementwiseOpEnum::GREATER:
+    case ElementwiseOpEnum::GREATER_EQUAL:
+    case ElementwiseOpEnum::EQUAL: {
+        KernelTensorEncoding dense;
+        dense.denseInnerDims = cast<ShapedType>(getInput1().getType()).getRank();
+        encoding.inputEncodings = {
+            {getInput1Mutable().getOperandNumber(), dense},
+            {getInput2Mutable().getOperandNumber(), dense}
+        };
+        break;
+    }
+    default:
+        break;
+    }
+    return encoding;
+}
 
 KernelEncoding ArgMaxOp::getKernelEncoding() { return getNoEncoding(); }
 
