@@ -13,6 +13,7 @@ pytest_plugins = [
     "torq.testing.torch",
     "torq.testing.comparison",
     "torq.testing.reporting",
+    "torq.testing.step_timings",
     "torq.testing.issues",
     "torq.testing.xfail",
     "torq.testing.scheduling",

@@ -38,9 +38,11 @@ jobs:
       image: ${{ inputs.docker_image_tests_name }}
       options: ${{ vars.ASTRA_MACHINA_SL_DOCKER_OPTIONS }}
 
+    # relative to the workspace: in the job container github.workspace is the host path, not the
+    # container one (/__w/...), so pytest would write outside the workspace and nothing is uploaded
     env:
-      RUNTIME_PROFILING_OUTPUT_DIR: ${{ github.workspace }}/aws_fpga_profiling_logs_${{ matrix.chip_group }}
-      TEST_STATUS_REPORT_PATH: ${{ github.workspace }}/aws_fpga_test_status_${{ matrix.chip_group }}.json
+      RUNTIME_PROFILING_OUTPUT_DIR: astra_machina_sl_profiling_logs
+      TEST_STATUS_REPORT_PATH: astra_machina_sl_test_status.json
 
     steps:
       
@@ -74,8 +76,10 @@ jobs:
             -m astra_machina_sl_ci -n 4
             --torq-runtime-hw-type astra_machina
             --torq-runtime-timeout=20
+            --torq-runtime-runs=10
             --torq-chips sl2610-v1
             --torq-runtime-profiling-output-dir=${{ env.RUNTIME_PROFILING_OUTPUT_DIR }}
+            --torq-step-timings=${{ env.RUNTIME_PROFILING_OUTPUT_DIR }}/step_timings.json
             --tflite-layer-test-generate-full-model-only
             --ignore-binary-mtime
             ${{ env.GENERATE_STATUS_REPORT == 'true' && format('--try-xfails --save-test-status-report-to {0}', env.TEST_STATUS_REPORT_PATH) || '' }}
@@ -84,7 +88,22 @@ jobs:
           batch_name: fpga-${{ matrix.chip_group }}
           s3_hf_cache_bucket: ${{ vars.SCCACHE_BUCKET }}
           s3_hf_cache_dir: hf_cache
-                
+
+      - name: Summarize the board runs
+        if: always()
+        shell: bash
+        run: |
+          python3 scripts/summarize_board_runs.py ${{ env.RUNTIME_PROFILING_OUTPUT_DIR }} \
+            --step-timings ${{ env.RUNTIME_PROFILING_OUTPUT_DIR }}/step_timings.json >> $GITHUB_STEP_SUMMARY || true
+
+      - name: Upload Astra Machina SL profiling logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: astra_machina_sl_profiling_logs
+          path: ${{ env.RUNTIME_PROFILING_OUTPUT_DIR }}
+          retention-days: 60
+
       - name: Upload Astra Machina SL test status report
         if: env.GENERATE_STATUS_REPORT == 'true'
         uses: actions/upload-artifact@v7

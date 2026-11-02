@@ -520,17 +520,24 @@ class RemoteTestRunner:
 
         return remote_opts, output_files, output_dirs
 
-    def run(self, timeout: int = 5) -> float | None:
+    def run(self, timeout: int = 5, runs: int = 1, after_run=None) -> float | None:
         """Run the model on the remote board.
 
-        Returns the wall-clock time in seconds for the remote execution,
-        or *None* if something prevents measurement.
+        The model and inputs are copied once, then the model is run *runs*
+        times. With several runs, they are done back to back by one shell loop
+        on the board (no SSH round trip or copy between them), then the profiles
+        of each run and the model outputs of the last run are copied back;
+        *timeout* applies to each run. If given, ``after_run(run_index)`` is
+        called after each run's profiles are copied back.
+
+        Returns the wall-clock time in seconds for the remote execution, or
+        *None* if something prevents measurement (always with several runs).
         """
         remote_root = str(self.remote_root)
         remote_model_path = str(self.remote_root / self.vmfb_path.name)
         remote_runner = remote_command_runner_factory(
             self.board_addr,
-            int(timeout),
+            int(timeout) * runs,
             ssh_multiplex=True,
             ssh_port=self.port,
             ssh_private_key=self.private_key
@@ -566,6 +573,8 @@ class RemoteTestRunner:
                 remote_input_args.append(remote_arg)
 
             remote_runtime_opts, output_files, output_dirs = self._rewrite_runtime_opts(runner)
+            # files written by each run (profiles), as opposed to the model outputs
+            run_output_files = dict(output_files)
             remote_output_args: list[str] = []
             for arg in self.output_data_args:
                 remote_arg, local_path, remote_path = self._rewrite_arg_with_remote_path(arg)
@@ -607,6 +616,9 @@ class RemoteTestRunner:
                     *remote_input_args,
                 ]
             self._logger.info("Running remote test: %s", " ".join(cmd))
+            if runs > 1:
+                return self._run_repeated(runner, cmd, runs, output_files, run_output_files, output_dirs, after_run)
+
             if self._update_runtime:
                 # Wrap the command with the shell 'time' built-in so that
                 # the wall-clock measurement happens on the board itself,
@@ -638,3 +650,35 @@ class RemoteTestRunner:
                 runner.copy_files(remote_dir, str(local_dir.parent), recursive=True, board_dst=False)
 
         return wall_time
+
+    def _run_repeated(self, runner, cmd, runs, output_files, run_output_files, output_dirs, after_run):
+        """Runs *cmd* *runs* times in one shell loop on the board, see run()."""
+
+        # Each run's profiles are renamed with a .run<i> suffix (POSIX shell: the board shell may be
+        # busybox)
+        renames = " ".join(f'mv {path} {path}.run$i ;' for path in run_output_files)
+        loop = (
+            f"i=0 ; while [ $i -lt {runs} ] ; do "
+            f"{{ {' '.join(cmd)} ; }} || {{ echo \"TORQ_RUN_FAILED $i\" ; exit 1 ; }} ; "
+            f"{renames} i=$((i + 1)) ; done"
+        )
+        print(f"Running TORQ remotely {runs} times with command: " + " ".join(cmd))
+        output = runner.run_cmd([loop])
+        print("Command output:")
+        print(output)
+
+        # model outputs of the last run
+        for remote_path, local_path in output_files.items():
+            if remote_path not in run_output_files:
+                runner.copy_files(remote_path, str(local_path), board_dst=False)
+        for remote_dir, local_dir in output_dirs.items():
+            local_dir.parent.mkdir(parents=True, exist_ok=True)
+            runner.copy_files(remote_dir, str(local_dir.parent), recursive=True, board_dst=False)
+
+        for run_index in range(runs):
+            for remote_path, local_path in run_output_files.items():
+                runner.copy_files(f"{remote_path}.run{run_index}", str(local_path), board_dst=False)
+            if after_run is not None:
+                after_run(run_index)
+
+        return None

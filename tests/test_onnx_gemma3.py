@@ -233,10 +233,11 @@ def pytest_generate_tests(metafunc):
     # The full models take minutes of compile and simulation. The source model is not run:
     # hybrid_int4_int8_full_model covers the same decoder. The C model CI runs the hybrid full model
     # on pushes, and on pull requests only with the run-gemma3-cmodel label (release_only marker).
+    # The hybrid full model is also the only one that runs on the Astra Machina board.
     marks = {
         "source_full_model": pytest.mark.skip(
             reason="too long, hybrid_int4_int8_full_model covers it"),
-        "hybrid_int4_int8_full_model": pytest.mark.release_only,
+        "hybrid_int4_int8_full_model": (pytest.mark.release_only, pytest.mark.astra_machina_sl_ci),
     }
     params = [pytest.param(c, marks=marks[c.name]) if c.name in marks else c for c in cases]
     metafunc.parametrize("onnx_layer_model", params, indirect=True)

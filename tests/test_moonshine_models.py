@@ -176,6 +176,9 @@ def pytest_generate_tests(metafunc):
             if case.name in skip_cmodel
             else (pytest.mark.ci, pytest.mark.fpga_ci, )
         )
+        # Only the full models run on the Astra Machina board
+        if case.name.endswith("_full_model"):
+            marks += (pytest.mark.astra_machina_sl_ci, )
         params.append(pytest.param(case, marks=marks))
 
     metafunc.parametrize("onnx_layer_model", params, indirect=True)

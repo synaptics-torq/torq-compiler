@@ -173,11 +173,45 @@ def _write_dispatch_outputs(dispatch_debug_info, output_files):
     return measurements
 
 
-def annotate_host_profile_from_files(debug_info, profile_file, output_files, target_frequency_mhz, measured_frequency_mhz):
+class DebugInfoCache:
+    """
+    Keeps the debug info of a model loaded across calls of annotate_host_profile_from_files, for
+    several profiles of the same model (e.g. repeated runs), so it is loaded only once.
+
+    The cached dispatches are reused by the next call: use the results of a call before the next
+    one with the same cache.
+    """
+
+    def __init__(self):
+        # one DebugInfo per invocation index of a dispatch within a profile, so that two
+        # invocations of the same dispatch in a profile keep independent timing data
+        self._debug_infos = {}
+        self._estimates_frequency = {}
+
+    def get_dispatch(self, debug_info_path, dispatch_name, invocation_index, frequency_mhz):
+        debug_infos = self._debug_infos.setdefault(str(debug_info_path), [])
+        while len(debug_infos) <= invocation_index:
+            debug_infos.append(DebugInfo(debug_info_path))
+        dispatch = debug_infos[invocation_index].get_dispatch(dispatch_name)
+
+        # drop the runtime times of the previous profile
+        dispatch.operation_times_ns = {}
+        if self._estimates_frequency.get(id(dispatch)) != frequency_mhz:
+            dispatch.compile_operation_times_ns = {}
+            dispatch.load_compile_time_estimates(frequency_mhz)
+            self._estimates_frequency[id(dispatch)] = frequency_mhz
+        return dispatch
+
+
+def annotate_host_profile_from_files(debug_info, profile_file, output_files, target_frequency_mhz, measured_frequency_mhz,
+                                     cache: DebugInfoCache | None = None):
     """
     Given a debug-info directory generated with --torq-debug-info and a profiling log produced by the runtime with --torq_profile_host,
     generates annotated profiling data that matches the actions in the profiling log with the corresponding operations in the model,
     and outputs this data to the specified output files (Excel, CSV or Perfetto trace).
+
+    Returns the profile's metrics. With no output file, only the metrics are computed. With a cache, the
+    debug info is loaded once for several profiles of the same model (see DebugInfoCache).
     """
 
     _require_profile_deps()
@@ -196,6 +230,7 @@ def annotate_host_profile_from_files(debug_info, profile_file, output_files, tar
     combined_dispatch_debug_info = CombinedDispatchDebugInfo()
     hal_dispatch_debug_info = HalDispatchDebugInfo()
     has_hal_events = False
+    invocation_counts = {}
 
     for invocation in invocation_data:
         if invocation.dispatch_name.startswith("__HAL"):
@@ -203,9 +238,15 @@ def annotate_host_profile_from_files(debug_info, profile_file, output_files, tar
             hal_dispatch_debug_info.append_runtime_events(invocation.event_data, invocation.dispatch_name)
             continue
 
-        # Use a fresh DebugInfo so each invocation keeps independent timing data.
-        dispatch_debug_info = DebugInfo(debug_info).get_dispatch(invocation.dispatch_name)
-        dispatch_debug_info.load_compile_time_estimates(target_frequency_mhz)
+        if cache is None:
+            # Use a fresh DebugInfo so each invocation keeps independent timing data.
+            dispatch_debug_info = DebugInfo(debug_info).get_dispatch(invocation.dispatch_name)
+            dispatch_debug_info.load_compile_time_estimates(target_frequency_mhz)
+        else:
+            invocation_index = invocation_counts.get(invocation.dispatch_name, 0)
+            invocation_counts[invocation.dispatch_name] = invocation_index + 1
+            dispatch_debug_info = cache.get_dispatch(debug_info, invocation.dispatch_name, invocation_index,
+                                                     target_frequency_mhz)
         dispatch_debug_info.load_runtime_events(invocation.event_data)
 
         combined_dispatch_debug_info.add_dispatch(dispatch_debug_info)
@@ -215,6 +256,9 @@ def annotate_host_profile_from_files(debug_info, profile_file, output_files, tar
 
 
     measurements = _write_dispatch_outputs(combined_dispatch_debug_info, output_files)
+    if not any(str(f).endswith(".pb") for f in output_files):
+        # the metrics are computed with the Perfetto trace; without one, compute them alone
+        measurements.append(perfetto.get_measurements(perfetto.compute_runtime_metrics(combined_dispatch_debug_info)))
 
     if len(measurements) == 1:
         return measurements[0]

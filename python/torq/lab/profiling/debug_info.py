@@ -14,10 +14,20 @@ from collections import OrderedDict
 from enum import Enum
 from abc import ABC, abstractmethod
 import re
+import sys
+import types
 import torq.lab.profiling.location as loc_utils
 
 
 logger = logging.getLogger("torq.lab.debug_info")
+
+# Each time the MLIR Python bindings wrap an operation, they import the Python module of its
+# dialect (iree.compiler.dialects.<dialect>). The Torq dialects have none, and a failed import is
+# retried on every operation: on large dispatches this was most of the debug info load time.
+# Registering empty modules makes the lookup succeed at once.
+for _dialect in ("torq_hl", "torq_hw"):
+    _module_name = f"iree.compiler.dialects.{_dialect}"
+    sys.modules.setdefault(_module_name, types.ModuleType(_module_name))
 
 def cycles_to_ns(cycles: int, frequency_mhz: int):
     """Convert cycles to nanoseconds given a clock frequency in MHz."""

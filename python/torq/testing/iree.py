@@ -1,4 +1,5 @@
 import atexit
+import csv
 import logging
 import signal
 
@@ -10,6 +11,8 @@ from pathlib import Path
 import re
 import subprocess
 import shutil
+import statistics
+import time
 import pytest
 import json
 
@@ -37,9 +40,10 @@ from torq.lab.pipeline.io import (
 from .aws_fpga import FpgaSession, RemoteFpgaSession
 from .dtype_utils import convert_io_dtypes_policy
 from .remote_testing import RemoteTestRunner, setup_dev_board, _default_remote_runner_path, acquire_board_lock, release_board_lock, kill_remote_runner
+from .step_timings import record_step, step
 from .versioned_fixtures import VersionedFile, versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
                                 versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_unhashable_object_fixture, versioned_generated_directory_fixture
-from torq.lab.profiling.annotate import annotate_host_profile_from_files
+from torq.lab.profiling.annotate import DebugInfoCache, annotate_host_profile_from_files
 from torq.lab.profiling.report import generate_html
 from torq.testing.performance import (
     append_measurements,
@@ -81,6 +85,7 @@ def pytest_addoption(parser):
     parser.addoption("--ignore-binary-mtime", action="store_true", default=False, help="Ignore binary mtime of binaries when deciding to invalidate cached fixtures")
     parser.addoption("--torq-compiler-timeout", type=int, default=60*5, help="Timeout in seconds for torq compiler invocations")
     parser.addoption("--torq-runtime-timeout", type=int, default=60*4, help="Timeout in seconds for torq runtime invocations")
+    parser.addoption("--torq-runtime-runs", type=int, default=1, help="Number of times each model runs on a remote board; with more than 1, the first run is a warm-up and the timings are the median of the other runs")
     parser.addoption("--torq-compile-time-profiling-output-dir", default=None, help="Directory to save per-test compile time profiling outputs")
     parser.addoption("--torq-runtime-profiling-output-dir", default=None, help="Directory to save per-test profiling outputs")
     parser.addoption("--torq-bench-control-file", default=None, help="Path to JSON file used to control a board bench deployment")
@@ -927,6 +932,11 @@ def torq_runtime_timeout(request, case_config):
     return int(case_config.get("torq_runtime_timeout", request.config.getoption("--torq-runtime-timeout")))
 
 
+@versioned_hashable_object_fixture
+def torq_runtime_runs(request):
+    return max(1, request.config.getoption("--torq-runtime-runs"))
+
+
 @versioned_unhashable_object_fixture
 def torq_mlir_func_name(mlir_model_file):
     return parse_func_name(mlir_model_file)
@@ -942,6 +952,13 @@ def enable_runtime_profiling(request):
 def enable_compile_time_profiling(request):
     profiling_output_dir = request.config.getoption("--torq-compile-time-profiling-output-dir")
     return profiling_output_dir is not None
+
+
+def _host_profile_span_ns(profile_csv):
+    """Time between the first and the last event of a host profile, in ns (None if it has none)."""
+    with open(profile_csv, newline='') as fp:
+        timestamps = [int(row['timestamp_us']) for row in csv.DictReader(fp) if row.get('timestamp_us')]
+    return (max(timestamps) - min(timestamps)) * 1000 if timestamps else None
 
 
 @versioned_hashable_object_fixture
@@ -967,7 +984,7 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, torq_input_dat
                         torq_runtime, runtime_hw_type, torq_runtime_options, enable_torq_buffer_tracing, 
                         enable_hw_test_vectors, torq_runtime_timeout, chip_config, torq_mlir_func_name,
                         enable_runtime_profiling, skip_profile_annotation, torq_compiled_model_debug_info,
-                        torq_benchmark, benchmark_output_dir):
+                        torq_benchmark, benchmark_output_dir, torq_runtime_runs):
 
     clear_measurements(versioned_dir)
 
@@ -983,9 +1000,18 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, torq_input_dat
     if enable_torq_buffer_tracing:
         extra_runtime_opts.append('--torq_dump_buffers_dir=' + str(buffers_dir))
 
+    host_profile_path = versioned_dir / 'host_profile.csv'
     if enable_runtime_profiling:
-        host_profile_path = versioned_dir / 'host_profile.csv'
         extra_runtime_opts.append(f'--torq_profile_host=' + str(host_profile_path))
+
+    # With several board runs, each run's host profile is kept in runs/
+    runs_dir = versioned_dir / 'runs'
+    shutil.rmtree(runs_dir, ignore_errors=True)
+
+    def after_run(run_index):
+        runs_dir.mkdir(exist_ok=True)
+        if host_profile_path.exists():
+            shutil.move(host_profile_path, runs_dir / f'host_profile_{run_index}.csv')
 
     def remote_run_module(remote_addr, remote_port, remote_runner_path, update_runtime, private_key):
         all_runtime_opts = (
@@ -1009,7 +1035,13 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, torq_input_dat
             recompute_cache=request.config.getoption("--recompute-cache"),
             private_key=private_key
         )
-        if runtime_hw_type == 'aws_fpga':
+        if torq_runtime_runs > 1:
+            if runtime_hw_type == 'aws_fpga':
+                raise ValueError("--torq-runtime-runs > 1 is only supported on boards")
+            # e2e_inference_time is taken from the host profile of each run (see below)
+            with step(request, 'board: copy files and run'):
+                wall_time = runner.run(timeout=torq_runtime_timeout, runs=torq_runtime_runs, after_run=after_run)
+        elif runtime_hw_type == 'aws_fpga':
             port = request.config.getoption("--torq-port")
             with RemoteFpgaSession(chip_config['aws_fpga'], remote_addr, port) as _:
                 with measure_time(versioned_dir, 'e2e_inference_time'):
@@ -1062,7 +1094,9 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, torq_input_dat
     elif bench_control_file := request.config.getoption("--torq-bench-control-file", default=None):
         controller = create_boards_control(bench_control_file)
 
+        wait_start = time.perf_counter()
         with controller.board() as (user, ip, private_key):
+            record_step(request, 'board: wait for a free board', time.perf_counter() - wait_start)
             remote_run_module(controller.get_remote_address(user, ip), 22, controller.remote_runner_path,
                               update_runtime=False, private_key=private_key)
     else:       
@@ -1095,8 +1129,10 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, torq_input_dat
         print(f"cd {TOPDIR} && streamlit run webapps/buffer_viewer/buffer_viewer.py {buffers_dir} {ir_path}")
         print()
     
+    run_profiles = sorted(runs_dir.glob('host_profile_*.csv'), key=lambda p: int(p.stem.rsplit('_', 1)[1]))
+
     # Check if profile annotation should be skipped (can be configured via case_config)
-    if enable_runtime_profiling and not skip_profile_annotation and torq_compiled_model_debug_info.exists() and (versioned_dir / 'host_profile.csv').exists():
+    if enable_runtime_profiling and not skip_profile_annotation and torq_compiled_model_debug_info.exists() and (host_profile_path.exists() or run_profiles):
         logger.debug("Starting profile annotation...")
 
         target_frequency_mhz = chip_config.get("npu_frequency_mhz")
@@ -1106,13 +1142,62 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, torq_input_dat
         else:
             measured_frequency_mhz = target_frequency_mhz
 
-        measurements = annotate_host_profile_from_files(
-            torq_compiled_model_debug_info,
-            str(versioned_dir / 'host_profile.csv'),
-            [str(versioned_dir / 'annotated_profile.xlsx'), str(versioned_dir / 'trace.pb')],
-            target_frequency_mhz=target_frequency_mhz,
-            measured_frequency_mhz=measured_frequency_mhz,
-        )
+        # all the runs share the loaded debug info
+        debug_info_cache = DebugInfoCache()
+
+        # without output files, only the metrics are computed
+        def annotate(profile_csv, out_dir=None):
+            out_files = [out_dir / 'annotated_profile.xlsx', out_dir / 'trace.pb'] if out_dir else []
+            return annotate_host_profile_from_files(
+                torq_compiled_model_debug_info,
+                str(profile_csv),
+                [str(f) for f in out_files],
+                target_frequency_mhz=target_frequency_mhz,
+                measured_frequency_mhz=measured_frequency_mhz,
+                cache=debug_info_cache,
+            )
+
+        if not run_profiles:
+            with step(request, 'annotate profile'):
+                measurements = annotate(host_profile_path, versioned_dir)
+        else:
+            # Compute the metrics of every run, including the warm-up one, so its timings can be
+            # compared
+            run_measurements = {}
+            for profile_csv in run_profiles:
+                run_index = int(profile_csv.stem.rsplit('_', 1)[1])
+                run_dir = runs_dir / f'run_{run_index}'
+                with step(request, f'annotate run {run_index} (metrics only)'):
+                    run_measurements[run_dir] = dict(annotate(profile_csv) or {})
+                # The inference time of a run is the span of its host profile: the board shell
+                # can't time the runs (no nanoseconds in busybox date), and the host-side time
+                # includes ssh
+                profile_span_ns = _host_profile_span_ns(profile_csv)
+                if profile_span_ns is not None:
+                    run_measurements[run_dir]['e2e_inference_time'] = profile_span_ns
+
+            # Drop the warm-up run and report the median of each metric over the other runs, with
+            # the minimum (the target timing) and the standard deviation
+            kept_runs = {d: m for d, m in run_measurements.items() if d.name != 'run_0'}
+            all_runs = list(kept_runs.values())
+            keys = [key for key in all_runs[0] if all(key in m for m in all_runs)]
+            measurements = {key: statistics.median(m[key] for m in all_runs) for key in keys}
+            minimums = {key: min(m[key] for m in all_runs) for key in keys}
+            stdevs = {key: statistics.stdev(m[key] for m in all_runs) for key in keys} if len(all_runs) > 1 else {}
+
+            # The run with the lowest total duration gets the xlsx, and its profile, xlsx and
+            # trace are the test's profiling outputs
+            min_run = min(kept_runs, key=lambda d: kept_runs[d].get('total_duration', float('inf')))
+            min_profile = runs_dir / (min_run.name.replace('run', 'host_profile') + '.csv')
+            shutil.copy(min_profile, host_profile_path)
+            with step(request, 'annotate fastest run (xlsx and trace)'):
+                annotate(min_profile, versioned_dir)
+
+            with open(runs_dir / 'measurements.json', 'w') as fp:
+                json.dump({'runs': {d.name: m for d, m in run_measurements.items()},
+                           'warmup': run_measurements.get(runs_dir / 'run_0', {}),
+                           'min': minimums, 'median': measurements, 'stdev': stdevs,
+                           'min_run': min_run.name}, fp, indent=2)
 
         append_measurements(versioned_dir, measurements)
 
@@ -1172,6 +1257,14 @@ def torq_results(request, torq_results_dir, mlir_io_spec, benchmark_output_dir,
             host_csv_dest = profiling_output_dir / f'{unique_name}.csv'
             shutil.copy(host_profile_csv, host_csv_dest)
             record_property("host_profile_csv", str(host_csv_dest))
+
+        # With several board runs, also keep each run's profile and the per-run metrics
+        runs_dir = torq_results_dir / 'runs'
+        for run_profile in sorted(runs_dir.glob('host_profile_*.csv')):
+            run_index = run_profile.stem.rsplit('_', 1)[1]
+            shutil.copy(run_profile, profiling_output_dir / f'{unique_name}_run{run_index}.csv')
+        if (runs_dir / 'measurements.json').exists():
+            shutil.copy(runs_dir / 'measurements.json', profiling_output_dir / f'{unique_name}_runs.json')
         
         # Find all annotated_profile*.xlsx files (could be annotated_profile.xlsx or annotated_profile_0_dispatch_name.xlsx)
         xlsx_files = sorted(torq_results_dir.glob('annotated_profile*.xlsx'))
