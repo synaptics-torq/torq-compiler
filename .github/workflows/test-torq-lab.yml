@@ -42,8 +42,8 @@ jobs:
           python -m venv .labvenv
           . .labvenv/bin/activate
           python -m pip install --upgrade pip
-          # [onnx] is required by tests/test_lab_pipeline.py and
-          # tests/test_lab_reference.py, which exercise the ONNX import and
+          # [onnx] is required by tests/lab/test_lab_pipeline.py and
+          # tests/lab/test_lab_reference.py, which exercise the ONNX import and
           # self-verify reference paths.
           python -m pip install "$(find wheels -name 'torq_compiler-*.whl' | head -1)[onnx]" pytest
           # torq.lab / torq.gen_config and iree come from the installed wheel.
@@ -51,4 +51,4 @@ jobs:
           # addopts (which loads it) and disable it for this hardware-free run.
           # gen_config's packaging guarantees (standalone-only, legacy modules
           # absent) are asserted by verify_torq_wheel.sh above.
-          python -m pytest tests/test_lab_*.py -o addopts= -p no:torq.testing -v
+          python -m pytest tests/lab/test_lab_*.py -o addopts= -p no:torq.testing -v

@@ -36,7 +36,7 @@ cases for it for any new file found in this directory.
 To view the test cases run the following command:
 
 ```
-$ pytest tests/test_onnx_model.py -k example-matmul --collect-only
+$ pytest tests/harness/test_onnx_model.py -k example-matmul --collect-only
 ```
 
 The result will look as follows:
@@ -54,7 +54,7 @@ layer name).
 
 ## What the tests do
 
-The tests is defined in the function ``test_onnx_model_llvmcpu_torq`` in the ``tests/test_onnx_model.py``.
+The tests is defined in the function ``test_onnx_model_llvmcpu_torq`` in the ``tests/harness/test_onnx_model.py``.
 
 The test compiles the model for Torq simulation (using torq-compile) and for the 
 host CPU (using iree-compile and the LLVMCPU backend), runs them against some random inputs
@@ -70,7 +70,7 @@ results fail and return FAIL if the two inputs are not sufficiently similar.
 To run the tests use the following command line:
 
 ```
-$ pytest tests/test_onnx_model.py -k example-matmul
+$ pytest tests/harness/test_onnx_model.py -k example-matmul
 ```
 
 Pytest will provide a report with all the successes, errors and failures and potentially related error logs.
@@ -142,7 +142,7 @@ tolerance of the testing framework is too strict and the tests fails even if thi
 In order to execute a single test you can invoke pytest as follows:
 
 ```
-$ pytest tests/test_onnx_model.py -s -k example-matmul_layer_MatMul_0-sim-default
+$ pytest tests/harness/test_onnx_model.py -s -k example-matmul_layer_MatMul_0-sim-default
 ```
 
 The ``-s`` option allows to see the output of the tools called by the testing framework while the test is running.
@@ -154,7 +154,7 @@ the IR the pass that generated the problematic IR).
 This can be done by using the following command line:
 
 ```
-$ pytest tests/test_onnx_model.py -s -k example-matmul_layer_MatMul_0-sim-default --debug-ir ir_dump
+$ pytest tests/harness/test_onnx_model.py -s -k example-matmul_layer_MatMul_0-sim-default --debug-ir ir_dump
 ```
 
 The IR produced by the compiler will be stored in the directory ``ir_dump``. Make sure you clean this directory
@@ -176,7 +176,7 @@ accurate.
 To perform compile time profiling use the following command line option:
 
 ```
-pytest tests/test_onnx_model.py -k example-matmul_layer --torq-compile-time-profiling-output-dir=profile  --recompute-cache
+pytest tests/harness/test_onnx_model.py -k example-matmul_layer --torq-compile-time-profiling-output-dir=profile  --recompute-cache
 ```
 
 The compile time logs are going to be available in the directory ``profile``.
@@ -184,7 +184,7 @@ The compile time logs are going to be available in the directory ``profile``.
 To perform runtime profiling use the following command line option:
 
 ```
-pytest tests/test_onnx_model.py -k example-matmul_layer --torq-runtime-profiling-output-dir=profile --recompute-cache
+pytest tests/harness/test_onnx_model.py -k example-matmul_layer --torq-runtime-profiling-output-dir=profile --recompute-cache
 ```
 
 The compile time logs are going to be available in the directory ``profile``.
@@ -198,7 +198,7 @@ The test by default run on an host based simulator (as denoted by the "-sim" suf
 the hardware with the following command line:
 
 ```
-pytest tests/test_onnx_model.py -k example-matmul_layer --torq-runtime-hw-type=astra_machina --torq-addr ${board_address}
+pytest tests/harness/test_onnx_model.py -k example-matmul_layer --torq-runtime-hw-type=astra_machina --torq-addr ${board_address}
 ```
 
 where ``${board_address}`` denotes the address of an astra board (e.g., ``root@10.3.120.55``).
@@ -210,7 +210,7 @@ When iterating on the runtime binary (``torq-run-module``) or the NPU kernel mod
 before running tests:
 
 ```
-pytest tests/test_onnx_model.py -k example-matmul_layer \
+pytest tests/harness/test_onnx_model.py -k example-matmul_layer \
   --torq-runtime-hw-type=astra_machina \
   --torq-addr ${board_address} \
   --update-astra-runtime
@@ -249,7 +249,7 @@ This flag enables:
 To deploy a custom ``.ko`` file to the board, pass ``--torq-ko-path``:
 
 ```
-pytest tests/test_onnx_model.py -k example-matmul_layer \
+pytest tests/harness/test_onnx_model.py -k example-matmul_layer \
   --torq-runtime-hw-type=astra_machina \
   --torq-addr ${board_address} \
   --update-astra-runtime \
@@ -350,7 +350,7 @@ The testing framework also supports TFLite models. Unlike ONNX models which are 
 
 A key difference from the ONNX workflow is how layers are extracted. TFLite layers are extracted by directly manipulating the TFLite flatbuffer, which **preserves quantization parameters exactly** from the original model. This ensures that each extracted layer remains correctly quantized with its original scale and zero-point values.
 
-The test file is ``tests/test_tflite_model.py``. Place your ``.tflite`` model files in
+The test file is ``tests/harness/test_tflite_model.py``. Place your ``.tflite`` model files in
 ``tests/testdata/tflite_models/`` and the framework will automatically detect them and
 create test cases for each layer and the full model.
 
@@ -364,7 +364,7 @@ The framework will automatically detect it and create test cases.
 To view the test cases:
 
 ```
-$ pytest tests/test_tflite_model.py --collect-only
+$ pytest tests/harness/test_tflite_model.py --collect-only
 ```
 
 The output will show individual layer tests and a full model test:
@@ -391,25 +391,25 @@ Each TFLite test case:
 The following environment variables control test behaviour:
 
 - ``MAX_LAYERS``: limit the number of layers extracted (default: ``0`` = no limit).
-  Example: ``MAX_LAYERS=5 pytest tests/test_tflite_model.py -v --collect-only``
+  Example: ``MAX_LAYERS=5 pytest tests/harness/test_tflite_model.py -v --collect-only``
 
 - ``FORCE_EXTRACT``: set to ``1`` to force re-extraction of layers even if cached.
-  Example: ``FORCE_EXTRACT=1 pytest tests/test_tflite_model.py -v --collect-only``
+  Example: ``FORCE_EXTRACT=1 pytest tests/harness/test_tflite_model.py -v --collect-only``
 
 ### Running specific subsets
 
 ```bash
 # Full model only:
-pytest tests/test_tflite_model.py -v -k "full_model"
+pytest tests/harness/test_tflite_model.py -v -k "full_model"
 
 # Specific layer type:
-pytest tests/test_tflite_model.py -v -s -k "layer_CONV_2D"
+pytest tests/harness/test_tflite_model.py -v -s -k "layer_CONV_2D"
 
 # A single specific layer:
-pytest tests/test_tflite_model.py -v -s -k "my_model_layer_CONV_2D_1"
+pytest tests/harness/test_tflite_model.py -v -s -k "my_model_layer_CONV_2D_1"
 
 # Parallel execution:
-pytest tests/test_tflite_model.py -v -n 8
+pytest tests/harness/test_tflite_model.py -v -n 8
 ```
 
 ### How layer extraction works

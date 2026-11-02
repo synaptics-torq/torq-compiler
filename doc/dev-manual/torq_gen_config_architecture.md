@@ -427,7 +427,7 @@ compare_parser.set_defaults(func=cmd_compare)
 ### Step 3: Add tests
 
 ```python
-# tests/test_gen_config_cli.py
+# tests/sweeps/test_gen_config_cli.py
 def test_compare(self):
     ...
 ```
@@ -447,7 +447,7 @@ def test_compare(self):
 
 | File | What it tests | Runs as |
 |------|--------------|---------|
-| `tests/test_gen_config_cli.py` | Quantize helpers (module-level unit tests) + standalone CLI workflows (`TestStandaloneCliWorkflows`): one shared host-only discovery through the standalone engine, then `edit`/`view`/`run` against its JSON output | Unit tests run by default; workflows are opt-in via `-m gen_config_standalone` |
+| `tests/sweeps/test_gen_config_cli.py` | Quantize helpers (module-level unit tests) + standalone CLI workflows (`TestStandaloneCliWorkflows`): one shared host-only discovery through the standalone engine, then `edit`/`view`/`run` against its JSON output | Unit tests run by default; workflows are opt-in via `-m gen_config_standalone` |
 
 ### CLI test pattern
 
@@ -468,11 +468,11 @@ CLI does not pull it into `sys.modules`).
 
 ```bash
 # Fast unit tests (default)
-pytest tests/test_gen_config_cli.py -v
+pytest tests/sweeps/test_gen_config_cli.py -v
 
 # Standalone end-to-end CLI workflows (opt-in; runs a real discovery through
 # the standalone engine)
-pytest tests/test_gen_config_cli.py -m gen_config_standalone -v
+pytest tests/sweeps/test_gen_config_cli.py -m gen_config_standalone -v
 ```
 
 ---

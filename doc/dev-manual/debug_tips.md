@@ -113,7 +113,7 @@
 - To compare the output and the IR of two branches of the code base you can use the following script:
 
   ```{code} shell
-  $ ./scripts/compare_builds.sh wip/goodbranch wip/badbranch pytest tests/test_css_mpact.py -k matmul
+  $ ./scripts/compare_builds.sh wip/goodbranch wip/badbranch pytest tests/runtime/test_css_mpact.py -k matmul
   ```
 
   The script automatically checks out the branches, compiles them and runs the provided pytest command with the `--debug-ir` option pointing to `tmp/comparison`.

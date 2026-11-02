@@ -326,7 +326,7 @@ The compiler flags used here are documented in [Debug tips and tricks](debug_tip
 
 `RULES` in `torq.lab.debug` contains `Rule(class, stage, regex, hint)` entries; the class name is also the anchor of its heading in this guide. The first matching entry wins.
 
-1. Capture a real failure's decisive stderr lines, return code, compiler options, and build information in `tests/_lab_debug_captures.py`. Keep diagnostic lines exact, mark omitted blocks, replace machine paths with `<<SRC>>` and `<<BUILD>>`, and label synthetic output.
+1. Capture a real failure's decisive stderr lines, return code, compiler options, and build information in `tests/lab/_lab_debug_captures.py`. Keep diagnostic lines exact, mark omitted blocks, replace machine paths with `<<SRC>>` and `<<BUILD>>`, and label synthetic output.
 2. Add a specific signature before broader rules. Timeout takes precedence over text, assertions precede pipeline errors, and crash requires a signal without recognized diagnostic text. Test overlapping signatures through their classification results.
-3. Add the capture and expected classification to `CASES` in `tests/test_lab_debug.py`. Use return code 1 for a `LabError` raised before the compiler runs. Reuse existing scenarios for checks already covered by the suite.
+3. Add the capture and expected classification to `CASES` in `tests/lab/test_lab_debug.py`. Use return code 1 for a `LabError` raised before the compiler runs. Reuse existing scenarios for checks already covered by the suite.
 4. Write an actionable hint and add a matching heading and index entry to this guide. Add an option to `PROBE_MAP` when it helps isolate the failure. Give common classes a worked example.

@@ -1073,8 +1073,8 @@ def generate_torch_layers_from_model(model, example_inputs, node_groups=None, de
 # exported and executed exactly as the model calls it.
 #
 # This is generic to any ``torch.nn.Module`` -- nothing here is specific to
-# transformers.  The suites that use it: ``tests/test_torch_zoo_turbine.py``
-# (torchvision zoo models) and ``tests/test_hf_models.py`` (Hugging Face
+# transformers.  The suites that use it: ``tests/models/test_torch_zoo_turbine.py``
+# (torchvision zoo models) and ``tests/models/test_hf_models.py`` (Hugging Face
 # transformers models; the HF-specific Hub loading lives in
 # ``torq.testing.hf_transformers``).
 # ---------------------------------------------------------------------------
@@ -1526,8 +1526,8 @@ def generate_traced_torch_model_layers(
     as constants, keyword args by name -- so modules called with kwargs or
     non-tensor arguments can be exported and tested standalone.  Use this for
     any torch.nn.Module test suite where a single example forward pass defines
-    the model's invocation (see tests/test_torch_zoo_turbine.py and
-    tests/test_hf_models.py).
+    the model's invocation (see tests/models/test_torch_zoo_turbine.py and
+    tests/models/test_hf_models.py).
 
     The returned cases reference the model via ``model_loader_key``; fixtures
     load the actual model lazily and cache it per worker process.

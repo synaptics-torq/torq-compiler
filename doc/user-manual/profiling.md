@@ -112,7 +112,7 @@ When running tests on real hardware via pytest, you can combine runtime profilin
 ``--update-astra-runtime`` to get a profiling summary printed at the end of the session:
 
 ```bash
-pytest tests/test_onnx_model.py -k example-matmul_layer \
+pytest tests/harness/test_onnx_model.py -k example-matmul_layer \
   --torq-runtime-hw-type=astra_machina \
   --torq-addr root@10.46.130.17 \
   --torq-runtime-profiling-output-dir=./profile \

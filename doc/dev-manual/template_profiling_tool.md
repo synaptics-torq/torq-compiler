@@ -32,7 +32,7 @@ For testing on Astra Machina hardware:
 Run template profiling tests on remote SoC hardware with a single command:
 
 ```bash
-(venv) ~/torq-compiler-dev$ pytest tests/test_template_mlir.py -k add_bf16.mlir -v \
+(venv) ~/torq-compiler-dev$ pytest tests/ops/test_template_mlir.py -k add_bf16.mlir -v \
   --torq-addr=root@10.3.120.54 \
   --torq-runtime-hw-type=astra_machina \
   --torq-runtime-profiling-output-dir=./result/ \
@@ -162,7 +162,7 @@ module {
 - Size constraint: `product(shape) × dtype_size × 3 < lram_size`
 
 :::{note}
-To modify `lram_size` or `num_samples`, edit the module-level constants in [torq-compiler-dev/tests/test_template_mlir.py](../../tests/test_template_mlir.py):
+To modify `lram_size` or `num_samples`, edit the module-level constants in [torq-compiler-dev/tests/ops/test_template_mlir.py](../../tests/ops/test_template_mlir.py):
 
 ```python
 # Shape generation defaults
@@ -217,13 +217,13 @@ Enable detailed profiling with `--template-profiling-enabled`:
 Use pytest's `-k` flag for focused testing:
 ```bash
 # Test only addition operators
-pytest tests/test_template_mlir.py -k add.mlir ...
+pytest tests/ops/test_template_mlir.py -k add.mlir ...
 ```
 
 #### 6. **Custom Compiler Options**
 Add extra compiler flags:
 ```bash
-pytest tests/test_template_mlir.py \
+pytest tests/ops/test_template_mlir.py \
   --extra-torq-compiler-options="..." ...
 ```
 

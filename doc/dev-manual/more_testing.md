@@ -6,17 +6,17 @@ that is too large or slow to run every time. Add new opt-in suites here as their
 
 ## Convolution sweep
 
-`tests/test_conv_sweep.py` is a parametric convolution sweep. Rather than hand-writing conv
+`tests/sweeps/test_conv_sweep.py` is a parametric convolution sweep. Rather than hand-writing conv
 test cases or pulling them out of existing models, it samples a space of geometries (kernel,
 stride, padding, channels, spatial size, for both Conv1D and Conv2D) and builds a model for
 each one in memory at collection time. It covers two backends:
 
-- TFLite, built from `tf.keras` (`conv_model` in `tests/models/keras_models.py`), in three
+- TFLite, built from `tf.keras` (`conv_model` in `tests/runtime/keras_models.py`), in three
   flavors: `f32`, `w8if32` (dynamic-range), and `w8i8` (full int8).
-- ONNX, built from `torch` (`conv_onnx_model` in `tests/models/conv_sweep.py`), in `f32` and
+- ONNX, built from `torch` (`conv_onnx_model` in `tests/sweeps/conv_sweep.py`), in `f32` and
   `bf16`.
 
-`conv_sweep_params()` in `tests/models/conv_sweep.py` produces the geometries and maps each
+`conv_sweep_params()` in `tests/sweeps/conv_sweep.py` produces the geometries and maps each
 to a `ConvModelParams`. Each one becomes a `Case` that goes through the usual `case_config`
 -> model -> MLIR -> compile -> run pipeline. Nothing is written to the repository; the
 intermediate `.tflite`, `.onnx`, `.mlir`, and `.vmfb` files go to the pytest cache.
@@ -27,13 +27,13 @@ explicit `-m` on the command line overrides the default:
 
 ```
 # run the whole sweep (numeric where possible, compile-only otherwise)
-pytest tests/test_conv_sweep.py -m conv_sweep
+pytest tests/sweeps/test_conv_sweep.py -m conv_sweep
 
 # filter to a backend / flavor / geometry via -k
-pytest tests/test_conv_sweep.py -m conv_sweep -k "conv_tflite_w8i8"
+pytest tests/sweeps/test_conv_sweep.py -m conv_sweep -k "conv_tflite_w8i8"
 
 # compile-coverage only (the compile-only test function)
-pytest tests/test_conv_sweep.py -m conv_sweep -k test_conv_sweep_compile -rA
+pytest tests/sweeps/test_conv_sweep.py -m conv_sweep -k test_conv_sweep_compile -rA
 ```
 
 Each case runs either `test_conv_sweep_numeric` (compile, run, compare against the backend
@@ -45,4 +45,4 @@ compiled model's I/O to `bf16` while the harness still feeds and compares `f32`.
 verification for those depends on harness work that is in progress elsewhere.
 
 To extend coverage, add or widen a category in `CATEGORIES` (or the sampling ranges) in
-`tests/models/conv_sweep.py`. No new test code or committed model files are needed.
+`tests/sweeps/conv_sweep.py`. No new test code or committed model files are needed.

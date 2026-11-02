@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 from dataclasses import dataclass
 
+TOPDIR = Path(__file__).parent.parent.parent.parent
+
 # The runtime and chip ids at the end of a test id: test_x[case-sim-sl2610-v1]
 _RUNTIME_CHIP_IDS = re.compile(
     r"-(?:sim|aws_fpga|soc_fpga|astra_machina)-[a-z0-9_]+-(?:v\d+|latest)\]$")
@@ -74,7 +76,7 @@ def _get_xfail_file_paths(module: str) -> tuple[Path, Path]:
     module_path = Path(module)
     xfail_file_name = module_path.stem + "-xfails.txt"
     xfail_file_path = module_path.with_name(xfail_file_name)
-    extra_xfail_file_path = module_path.parent.parent / "extras" / "xfail" / xfail_file_name
+    extra_xfail_file_path = TOPDIR / "extras" / "xfail" / xfail_file_name
     return xfail_file_path, extra_xfail_file_path
 
 

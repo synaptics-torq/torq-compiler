@@ -104,7 +104,7 @@ breaks the compile.
 
 ### Testing
 
-- `tests/testdata/tosa_ops/*.mlir` run through `tests/test_tosa_ops.py` with
+- `tests/testdata/tosa_ops/*.mlir` run through `tests/ops/test_tosa_ops.py` with
   `--torq-disable-host --torq-disable-css`, so they fail if an op leaves the NPU. Put cases meant
   to run on the CSS or the host in `tests/testdata/tosa_ops_host_css/`.
 - Run the tests for every target with `--torq-chips` (for example

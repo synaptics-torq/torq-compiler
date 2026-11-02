@@ -169,7 +169,7 @@ it for tests that are too slow for every pull request; today, the Gemma3 full mo
 
 A test with the ``not_fpga_ci`` marker doesn't run in the FPGA job, even when its test function is
 ``fpga_ci``. Use it for cases of a parametrized test that the C model job is enough for, when the
-FPGA job has no time left (for example ``tests/keras_ops-not-fpga-ci.txt``).
+FPGA job has no time left (for example ``tests/ops/keras_ops-not-fpga-ci.txt``).
 
 ## How test code works
 

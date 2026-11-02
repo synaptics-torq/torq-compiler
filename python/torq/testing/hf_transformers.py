@@ -22,8 +22,8 @@ any ``torch.nn.Module`` and lives in :mod:`torq.testing.torch`:
     test cases.
   * ``generate_traced_torch_model_layers`` -- the metadata-cache generator:
     one pytest-xdist worker builds the model and traces it, the others read
-    the manifest.  Used by both ``tests/test_hf_models.py`` and
-    ``tests/test_torch_zoo_turbine.py``.
+    the manifest.  Used by both ``tests/models/test_hf_models.py`` and
+    ``tests/models/test_torch_zoo_turbine.py``.
 
 What is specific to Hugging Face transformers here:
 

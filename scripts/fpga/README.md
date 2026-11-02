@@ -7,7 +7,7 @@ See https://github.com/syna-astra-dev/iree-synaptics-synpu/blob/main/doc/develop
 ### Assuming that your environment is ready for that, generate a test model to the install location
 
 ```{code} shell
-pytest ./iree-synaptics-synpu/tests/test_torqrt.py -v -k conv-stride1-56.mlir --basetemp=fpga/install
+pytest ./iree-synaptics-synpu/tests/runtime/test_torqrt.py -v -k conv-stride1-56.mlir --basetemp=fpga/install
 ```
 
 *Warning*: This last command will erase the content of fpga/install if it exists.
