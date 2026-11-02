@@ -78,6 +78,7 @@ jobs:
             --tflite-layer-test-generate-full-model-only
             --ignore-binary-mtime
             --torq-compile-time-profiling-output-dir=${{ env.CMODEL_PROFILING_LOGS_PATH }}
+            --torq-step-timings=${{ env.CMODEL_PROFILING_LOGS_PATH }}/step_timings.json
             ${{ env.GENERATE_STATUS_REPORT == 'true' && format('--try-xfails --save-test-status-report-to={0}', env.TEST_STATUS_REPORT_PATH) || '' }}
           torq_perf_server: ${{ env.DASHBOARD_SERVER }}
           ignore_failures: ${{ env.GENERATE_STATUS_REPORT }}
@@ -94,6 +95,7 @@ jobs:
           retention-days: 60
 
       - name: Upload compile time profiling logs
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: cmodel_compile_profiling_logs_${{ matrix.chip_group }}

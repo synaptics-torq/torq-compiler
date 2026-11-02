@@ -4,7 +4,8 @@ reference outputs, inputs, cache loads) and named steps inside fixtures (board r
 profile annotation).
 
 With --torq-step-timings=FILE, the times are sent to the controller with the test reports
-(so this works with xdist), written to FILE as JSON and summarized at the end of the session.
+(so this works with xdist), written to FILE as JSON and summarized at the end of the session
+(the totals, and the slowest tests).
 """
 
 import json
@@ -17,6 +18,9 @@ import pytest
 
 # steps shorter than this are not recorded, to keep the report readable
 _MIN_SECONDS = 0.05
+
+# the summary lists only the slowest tests; FILE has them all
+_SUMMARY_TESTS = 30
 
 _steps_key = pytest.StashKey[list]()
 
@@ -108,9 +112,10 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         tr.write_line(f"  {seconds:9.1f}  {name}")
 
     tr.write_line("")
-    tr.write_line("Per test (s; the 5 longest steps):")
-    for nodeid, results in sorted(_session_results.items(),
-                                  key=lambda kv: -sum(kv[1].get(w, 0) for w in ("setup", "call", "teardown"))):
+    tr.write_line(f"The {_SUMMARY_TESTS} slowest tests (s; the 5 longest steps; all tests in {path}):")
+    slowest = sorted(_session_results.items(),
+                     key=lambda kv: -sum(kv[1].get(w, 0) for w in ("setup", "call", "teardown")))
+    for nodeid, results in slowest[:_SUMMARY_TESTS]:
         phases = " ".join(f"{w} {results.get(w, 0):.1f}" for w in ("setup", "call", "teardown"))
         tr.write_line(f"  {nodeid}: {phases}")
         for name, seconds in sorted(results["steps"], key=lambda s: -s[1])[:5]:

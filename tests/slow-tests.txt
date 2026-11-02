@@ -18,8 +18,8 @@ test_tflite_yolo_pose.py::test_yolo_pose_tflite_torq[*_full_model-*]
 test_moonshine_models.py::test_onnx_model_torq[*_full_model-*]
 test_torch_zoo_turbine.py::test_torch_zoo_turbine[*_full_model-*]
 test_onnx_rtdetr.py::test_onnx_rtdetr_model_torq[*_full_model-*]
-# rtdetr convolutions (1.5 to 4 minutes each)
-test_onnx_rtdetr.py::test_onnx_rtdetr_model_torq[rtdetr-l_int8_layer_Conv_*]
+# Not the rtdetr layer convolutions (1.5 to 6 minutes each): started together with the other slow
+# tests, they overload the machine and rtdetr-l_int8_layer_Conv_688 goes over its runtime timeout.
 # op tests and mbv2 (1.5 to 2.5 minutes)
 test_torch_ops.py::test_mlir_files[topk-1x2100-bf16.mlir-*]
 test_tflite_mbv2.py::test_mbv2_tflite_torq[mbv2_full_model-*]
