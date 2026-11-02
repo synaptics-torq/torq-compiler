@@ -9,6 +9,8 @@ the Astra SDK deploys as the `torq-kernel-module` package. The Torq runtime talk
 The driver scales the NPU clock with Linux `devfreq` (the SL2610 NPU runs at 800 MHz or 1 GHz).
 To run inferences at the highest frequency, it boosts the NPU to the maximum frequency:
 
+- when the runtime loads a model on the NPU, so that the first inference doesn't wait for the
+  frequency change either;
 - while a job runs on the NPU;
 - for `boost_hold_ms` milliseconds after the last job completes, so that the next job doesn't
   wait for the clock and voltage to be raised again (about 3.6 ms on SL2610).

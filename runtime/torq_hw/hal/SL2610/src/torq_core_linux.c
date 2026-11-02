@@ -518,6 +518,10 @@ static int torq_create_network(struct torq_file_inst *inst, struct torq_create_n
     req->network_id = net->network_id;
 
     KLOGI("Created network Id %d for pid %d", net->network_id, inst->pid);
+
+    /* raise the NPU frequency while the model loads rather than in its first job */
+    torq_devfreq_network_create(torq_dev);
+
     return 0;
 }
 
