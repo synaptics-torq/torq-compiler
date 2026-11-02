@@ -8,6 +8,7 @@
 
 #include "torq/Conversions/LinalgToTorqHL/MatchingFunctions.h"
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
+#include "torq/Utils/ComputeConstants.h"
 #include "torq/Utils/ShapeUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -132,7 +133,8 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
   public:
     using OpRewritePattern::OpRewritePattern;
 
-    bool isConstScalarFromRecursiveRescale(const Value &v) const {
+    // `source`, when given, is set to the constant that the rescales were traced to, if any.
+    bool isConstScalarFromRecursiveRescale(const Value &v, Value *source = nullptr) const {
         Value input = v;
         ScaleInfo scaleInfo;
 
@@ -150,8 +152,11 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
         if (foldedRescale) {
             if (auto constOp = dyn_cast_if_present<arith::ConstantOp>(input.getDefiningOp())) {
                 auto tensorType = dyn_cast<RankedTensorType>(input.getType());
-                if (tensorType && tensorType.getNumElements() == 1)
+                if (tensorType && tensorType.getNumElements() == 1) {
+                    if (source)
+                        *source = input;
                     return true;
+                }
             }
         }
 
@@ -328,8 +333,27 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
         // TODO: add more recursive scalar input processing for elementwise binary ops
         // right now we only handle add/sub with recurive scalar input processing
         if (eleOp && (isa<arith::AddIOp>(eleOp) || isa<arith::SubIOp>(eleOp))) {
-            if (isConstScalarFromRecursiveRescale(input1) ||
-                isConstScalarFromRecursiveRescale(input2)) {
+            for (OpOperand *operand : srcOp.getDpsInputOperands()) {
+                Value source;
+                if (!isConstScalarFromRecursiveRescale(operand->get(), &source))
+                    continue;
+                // The fused quantized add folds the rescales of an 8 or 16-bit constant into its
+                // weights, but rejects a wider one, e.g. an i32 constant shifted and rescaled by
+                // the TFLite converter. The plain add then needs it as a constant: compute it.
+                if (source &&
+                    cast<RankedTensorType>(source.getType()).getElementTypeBitWidth() > 16) {
+                    auto computed = computeArithConst(operand->get());
+                    if (succeeded(computed)) {
+                        auto type = cast<RankedTensorType>(operand->get().getType());
+                        if (auto attr = returnDenseElementAttr(*computed)) {
+                            auto constOp = arith::ConstantOp::create(
+                                rewriter, srcOp.getLoc(), type, attr.reshape(type)
+                            );
+                            rewriter.modifyOpInPlace(srcOp, [&]() { operand->set(constOp); });
+                            return success();
+                        }
+                    }
+                }
                 return rewriter.notifyMatchFailure(
                     srcOp, "one of input or both input is recurive scalar, no need broadcast\n"
                 );

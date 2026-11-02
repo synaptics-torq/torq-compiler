@@ -137,7 +137,7 @@ DepthToSpacePattern::transform(torq_hl::DepthToSpaceOp op, PatternRewriter &rewr
         // Take next 2 channel data and repeat
         {DimType::H, MemDimTag::O, block_size, block_size * block_skip_offset},
         // Iterate for all rows
-        {DimType::H, MemDimTag::A, input_shape[2], input_shape[3] * ddat_width},
+        {DimType::H, MemDimTag::A, input_shape[2], input_strides[2] * ddat_width},
         // Repeat for next set of 4 channels
         {DimType::H, MemDimTag::V, output_shape[1], channel_skip_offset}
     };

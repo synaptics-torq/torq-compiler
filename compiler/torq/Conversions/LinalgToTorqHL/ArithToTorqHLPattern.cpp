@@ -11,6 +11,7 @@
 #include "torq/Dialect/TorqHL/TorqHLAttrs.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/ConversionUtils.h"
+#include "torq/Utils/ShapeUtils.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
@@ -586,8 +587,33 @@ class ElementWiseShiftOpPattern : public OpRewritePattern<linalg::GenericOp> {
         auto input1 = srcOp.getOperand(0);
         auto input2 = srcOp.getOperand(1);
 
+        // torq_hl.elementwiseshift needs operands of the result shape. A one-element input of
+        // a one-element result, e.g. a tensor<1xi32> read by a 0-d generic, is reshaped to it.
+        auto canReshapeToResult = [&](Value value) {
+            auto type = dyn_cast<RankedTensorType>(value.getType());
+            if (!type)
+                return false;
+            if (type.getShape() == srcResultType.getShape())
+                return true;
+            return type.hasStaticShape() && srcResultType.hasStaticShape() &&
+                   type.getNumElements() == 1 && srcResultType.getNumElements() == 1;
+        };
+        auto reshapeToResult = [&](Value value) {
+            auto type = cast<RankedTensorType>(value.getType());
+            auto dstType = RankedTensorType::get(srcResultType.getShape(), type.getElementType());
+            return emitValuePreservingReshape(rewriter, srcOp.getLoc(), value, type, dstType);
+        };
         auto shiftVal = traceToConstInt(srcOp, binaryOp->getOperand(1), SplatPolicy::SingleElement);
-        if (shiftVal) {
+        if (!canReshapeToResult(input1) || (!shiftVal && !canReshapeToResult(input2))) {
+            return rewriter.notifyMatchFailure(
+                srcOp, "Expected the shift operands to have the number of elements of the result"
+            );
+        }
+        input1 = reshapeToResult(input1);
+        if (!shiftVal) {
+            input2 = reshapeToResult(input2);
+        }
+        else {
             auto input1Type = dyn_cast<RankedTensorType>(input1.getType());
             auto value = DenseElementsAttr::get(
                 input1Type, IntegerAttr::get(input1Type.getElementType(), *shiftVal)
