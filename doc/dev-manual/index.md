@@ -16,6 +16,9 @@ contributing.md
 debug_tips.md
 appendices.md
 testing.md
+testing_howto.md
+testing_architecture.md
+testing_reference.md
 more_testing.md
 tools.md
 model.md

@@ -1,5 +1,8 @@
 ### CI/CD pipelines
 
+This page describes the development and release process. The test jobs, what each one runs,
+their time limits and the pull request labels are in [Testing Reference](testing_reference.md#ci).
+
 ### Development process
 
 Development of a new feature happens in a dedicated `wip/NAME` branch in `synaptics-torq/torq-compiler-dev`.

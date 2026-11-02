@@ -11,7 +11,7 @@ To contribute to this repository the recommended process is the following:
 
 2. Perform your changes locally and compile the project
 
-3. Check that all the required test cases pass as described in [Run test suite with cmodel](testing_cmodel.md#run-test-suite-with-cmodel):
+3. Check that all the required test cases pass as described in [Run tests](testing_howto.md#run-tests):
 
    ```{code} shell
    $ cd torq-compiler

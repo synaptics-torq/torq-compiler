@@ -232,7 +232,7 @@ def pytest_generate_tests(metafunc):
 
     # The full models take minutes of compile and simulation. The source model is not run:
     # hybrid_int4_int8_full_model covers the same decoder. The C model CI runs the hybrid full model
-    # on pushes, and on pull requests only with the run-gemma3-cmodel label (release_only marker).
+    # on pushes, and on pull requests only with the run-release-only label (release_only marker).
     # The hybrid full model is also the only one that runs on the Astra Machina board.
     marks = {
         "source_full_model": pytest.mark.skip(
