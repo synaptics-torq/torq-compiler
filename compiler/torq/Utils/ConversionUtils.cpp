@@ -586,7 +586,7 @@ bool hasEkLoweringConv(mlir::syna::torq_hl::DepthwiseConv2DOp op) {
     // Common HW/kernel limitations; the two axes have different limits, see the Conv2DOp
     // overload above for what sets each.
     //
-    // isValidConv is fragile: PrepareConvPoolKernelsPass runs first, so a zero pad here means that
+    // isValidConv is fragile: ConvPoolSamePaddingPass runs first, so a zero pad here means that
     // pass declined this kernel, not that the user wrote a valid conv. Widening its cap flips
     // this to false and makes large 1D kernels fail to compile.
     //

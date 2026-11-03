@@ -4,7 +4,11 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "ConvPoolKernelLayout.h"
+// Gives the conv2d, depthwise_conv2d and max_pool2d ops of each tile the weight layout and the
+// input segmentation their kernels read, on the padding the conv/pool padding passes gave them
+// (ConvPoolPaddingPasses.cpp).
+
+#include "PassesDetail.h"
 
 #include "torq/Dialect/TorqHL/EncodingRequirements.h"
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
@@ -24,6 +28,7 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
 
@@ -542,13 +547,23 @@ class MaxPool2dSegmentationPattern : public OpRewritePattern<torq_hl::MaxPool2dO
     }
 };
 
+class ConvPoolKernelLayoutPass : public impl::ConvPoolKernelLayoutBase<ConvPoolKernelLayoutPass> {
+  public:
+    void runOnOperation() override {
+        MLIRContext *ctx = &getContext();
+        RewritePatternSet patterns(ctx);
+        patterns.add<ConvLikeKernelLayoutPattern<torq_hl::Conv2DOp>>(ctx);
+        patterns.add<ConvLikeKernelLayoutPattern<torq_hl::DepthwiseConv2DOp>>(ctx);
+        patterns.add<MaxPool2dSegmentationPattern>(ctx);
+        if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
+            return signalPassFailure();
+    }
+};
+
 } // namespace
 
-void populateConvPoolKernelLayoutPatterns(RewritePatternSet &patterns) {
-    MLIRContext *ctx = patterns.getContext();
-    patterns.add<ConvLikeKernelLayoutPattern<torq_hl::Conv2DOp>>(ctx);
-    patterns.add<ConvLikeKernelLayoutPattern<torq_hl::DepthwiseConv2DOp>>(ctx);
-    patterns.add<MaxPool2dSegmentationPattern>(ctx);
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createConvPoolKernelLayoutPass() {
+    return std::make_unique<ConvPoolKernelLayoutPass>();
 }
 
 } // namespace mlir::syna::torq

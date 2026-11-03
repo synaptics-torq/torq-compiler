@@ -4,11 +4,10 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// Prepares the conv2d, depthwise_conv2d and max_pool2d ops for their kernels, after tiling: gives
-// each op a padding the kernels support, then the weight layout and input segmentation they read
-// (ConvPoolKernelLayout.cpp).
+// Gives the conv2d, depthwise_conv2d and max_pool2d ops of each tile a padding their kernels
+// support, in three passes that run in this order after tiling, before the weight layout and input
+// segmentation (ConvPoolKernelLayoutPass.cpp).
 
-#include "ConvPoolKernelLayout.h"
 #include "PassesDetail.h"
 
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
@@ -30,7 +29,7 @@
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
 
-#define DEBUG_TYPE "torq-prepare-conv-pool-kernels"
+#define DEBUG_TYPE "torq-conv-pool-padding"
 
 namespace mlir::syna::torq {
 
@@ -844,59 +843,58 @@ template <template <class> class Pattern> void addConvPoolPatterns(RewritePatter
     patterns.add<Pattern<torq_hl::MaxPool2dOp>>(ctx);
 }
 
-class PrepareConvPoolKernelsPass
-    : public impl::PrepareConvPoolKernelsBase<PrepareConvPoolKernelsPass> {
+// Only the ops present when the pass starts are rewritten, not those its patterns create.
+LogicalResult applyToExistingOps(Operation *op, RewritePatternSet &&patterns) {
+    GreedyRewriteConfig cfg;
+    cfg.setStrictness(GreedyRewriteStrictness::ExistingOps);
+    return applyPatternsGreedily(op, std::move(patterns), cfg);
+}
+
+class AlignStride2ConvPoolPaddingPass
+    : public impl::AlignStride2ConvPoolPaddingBase<AlignStride2ConvPoolPaddingPass> {
   public:
-    using PrepareConvPoolKernelsBase<PrepareConvPoolKernelsPass>::PrepareConvPoolKernelsBase;
-    void runOnOperation() override;
+    void runOnOperation() override {
+        RewritePatternSet patterns(&getContext());
+        addConvPoolPatterns<AlignEvenKernelStride2PaddingPattern>(patterns);
+        if (failed(applyToExistingOps(getOperation(), std::move(patterns))))
+            return signalPassFailure();
+    }
 };
 
-void PrepareConvPoolKernelsPass::runOnOperation() {
-    MLIRContext *ctx = getOperation().getContext();
-
-    auto applyPhase = [&](RewritePatternSet &&patterns, bool existingOpsOnly) {
-        GreedyRewriteConfig cfg;
-        if (existingOpsOnly) {
-            cfg.setStrictness(GreedyRewriteStrictness::ExistingOps);
-        }
-        return applyPatternsGreedily(getOperation(), std::move(patterns), cfg);
-    };
-
-    // Phase 0: give the stride-2 ops with an even kernel the leading padding the kernels support
-    RewritePatternSet alignPatterns(ctx);
-    addConvPoolPatterns<AlignEvenKernelStride2PaddingPattern>(alignPatterns);
-    if (failed(applyPhase(std::move(alignPatterns), /*existingOpsOnly=*/true))) {
-        return signalPassFailure();
+class EvenStride2ConvPoolInputsPass
+    : public impl::EvenStride2ConvPoolInputsBase<EvenStride2ConvPoolInputsPass> {
+  public:
+    void runOnOperation() override {
+        RewritePatternSet patterns(&getContext());
+        addConvPoolPatterns<ConvertOddDimensionStrideConvPattern>(patterns);
+        if (failed(applyToExistingOps(getOperation(), std::move(patterns))))
+            return signalPassFailure();
     }
+};
 
-    // Phase 1: Apply odd-dimension stride fixing first (highest priority)
-    // This ensures explicit padding is added for odd dimensions before other patterns run
-    RewritePatternSet oddDimPatterns(ctx);
-    addConvPoolPatterns<ConvertOddDimensionStrideConvPattern>(oddDimPatterns);
-    if (failed(applyPhase(std::move(oddDimPatterns), /*existingOpsOnly=*/true))) {
-        return signalPassFailure();
+class ConvPoolSamePaddingPass : public impl::ConvPoolSamePaddingBase<ConvPoolSamePaddingPass> {
+  public:
+    void runOnOperation() override {
+        RewritePatternSet patterns(&getContext());
+        patterns.add<ConvertMixedPadPhasePoolPattern>(&getContext());
+        addConvPoolPatterns<ConvertConvValidPadToSamePadPattern>(patterns);
+        if (failed(applyToExistingOps(getOperation(), std::move(patterns))))
+            return signalPassFailure();
     }
-
-    // Phase 2: Apply other padding transformations after odd-dimension fixing is complete
-    RewritePatternSet padPatterns(ctx);
-    padPatterns.add<ConvertMixedPadPhasePoolPattern>(ctx);
-    addConvPoolPatterns<ConvertConvValidPadToSamePadPattern>(padPatterns);
-    if (failed(applyPhase(std::move(padPatterns), /*existingOpsOnly=*/true))) {
-        return signalPassFailure();
-    }
-
-    // Phase 3: the weight layout and input segmentation of the kernels, on the final padding
-    RewritePatternSet layoutPatterns(ctx);
-    populateConvPoolKernelLayoutPatterns(layoutPatterns);
-    if (failed(applyPhase(std::move(layoutPatterns), /*existingOpsOnly=*/false))) {
-        return signalPassFailure();
-    }
-}
+};
 
 } // namespace
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createPrepareConvPoolKernelsPass() {
-    return std::make_unique<PrepareConvPoolKernelsPass>();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createAlignStride2ConvPoolPaddingPass() {
+    return std::make_unique<AlignStride2ConvPoolPaddingPass>();
+}
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createEvenStride2ConvPoolInputsPass() {
+    return std::make_unique<EvenStride2ConvPoolInputsPass>();
+}
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createConvPoolSamePaddingPass() {
+    return std::make_unique<ConvPoolSamePaddingPass>();
 }
 
 } // namespace mlir::syna::torq

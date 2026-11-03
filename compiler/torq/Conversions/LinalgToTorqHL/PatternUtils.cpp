@@ -240,7 +240,7 @@ bool isHwLegalConvPad(
     int64_t topB = (kH - 1) / 2;
     int64_t bottomB = kH - topB - 1;
     int64_t stride = std::max(strideH, strideW);
-    // Stride > 2 is only [SH, 1] here, which PrepareConvPoolKernelsPass turns into
+    // Stride > 2 is only [SH, 1] here, which ConvPoolKernelLayoutPass turns into
     // stride 1 with the pad as attributes. Leaving tensor.pad in front
     // overflows LRAM.
     if (stride > 2)

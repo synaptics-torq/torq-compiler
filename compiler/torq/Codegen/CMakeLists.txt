@@ -34,7 +34,8 @@ set(sources
     EncodeTensorsPass.cpp
     MergeEmptyTensorPairsPass.cpp
     FoldConvertPass.cpp
-    ConvPoolKernelLayout.cpp
+    ConvPoolKernelLayoutPass.cpp
+    ConvPoolPaddingPasses.cpp
     LramAddressSpace.cpp
     LinalgSlicingPass.cpp
     LinalgTilePass.cpp
@@ -58,7 +59,6 @@ set(sources
     PrefetchPassUtils.cpp
     Pool.cpp
     PrefetchConstantLoadsPass.cpp
-    PrepareConvPoolKernelsPass.cpp
     ProfilingPass.cpp
     ReductionTilingPass.cpp
     ReplaceForLoopsWithMidIterationPass.cpp

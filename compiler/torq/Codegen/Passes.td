@@ -61,18 +61,69 @@ def DecomposeTensorConcat
   ];
 }
 
-def PrepareConvPoolKernels
-    : InterfacePass<"torq-prepare-conv-pool-kernels", "mlir::FunctionOpInterface"> {
+// The four conv/pool kernel passes run after tiling, on the torq_hl conv2d, depthwise_conv2d and
+// max_pool2d ops of each tile, in this order: the three padding passes, then the kernel layout.
 
-  let summary = "Prepares the conv2d, depthwise_conv2d and max_pool2d ops for their kernels.";
+def AlignStride2ConvPoolPadding
+    : InterfacePass<"torq-align-stride2-conv-pool-padding", "mlir::FunctionOpInterface"> {
+
+  let summary = "Gives stride-2 ops with an even kernel the leading padding their kernels support.";
   let description = [{
-    Runs after tiling, on the torq_hl ops of each tile. Gives each op a padding its kernel
-    supports (VALID to SAME padding, even inputs for stride 2, aligned window phases), adding
-    explicit padding and slicing where needed, then the weight layout and the input segmentation
-    the kernel reads.
+    Prepends explicit padding to the input of a stride-2 op with an even kernel whose leading
+    padding the kernels don't support, and slices off the extra outputs.
   }];
 
-  let constructor = "mlir::syna::torq::createPrepareConvPoolKernelsPass()";
+  let constructor = "mlir::syna::torq::createAlignStride2ConvPoolPaddingPass()";
+
+  let dependentDialects = [
+    "syna::torq_hl::TorqHLDialect",
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
+def EvenStride2ConvPoolInputs
+    : InterfacePass<"torq-even-stride2-conv-pool-inputs", "mlir::FunctionOpInterface"> {
+
+  let summary = "Pads the odd H or W of stride-2 op inputs to an even size.";
+  let description = [{
+    The stride-2 kernels need an even input height and width. Adds explicit padding to an odd
+    one, converting the op to SAME padding where needed, and slices the output back.
+  }];
+
+  let constructor = "mlir::syna::torq::createEvenStride2ConvPoolInputsPass()";
+
+  let dependentDialects = [
+    "syna::torq_hl::TorqHLDialect",
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
+def ConvPoolSamePadding
+    : InterfacePass<"torq-conv-pool-same-padding", "mlir::FunctionOpInterface"> {
+
+  let summary = "Converts conv and pool padding to the SAME padding their kernels support.";
+  let description = [{
+    Converts VALID and other unsupported paddings to SAME padding, adding explicit padding and
+    slicing where needed, and aligns the H and W window phases of stride-2 max pools.
+  }];
+
+  let constructor = "mlir::syna::torq::createConvPoolSamePaddingPass()";
+
+  let dependentDialects = [
+    "syna::torq_hl::TorqHLDialect",
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
+def ConvPoolKernelLayout
+    : InterfacePass<"torq-conv-pool-kernel-layout", "mlir::FunctionOpInterface"> {
+
+  let summary = "Gives conv and pool ops the weight layout and input segmentation of their kernels.";
+  let description = [{
+    Runs after the conv/pool padding passes, on the final padding of each op.
+  }];
+
+  let constructor = "mlir::syna::torq::createConvPoolKernelLayoutPass()";
 
   let dependentDialects = [
     "syna::torq_hl::TorqHLDialect",

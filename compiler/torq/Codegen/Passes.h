@@ -51,7 +51,13 @@ std::unique_ptr<OperationPass<func::FuncOp>> createConvertTensorPadToLinalgPass(
 
 std::unique_ptr<OperationPass<func::FuncOp>> createDecomposeTensorConcatPass();
 
-std::unique_ptr<InterfacePass<FunctionOpInterface>> createPrepareConvPoolKernelsPass();
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createAlignStride2ConvPoolPaddingPass();
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createEvenStride2ConvPoolInputsPass();
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createConvPoolSamePaddingPass();
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createConvPoolKernelLayoutPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createCheckCssStackSizePass();
 

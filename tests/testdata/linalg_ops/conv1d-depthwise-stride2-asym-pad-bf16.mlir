@@ -2,7 +2,7 @@
 //
 // This is an effectively-1D conv (W=1, kernel 1, stride 1 along W). The asymmetric pad is
 // materialized by tensor.pad into an odd-width (67) buffer, leaving a valid (zero-pad) depthwise
-// conv over it. torq-prepare-conv-pool-kernels used to make the odd height even by rewriting
+// conv over it. torq-even-stride2-conv-pool-inputs used to make the odd height even by rewriting
 // the conv into asymmetric hardware SAME padding (1, 2); the NPU mis-executes that for such
 // 1D stride-2 convs, corrupting ~99% of the outputs. The conv must stay valid (odd dim grown to
 // even by appending one zero at the high end). True 2D stride-2 convs still use SAME padding.
