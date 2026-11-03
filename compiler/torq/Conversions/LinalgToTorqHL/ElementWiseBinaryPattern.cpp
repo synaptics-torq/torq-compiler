@@ -162,8 +162,10 @@ static std::optional<ScalarScale> fitScalarScale(double multiplier, double range
 // not mistaken for a copy, and so that operands the alignment cannot handle at all (a mismatch
 // in a non-unit axis, e.g. tensor<2x3> against tensor<3x2>) are caught here instead of forming
 // a torq_hl.add with mismatched operands.
-// Rank padding with leading unit axes is a reshape, and scalars fold into the ACT bias, so
-// neither counts.
+// Rank padding with leading unit axes is a reshape, so it does not count. A scalar does not
+// count either. A constant scalar folds into the ACT bias. A runtime scalar is broadcast to the
+// output shape, but the unfused lowering also broadcasts it and adds full-size rescales, so it
+// does not avoid that cost.
 static bool needsBroadcastMaterialization(Value input, RankedTensorType outType) {
     auto inType = dyn_cast<RankedTensorType>(input.getType());
     if (!inType || !inType.hasStaticShape() || !outType.hasStaticShape()) {
@@ -184,6 +186,32 @@ static bool needsBroadcastMaterialization(Value input, RankedTensorType outType)
         return true;
     }
     return inShape != outShape.drop_front(leadingPad);
+}
+
+// The collapse_shape reassociation that removes the broadcast unit dims of an input. The input is
+// right-aligned with an output of rank `outRank`, so its first `leadingPad` output dims are
+// missing. `broadcastDims` holds output dims. A broadcast dim joins the previous kept dim. A
+// broadcast dim before the first kept dim joins the first kept dim. The input must keep at least
+// one dim.
+static SmallVector<ReassociationIndices>
+getSqueezeReassociation(int64_t outRank, int64_t leadingPad, ArrayRef<int64_t> broadcastDims) {
+    SmallVector<ReassociationIndices> reassociation;
+    ReassociationIndices leadingGroup;
+    for (int64_t d = leadingPad; d < outRank; ++d) {
+        const int64_t inIdx = d - leadingPad;
+        if (!llvm::is_contained(broadcastDims, d)) {
+            leadingGroup.push_back(inIdx);
+            reassociation.push_back(leadingGroup);
+            leadingGroup.clear();
+        }
+        else if (reassociation.empty()) {
+            leadingGroup.push_back(inIdx);
+        }
+        else {
+            reassociation.back().push_back(inIdx);
+        }
+    }
+    return reassociation;
 }
 
 struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
@@ -519,44 +547,11 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         Value src = input;
         if (static_cast<int64_t>(keptShape.size()) != inRank) {
             auto squeezedTy = RankedTensorType::get(keptShape, inTy.getElementType());
+            // All input dims broadcast (a runtime scalar). The collapse to rank 0 takes an
+            // empty reassociation.
             SmallVector<ReassociationIndices> reassociation;
-            ReassociationIndices group;
-            int64_t inIdx = 0;
-            int64_t keptIdx = 0;
-            for (int64_t d = 0; d < outRank; ++d) {
-                int64_t srcIdx = d - leadingPad;
-                if (srcIdx < 0) {
-                    continue;
-                }
-                if (llvm::is_contained(broadcastDims, d)) {
-                    // Unit dim in input that broadcasts; fold into the previous kept axis,
-                    // or the next kept axis if there is no previous one.
-                    if (!group.empty() || keptIdx == 0) {
-                        group.push_back(inIdx);
-                    }
-                    else {
-                        reassociation.back().push_back(inIdx);
-                    }
-                    ++inIdx;
-                    continue;
-                }
-                group.push_back(inIdx);
-                reassociation.push_back(group);
-                group.clear();
-                ++inIdx;
-                ++keptIdx;
-            }
-            if (!group.empty()) {
-                if (reassociation.empty()) {
-                    reassociation.push_back(group);
-                }
-                else {
-                    reassociation.back().append(group.begin(), group.end());
-                }
-            }
-            if (static_cast<int64_t>(reassociation.size()) !=
-                static_cast<int64_t>(keptShape.size())) {
-                return false;
+            if (!keptShape.empty()) {
+                reassociation = getSqueezeReassociation(outRank, leadingPad, broadcastDims);
             }
             src = tensor::CollapseShapeOp::create(
                       rewriter, input.getLoc(), squeezedTy, src, reassociation
@@ -706,8 +701,6 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
 
         broadcastProcessing(input0, rewriter);
         broadcastProcessing(input1, rewriter);
-        alignInputToOutputShape(input0, output, rewriter);
-        alignInputToOutputShape(input1, output, rewriter);
 
         // Rounding to nearest matters because doubleToInt truncates, which throws away up to a
         // full LSB of the multiplier.
@@ -733,6 +726,14 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
 
         if (input0IsScalar && input1IsScalar) {
             return rewriter.notifyMatchFailure(eltOp, "don't support both input is scalar for now");
+        }
+
+        // A scalar that folds into the bias has no ALU operand, so do not broadcast it.
+        if (!input0IsScalar) {
+            alignInputToOutputShape(input0, output, rewriter);
+        }
+        if (!input1IsScalar) {
+            alignInputToOutputShape(input1, output, rewriter);
         }
 
         if (input0IsScalar) {
