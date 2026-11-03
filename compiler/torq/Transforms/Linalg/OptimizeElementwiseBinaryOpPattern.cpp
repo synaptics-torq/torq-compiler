@@ -339,9 +339,12 @@ class BroadcastElementwiseBinaryOpPattern : public OpRewritePattern<linalg::Gene
                     continue;
                 // The fused quantized add folds the rescales of an 8 or 16-bit constant into its
                 // weights, but rejects a wider one, e.g. an i32 constant shifted and rescaled by
-                // the TFLite converter. The plain add then needs it as a constant: compute it.
+                // the TFLite converter, and only matches when a rescale follows the add. The
+                // plain add then needs it as a constant: compute it.
+                Value result = srcOp->getResult(0);
                 if (source &&
-                    cast<RankedTensorType>(source.getType()).getElementTypeBitWidth() > 16) {
+                    (cast<RankedTensorType>(source.getType()).getElementTypeBitWidth() > 16 ||
+                     !foldForwardScaleClamp(result, 1, 12, 12, true))) {
                     auto computed = computeArithConst(operand->get());
                     if (succeeded(computed)) {
                         auto type = cast<RankedTensorType>(operand->get().getType());
