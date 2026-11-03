@@ -518,7 +518,7 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
 //   (a) i16 input: trunci(i16→i8) + index_cast + addi(128) + extract from i16 LUT
 //   (b) i8 input:  index_cast + addi(128) + extract from i16 LUT  (swish table fusion)
 //
-// Both produce i16 output from a 256-entry i16 lookup table.
+// Both produce i16 output from a 256-entry i16 lookup table (stored twice for (a)).
 // The +128 offset converts signed i8 range [-128,127] to unsigned index [0,255].
 class I16ExtractTableOpPattern : public OpRewritePattern<linalg::GenericOp> {
   public:
@@ -613,6 +613,15 @@ class I16ExtractTableOpPattern : public OpRewritePattern<linalg::GenericOp> {
             return rewriter.notifyMatchFailure(srcOp, "i16Table: table tensor is not constant");
 
         Location loc = srcOp.getLoc();
+        if (inputIsI16) {
+            // The ACT indexes the 512-entry table memory with (x + 128) mod 512, while the
+            // source looks up the low byte of x, (x + 128) mod 256: store the LUT twice.
+            OpBuilder::InsertionGuard guard(rewriter);
+            rewriter.setInsertionPointAfterValue(tableTensor);
+            tableTensor = tensor::ConcatOp::create(
+                rewriter, loc, /*dim=*/0, ValueRange{tableTensor, tableTensor}
+            );
+        }
         Value packedTable = buildPackedTable(rewriter, loc, tableTensor, /*signExtend=*/false);
         packedTable =
             createCompileTimeConstOp(packedTable.getDefiningOp(), rewriter).value_or(packedTable);
