@@ -90,6 +90,101 @@ static LogicalResult createReinterpretView(
 
 namespace {
 
+struct ExternalCallOpBufferizableOpInterface
+    : public BufferizableOpInterface::ExternalModel<
+          ExternalCallOpBufferizableOpInterface, ExternalCallOp> {
+    bool bufferizesToMemoryRead(Operation *, OpOperand &, const AnalysisState &) const {
+        return true;
+    }
+    bool bufferizesToMemoryWrite(Operation *, OpOperand &, const AnalysisState &) const {
+        return false;
+    }
+    bool bufferizesToAllocation(Operation *, Value) const { return true; }
+    bufferization::AliasingValueList
+    getAliasingValues(Operation *, OpOperand &, const AnalysisState &) const {
+        return {};
+    }
+    FailureOr<bufferization::BufferLikeType>
+    getBufferType(Operation *op, Value value, const BufferizationOptions &options, const BufferizationState &, SmallVector<Value> &)
+        const {
+        auto type = dyn_cast<RankedTensorType>(value.getType());
+        if (!type || !type.hasStaticShape())
+            return op->emitError("external functions require statically shaped ranked tensors");
+        std::optional<Attribute> memorySpace = Attribute{};
+        if (options.defaultMemorySpaceFn)
+            memorySpace = options.defaultMemorySpaceFn(cast<bufferization::TensorLikeType>(type));
+        if (!memorySpace)
+            return op->emitError("could not determine external function result memory space");
+        return cast<bufferization::BufferLikeType>(MemRefType::get(
+            type.getShape(), type.getElementType(), MemRefLayoutAttrInterface{}, *memorySpace
+        ));
+    }
+    LogicalResult bufferize(
+        Operation *op, RewriterBase &rewriter, const BufferizationOptions &options,
+        BufferizationState &state
+    ) const {
+        auto external = cast<ExternalCallOp>(op);
+        SmallVector<Value> buffers;
+        SmallVector<Value> outputs;
+        auto allocate = [&](MemRefType type) -> FailureOr<Value> {
+            if (options.allocationFn)
+                return options.allocationFn(rewriter, op->getLoc(), type, {}, 64);
+            return memref::AllocOp::create(rewriter, op->getLoc(), type).getResult();
+        };
+        for (Value input : external.getInputs()) {
+            if (!isa<RankedTensorType, MemRefType>(input.getType()))
+                return op->emitError("external function inputs must be ranked tensors or memrefs");
+            auto buffer = isa<MemRefType>(input.getType())
+                              ? FailureOr<Value>(input)
+                              : getBuffer(rewriter, input, options, state);
+            if (failed(buffer))
+                return failure();
+            auto type = dyn_cast<MemRefType>(buffer->getType());
+            if (!type || !type.hasStaticShape())
+                return op->emitError("external functions require statically shaped memrefs");
+            if (!type.getLayout().isIdentity()) {
+                auto dense = allocate(MemRefType::get(
+                    type.getShape(), type.getElementType(), MemRefLayoutAttrInterface{},
+                    type.getMemorySpace()
+                ));
+                if (failed(dense))
+                    return failure();
+                if (options.memCpyFn) {
+                    if (failed(options.memCpyFn(rewriter, op->getLoc(), *buffer, *dense)))
+                        return failure();
+                }
+                else {
+                    memref::CopyOp::create(rewriter, op->getLoc(), *buffer, *dense);
+                }
+                buffer = dense;
+            }
+            buffers.push_back(*buffer);
+        }
+        for (Value result : op->getResults()) {
+            auto type = dyn_cast<RankedTensorType>(result.getType());
+            if (!type || !type.hasStaticShape())
+                return op->emitError(
+                    "external function results must be statically shaped ranked tensors"
+                );
+            auto bufferType = bufferization::detail::asMemRefType(
+                bufferization::getBufferType(result, options, state)
+            );
+            if (failed(bufferType))
+                return failure();
+            auto buffer = allocate(cast<MemRefType>(*bufferType));
+            if (failed(buffer))
+                return failure();
+            buffers.push_back(*buffer);
+            outputs.push_back(*buffer);
+        }
+        ExternalCallOp::create(
+            rewriter, op->getLoc(), TypeRange{}, external.getFunctionName(), buffers
+        );
+        replaceOpWithBufferizedValues(rewriter, op, outputs);
+        return success();
+    }
+};
+
 // bufferizes an dps operation by substituting all the operands with buffers
 template <typename OpT>
 static LogicalResult bufferizeOp(
@@ -338,6 +433,7 @@ struct BitcastOpBufferizableOpInterface
 
 void registerBufferizationInterfaceExternalModels(DialectRegistry &registry) {
     registry.addExtension(+[](MLIRContext *context, TorqHLDialect *dialect) {
+        ExternalCallOp::attachInterface<ExternalCallOpBufferizableOpInterface>(*context);
         // this matches what is promised in TorqHLDialect::initialize
         syna::torq_hl::AddOp::attachInterface<TorqHLBufferizableOpInterface<syna::torq_hl::AddOp>>(
             *context

@@ -101,6 +101,8 @@ createAssignOperationsToCpuProgramsPass(bool disableCss = false, bool disableHos
 
 std::unique_ptr<OperationPass<ModuleOp>> createOutlineCpuProgramsPass();
 
+std::unique_ptr<OperationPass<ModuleOp>> createLowerCssExternalFunctionsPass();
+
 std::unique_ptr<OperationPass<ModuleOp>> createCompileCpuProgramsPass();
 
 std::unique_ptr<OperationPass<iree_compiler::IREE::HAL::ExecutableOp>>

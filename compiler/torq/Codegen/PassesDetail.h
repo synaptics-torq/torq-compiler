@@ -13,7 +13,9 @@
 
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -63,6 +65,7 @@ namespace mlir::syna::torq {
 #define GEN_PASS_DEF_FUSETRANSPOSEINTOGROUP
 #define GEN_PASS_DEF_LINALGSLICING
 #define GEN_PASS_DEF_LOWERARITHCONSTANTS
+#define GEN_PASS_DEF_LOWERCSSEXTERNALFUNCTIONS
 #define GEN_PASS_DEF_LOWERCALLPROGRAMTOSTARTWAIT
 #define GEN_PASS_DEF_LOWERHOSTCOPIESTONPU
 #define GEN_PASS_DEF_LRAMTILE

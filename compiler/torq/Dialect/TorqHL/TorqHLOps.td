@@ -1277,4 +1277,23 @@ def TorqHL_CompileInputToConstOp: TorqHL_Op<"compile_input_to_const", [Pure]> {
   let results = (outs AnyType:$output);
 }
 
+
+def TorqHL_ExternalCallOp: TorqHL_Op<"external_call"> {
+  let summary = "Call external CSS function";
+  let description = [{
+    Represents a call to an external pre-compiled function for CSS.
+    Tensor inputs and results must have static ranked shapes and byte-addressable
+    elements. Bufferization produces dense input memrefs followed by dense output
+    memrefs, with no SSA results. LLVM lowering calls a statically linked C function
+    returning void and taking only pointers, in that input-then-output order.
+    The operation is outlined for CSS and is not tiled.
+  }];
+
+  let arguments = (ins StrAttr:$function_name, Variadic<AnyType>:$inputs);
+  let results = (outs Variadic<AnyType>:$outputs);
+  let assemblyFormat = [{
+    $function_name `(` $inputs `)` attr-dict `:` functional-type($inputs, $outputs)
+  }];
+}
+
 #endif // TORQHL_DIALECT_IR_TORQHLOPS

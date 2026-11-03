@@ -283,6 +283,15 @@ def OutlineCpuPrograms :
 
 }
 
+def LowerCssExternalFunctions : Pass<"torq-lower-css-external-functions", "ModuleOp"> {
+    let summary = "Lower bufferized external CSS calls to statically linked pointer-only LLVM calls";
+    let constructor = "mlir::syna::torq::createLowerCssExternalFunctionsPass()";
+    let dependentDialects = [
+        "arith::ArithDialect", "LLVM::LLVMDialect", "memref::MemRefDialect",
+        "syna::torq_hl::TorqHLDialect"
+    ];
+}
+
 def CompileCpuPrograms :
     Pass<"torq-compile-css-tasks", "ModuleOp"> {
   let summary = "Compile all the CSS tasks source code to a binary";

@@ -10,6 +10,7 @@
 
 #include "iree/compiler/Dialect/Stream/IR/StreamDialect.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -21,6 +22,7 @@ namespace mlir::syna::torq {
 
 #define GEN_PASS_DECL
 
+#define GEN_PASS_DEF_APPLYTORQWRAPPER
 #define GEN_PASS_DEF_CONVERTNHWCOPTONCHW
 #define GEN_PASS_DEF_RAISERESIZENEARESTNEIGHBOR
 #define GEN_PASS_DEF_FOLDUNITEXTENTWRAPPER

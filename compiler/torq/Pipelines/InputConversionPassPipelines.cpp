@@ -36,6 +36,12 @@ namespace mlir::syna::torq {
 
 extern llvm::cl::opt<bool> clDisableSlices;
 
+static llvm::cl::opt<std::string> clTorqWrapper(
+    "torq-wrapper",
+    llvm::cl::desc("MLIR module defining entry points that wrap the model with pre/postprocessing"),
+    llvm::cl::init("")
+);
+
 //===----------------------------------------------------------------------===//
 // -torq-torqhl-transformation-pipeline
 //===----------------------------------------------------------------------===//
@@ -74,6 +80,11 @@ void buildTosaTransformPassPipeline(OpPassManager &passManager) {
 
     // apply Torq-specific type conversion
     buildTorqTypeConversionPipeline(passManager);
+
+    if (!clTorqWrapper.empty()) {
+        passManager.addPass(createApplyTorqWrapperPass(clTorqWrapper));
+        passManager.addPass(createCanonicalizerPass());
+    }
 
     // annotate tied operands for in-place buffer reuse
     if (clAnnotateTiedOperands)
@@ -146,6 +157,11 @@ void buildTorchTransformPassPipeline(OpPassManager &passManager) {
     // overflows the NSS instruction/data TCM.
     passManager.addNestedPass<func::FuncOp>(createRaiseResizeNearestNeighborPass());
 
+    if (!clTorqWrapper.empty()) {
+        passManager.addPass(createApplyTorqWrapperPass(clTorqWrapper));
+        passManager.addPass(createCanonicalizerPass());
+    }
+
     // annotate tied operands for in-place buffer reuse
     if (clAnnotateTiedOperands)
         passManager.addPass(createAnnotateTiedOperandsPass());
@@ -161,6 +177,11 @@ void buildLinalgTransformPassPipeline(OpPassManager &passManager) {
 
     // apply Torq-specific type conversion
     buildTorqTypeConversionPipeline(passManager);
+
+    if (!clTorqWrapper.empty()) {
+        passManager.addPass(createApplyTorqWrapperPass(clTorqWrapper));
+        passManager.addPass(createCanonicalizerPass());
+    }
 
     // annotate tied operands for in-place buffer reuse
     if (clAnnotateTiedOperands)

@@ -36,6 +36,163 @@ $ torq-compile model.mlir -o model.vmfb --torq-convert-dtypes --torq-convert-io-
 
 For broader model selection and verification guidance, see {ref}`Model Selection and Verification <model-selection-and-verification>`.
 
+## Preprocessing and Postprocessing Wrappers
+
+Use `--torq-wrapper=wrapper.mlir` to replace the model's public entry points
+with functions defined in a wrapper module. The wrapper declares the original
+model function and can use Linalg operations, calls to defined helpers, external
+CSS calls, or a combination of these for preprocessing and postprocessing.
+Calls may have multiple inputs and outputs, and arguments can be passed through
+unchanged or shared between calls.
+
+### External Calls
+
+For a model with signature `(tensor<4xbf16>) -> tensor<4xbf16>`:
+
+```mlir
+module {
+  func.func private @model(tensor<4xbf16>) -> tensor<4xbf16>
+  func.func private @normalize(tensor<4xi8>) -> tensor<4xbf16>
+  func.func private @decode(tensor<4xbf16>) -> tensor<4xi32>
+
+  func.func @wrapped(%input: tensor<4xi8>) -> tensor<4xi32> {
+    %prepared = call @normalize(%input) : (tensor<4xi8>) -> tensor<4xbf16>
+    %result = call @model(%prepared) : (tensor<4xbf16>) -> tensor<4xbf16>
+    %output = call @decode(%result) : (tensor<4xbf16>) -> tensor<4xi32>
+    return %output : tensor<4xi32>
+  }
+}
+```
+
+```shell
+$ torq-compile model.mlir --torq-wrapper=wrapper.mlir \
+  --torq-css-library=libprepost.a -o model.vmfb
+```
+
+The pass runs after Torq dtype conversion, before dispatch region creation and
+ABI generation. The original model and its wrapper operations participate in normal
+dispatch grouping together.
+The model declaration must match the model signature at that point, including
+any configured dtype conversions. Public wrapper definitions become the exported
+entry points, and original model definitions become private. Wrapper definitions
+must use names that do not collide with model symbols. The module may contain
+only `func.func` declarations and definitions; recursive calls are not supported.
+
+All original model entry points become private, including functions the wrapper
+never calls. Unwrapped entry points are no longer exported in the VMFB. To keep
+one available, define a public wrapper function that forwards to it.
+
+Calls to declarations not present in the model become
+`torq_hl.external_call` operations, with the declaration name identifying
+the external CSS function. Model calls and calls to defined wrapper helpers are
+inlined.
+
+### Linalg Operations
+
+A wrapper can implement its processing directly with `linalg.generic` and other
+operations supported by the Torq input pipeline. No external declarations or
+`--torq-css-library` option are needed. For a model with signature
+`(tensor<4xi16>) -> tensor<4xi16>`, this wrapper adds one before the model and
+doubles its result:
+
+```mlir
+module {
+  func.func private @model(tensor<4xi16>) -> tensor<4xi16>
+
+  func.func @wrapped(%input: tensor<4xi16>) -> tensor<4xi16> {
+    %pre_empty = tensor.empty() : tensor<4xi16>
+    %prepared = linalg.generic {
+        indexing_maps = [affine_map<(index) -> (index)>,
+                         affine_map<(index) -> (index)>],
+        iterator_types = ["parallel"]}
+        ins(%input : tensor<4xi16>) outs(%pre_empty : tensor<4xi16>) {
+      ^bb0(%value: i16, %init: i16):
+        %one = arith.constant 1 : i16
+        %incremented = arith.addi %value, %one : i16
+        linalg.yield %incremented : i16
+    } -> tensor<4xi16>
+
+    %result = call @model(%prepared) : (tensor<4xi16>) -> tensor<4xi16>
+
+    %post_empty = tensor.empty() : tensor<4xi16>
+    %output = linalg.generic {
+        indexing_maps = [affine_map<(index) -> (index)>,
+                         affine_map<(index) -> (index)>],
+        iterator_types = ["parallel"]}
+        ins(%result : tensor<4xi16>) outs(%post_empty : tensor<4xi16>) {
+      ^bb0(%value: i16, %init: i16):
+        %two = arith.constant 2 : i16
+        %doubled = arith.muli %value, %two : i16
+        linalg.yield %doubled : i16
+    } -> tensor<4xi16>
+    return %output : tensor<4xi16>
+  }
+}
+```
+
+```shell
+$ torq-compile model.mlir --torq-wrapper=wrapper.mlir -o model.vmfb
+```
+
+The model is inlined into the wrapper before dispatch creation, allowing the
+Linalg preprocessing and postprocessing to participate in normal dispatch
+grouping, fusion, tiling, and kernel selection. Defined helper functions are
+also inlined rather than converted to external calls. Wrapper bodies should
+already use lowered operations such as Linalg, Tensor, and Arith; frontend
+import and Torq dtype conversion have completed before wrapper insertion.
+
+### Static CSS Libraries
+
+Supply implementations in a RISC-V static archive using
+`--torq-css-library=libprepost.a`. Repeat the option to link multiple archives.
+These libraries are linked only into CSS programs, not host programs. Normal
+archive extraction excludes unused members, and section garbage collection
+removes unused sections from selected members. Compile library sources with
+`-ffunction-sections -fdata-sections` to enable per-function and per-data removal.
+The CSS code is linked with some libraries (including boostrap code and, on SL2610, 
+libm), therefore it is better to use a custom prefix for all functions names 
+to avoid collision with existing symbols.
+
+External functions use the C ABI with a `void` return type. Pass one pointer
+for each input, followed by one pointer for each result, in declaration order.
+Inputs are read-only and the function must completely initialize all outputs.
+There are no memref descriptors, shapes, strides, or scalar return values in
+the call. For the external-call wrapper above, the C signatures are:
+
+```c
+void normalize(const signed char *input, unsigned short *output);
+void decode(const unsigned short *input, int *output);
+```
+
+The `unsigned short` pointers here carry raw BF16 payloads; the compiler does
+not convert the data to C floating-point values. C++ implementations must use
+`extern "C"` to preserve the declared symbol names.
+
+Build the archive for the selected CSS target: `SL2610` uses the `ilp32` ABI,
+and `SR200` uses `ilp32f`. Query the compiler for the matching Clang target
+flags without providing an input model:
+
+```shell
+$ torq-compile --torq-print-css-target-flags=SL2610
+--target=riscv32-unknown-elf -march=rv32im -mabi=ilp32
+```
+
+The query accepts a named platform from `torq-compile --torq-hw=list` and exits
+after printing a single line of flags. For example, build an SL2610 library with:
+
+```shell
+$ clang $(torq-compile --torq-print-css-target-flags=SL2610) \
+  -ffreestanding -ffunction-sections -fdata-sections -O2 -c prepost.c -o prepost.o
+$ llvm-ar rcs libprepost.a prepost.o
+```
+
+External calls execute once on CSS without LRAM/DTCM tiling. Arguments and
+results must be statically shaped ranked tensors with byte-addressable integer
+or floating-point elements. Bufferization packs non-identity input layouts into
+dense row-major memrefs and allocates dense output buffers. Library functions
+must fit the available CSS instruction and scratch memory; disabling CSS is an
+error when external calls are present.
+
 ---
 
 ## Input Structure for `torq-run-module`

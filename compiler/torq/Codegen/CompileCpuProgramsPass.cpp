@@ -13,14 +13,17 @@
 
 #include "torq/Codegen/css_bootstrap/css_kernel_riscv.h"
 
+#include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Dialect/TorqHW/TorqHWInfo.h"
 
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Transforms/Passes.h"
 
 #include "iree/compiler/Codegen/Dialect/CPU/IR/IREECPUDialect.h"
@@ -46,6 +49,7 @@
 #include "llvm/Object/IRObjectFile.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/TargetParser/Host.h"
 
 #include "llvm/TargetParser/Triple.h"
@@ -55,6 +59,11 @@
 using namespace mlir::iree_compiler;
 
 namespace mlir::syna::torq {
+
+static llvm::cl::list<std::string> clCssLibraries(
+    "torq-css-library", llvm::cl::desc("Static archive to link into CSS programs (repeatable)"),
+    llvm::cl::ZeroOrMore
+);
 
 static llvm::cl::opt<bool> clKeepCssLinkingArtifacts(
     "torq-keep-css-linking-artifacts",
@@ -157,6 +166,7 @@ class CssLinker {
 
         /* Hide build info that makes files unreproducible. */
         command.push_back("--build-id=none");
+        command.push_back("--gc-sections");
 
         /* Use the specified linker script when generating the library*/
         command.push_back("-T");
@@ -406,6 +416,8 @@ static void addCssLoweringPasses(OpPassManager &pipeline) {
         // Handle complex operation conversion.
         .addPass(createConvertComplexToStandardPass)
         .addPass(createHoistStaticallyBoundAllocationsPass);
+
+    modulePassManager.addPass(createLowerCssExternalFunctionsPass());
 
     FunctionLikeNest(modulePassManager)
         // Resolve get_buffer_descriptor ops. All structural buffer manipulations
@@ -739,6 +751,14 @@ LogicalResult CompileCpuProgramsPass::compileAndLink(IREE::HAL::ExecutableVarian
         CssLinker linker(libraryName);
 
         linker.addObjectFile(*maybeObject, "o");
+
+        for (const auto &path : clCssLibraries) {
+            auto archive = llvm::MemoryBuffer::getFile(path);
+            if (!archive)
+                return variantOp.emitError("could not read CSS library '")
+                       << path << "': " << archive.getError().message();
+            linker.addObjectFile((*archive)->getBuffer().str(), "external.a");
+        }
 
         if (failed(linker.link(variantOp, codeVec))) {
             return failure();

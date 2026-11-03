@@ -16,6 +16,7 @@ iree_cc_library(
     Passes.h.inc
   SRCS
     Passes.cpp
+    ApplyTorqWrapperPass.cpp
     AnnotateLinalgAffinitiesPass.cpp
     OutlineTorqDispatchesPass.cpp
     AnnotateTiedOperandsPass.cpp
@@ -64,9 +65,11 @@ iree_cc_library(
   DEPS
     ::PassesIncGen
     MLIRArithDialect
+    MLIRFuncDialect
     MLIRFunctionInterfaces
     MLIRIR
     MLIRLinalgDialect
+    MLIRParser
     MLIRPass
     MLIRTensorDialect
     MLIRTosaDialect

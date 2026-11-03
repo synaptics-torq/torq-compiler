@@ -12,6 +12,8 @@
 
 namespace mlir::syna::torq {
 
+std::unique_ptr<OperationPass<ModuleOp>> createApplyTorqWrapperPass(StringRef wrapperFile = {});
+
 //===---------------------------------------------------------------------===//
 // Torq type-conversion passes.
 //===---------------------------------------------------------------------===//

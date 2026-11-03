@@ -10,6 +10,23 @@
 include "mlir/Pass/PassBase.td"
 include "mlir/Rewrite/PassUtil.td"
 
+def ApplyTorqWrapper : Pass<"torq-apply-wrapper", "mlir::ModuleOp"> {
+    let summary = "Wrap model functions with external pre/postprocessing calls";
+    let description = [{
+        Loads an MLIR module whose public function definitions become the model's
+        entry points. Declarations matching model definitions must have identical
+        types; other declarations name external CSS functions. Calls to these
+        external declarations become torq_hl.external_call operations, and
+        calls to model functions and wrapper helpers are inlined. Original model
+        definitions become private. Wrapper signatures use the model types after
+        input conversion, including Torq dtype conversion.
+    }];
+    let constructor = "mlir::syna::torq::createApplyTorqWrapperPass()";
+    let options = [Option<"wrapperFile", "wrapper-file", "std::string", "\"\"",
+                                                "Path to the wrapper MLIR module">];
+    let dependentDialects = ["func::FuncDialect", "torq_hl::TorqHLDialect"];
+}
+
 //===---------------------------------------------------------------------===//
 // Torq type-conversion passes.
 //===---------------------------------------------------------------------===//

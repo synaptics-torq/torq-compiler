@@ -151,6 +151,24 @@ static llvm::cl::opt<TorqHw, false, TorqHwParser> clTorqHw(
                    "custom target specification as " TORQ_CUSTOM_FORMAT)
 );
 
+static llvm::cl::opt<std::string> clPrintCssTargetFlags(
+    "torq-print-css-target-flags",
+    llvm::cl::desc("Print Clang CSS target flags for a named Torq platform and exit"),
+    llvm::cl::value_desc("platform"), llvm::cl::callback([](const std::string &platform) {
+        for (const auto &hw : hwTypes) {
+            if (hw.getName() != platform)
+                continue;
+            auto config = hw.getCssConfig();
+            llvm::outs() << "--target=riscv32-unknown-elf -march=" << config.march
+                         << " -mabi=" << config.mabi << "\n";
+            exit(0);
+        }
+        llvm::errs() << "Unknown Torq platform '" << platform
+                     << "'; use --torq-hw=list to list available platforms\n";
+        exit(1);
+    })
+);
+
 static std::optional<TorqHw> instance{std::nullopt};
 
 const TorqHw &TorqHw::get() {

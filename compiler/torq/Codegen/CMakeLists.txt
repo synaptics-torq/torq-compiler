@@ -21,6 +21,7 @@ set(sources
     CoalesceElementwiseChainsPass.cpp
     FuseTransposeIntoGroupPass.cpp
     CompileCpuProgramsPass.cpp
+    LowerCssExternalFunctionsPass.cpp
     ConvertTensorPadToLinalgPass.cpp
     DecomposeTensorConcatPass.cpp
     CompileNSSInvocationsPass.cpp

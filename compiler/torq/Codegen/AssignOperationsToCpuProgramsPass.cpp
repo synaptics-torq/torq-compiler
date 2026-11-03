@@ -134,7 +134,8 @@ AssignOperationsToCpuProgramsPass::createOutliningGroups(Region *region, int nex
         else if (isa<tensor::ConcatOp>(op) && getTargetExecutor(&op) == torq_hl::Executor::Slice) {
             noOutlineOps.insert(&op);
         }
-        else if (op.getDialect()->getNamespace() == torq_hl::TorqHLDialect::getDialectNamespace()) {
+        else if (op.getDialect()->getNamespace() == torq_hl::TorqHLDialect::getDialectNamespace() &&
+                 !isa<torq_hl::ExternalCallOp>(op)) {
             noOutlineOps.insert(&op);
         }
         else if (op.getDialect()->getNamespace() ==
@@ -191,7 +192,12 @@ AssignOperationsToCpuProgramsPass::createOutliningGroups(Region *region, int nex
 
             torq_hl::Executor executor;
 
-            if (!disableCSS) {
+            if (isa<torq_hl::ExternalCallOp>(op)) {
+                if (disableCSS)
+                    return op.emitError("external functions require CSS execution");
+                executor = torq_hl::Executor::CSS;
+            }
+            else if (!disableCSS) {
                 executor = getTargetExecutor(&op, torq_hl::Executor::CSS);
             }
             else if (!disableHost) {
