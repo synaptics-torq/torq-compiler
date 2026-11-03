@@ -6,6 +6,7 @@
 
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Dialect/TorqHW/TorqHWInfo.h"
+#include "torq/Utils/Kernel.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -804,6 +805,106 @@ Value getDefaultBiasScale(
         );
     }
     return biasV;
+}
+
+int64_t stride2LoweringOffset(::llvm::ArrayRef<int64_t> pads, int64_t kh, int64_t kw) {
+    return (pads[LRTBDim::Left] == (kw - 1) / 2 && pads[LRTBDim::Top] == (kh - 1) / 2) ? 0 : 1;
+}
+
+// Whether the kernels need the trailing border of an axis forged: the window of the last of
+// `out` outputs ends past the `n` input elements. When they compute fewer outputs than the
+// quadrant has, a forged trailing border lands on real input instead, so it must stay disabled.
+static bool stride2NeedsTrail(int64_t n, int64_t out, int64_t k, int64_t s) {
+    return 2 * (out - 1) + s - (k - 1) / 2 + k - 1 >= n;
+}
+
+bool isStride2ConvPadLegal(
+    ::llvm::ArrayRef<int64_t> inputShape, ::llvm::ArrayRef<int64_t> outputShape, int64_t kh,
+    int64_t kw, ::llvm::ArrayRef<int64_t> pads
+) {
+    const int64_t s = stride2LoweringOffset(pads, kh, kw);
+    // Even kernels are only right with the leading padding B (#2717), i.e. s == 0.
+    if (s == 1 && (kh % 2 == 0 || kw % 2 == 0))
+        return false;
+    const int64_t h = inputShape[NCHW::H], w = inputShape[NCHW::W];
+    const int64_t outH = outputShape[NCHW::H], outW = outputShape[NCHW::W];
+    if (h % 2 || w % 2 || outW != w / 2 || outH <= 0 || outH > h / 2)
+        return false;
+    if (pads[LRTBDim::Top] != (kh - 1) / 2 - s || pads[LRTBDim::Left] != (kw - 1) / 2 - s)
+        return false;
+    const bool trailH = stride2NeedsTrail(h, outH, kh, s);
+    if (outH < h / 2 ? (trailH || pads[LRTBDim::Bottom] > 0) : (trailH && !pads[LRTBDim::Bottom]))
+        return false;
+    return !(stride2NeedsTrail(w, outW, kw, s) && !pads[LRTBDim::Right]);
+}
+
+std::optional<Stride2PadPlan> planStride2ConvPad(
+    ::llvm::ArrayRef<int64_t> inputShape, ::llvm::ArrayRef<int64_t> outputShape, int64_t kh,
+    int64_t kw, ::llvm::ArrayRef<int64_t> pads
+) {
+    struct AxisPlan {
+        int64_t grow, extract, padded, out, lead, trail;
+        bool fill;
+    };
+    // Output o of the op reads from 2*o - p. On the input shifted by `grow`, output o + extract of
+    // the kernel reads from 2*(o + extract) + s - B - grow, so grow = 2*extract + s - B + p.
+    auto planAxis = [](int64_t n, int64_t m, int64_t k, int64_t p, int64_t s,
+                       bool fullQuadrant) -> std::optional<AxisPlan> {
+        const int64_t b = (k - 1) / 2;
+        if (b - s < 0)
+            return std::nullopt;
+        const int64_t d = s - b + p;
+        AxisPlan a;
+        a.grow = d >= 0 ? d : (-d) % 2;
+        a.extract = (a.grow - d) / 2;
+        a.padded = std::max((a.grow + n + 1) / 2 * 2, 2 * (a.extract + m));
+        // Fewer outputs than the quadrant only when no trailing border is needed (see
+        // stride2NeedsTrail).
+        a.out = a.extract + m;
+        if (fullQuadrant || stride2NeedsTrail(a.padded, a.out, k, s))
+            a.out = a.padded / 2;
+        a.lead = b - s;
+        a.trail = stride2NeedsTrail(a.padded, a.out, k, s) ? k - 1 - b : 0;
+        // The kept windows read [-p, 2*(m-1) - p + k - 1] of the original input: the part
+        // outside [0, n) is padding, which the grown elements must hold where they are read.
+        const int64_t last = 2 * (m - 1) - p + k - 1;
+        a.fill = (p > 0 && a.grow > 0) || (last >= n && a.padded > a.grow + n);
+        return a;
+    };
+
+    std::optional<Stride2PadPlan> best;
+    int64_t bestCost = 0;
+    for (int64_t s : {0, 1}) {
+        // Even kernels are only right with the leading padding B (#2717), i.e. s == 0.
+        if (s == 1 && (kh % 2 == 0 || kw % 2 == 0))
+            continue;
+        auto h =
+            planAxis(inputShape[NCHW::H], outputShape[NCHW::H], kh, pads[LRTBDim::Top], s, false);
+        auto w =
+            planAxis(inputShape[NCHW::W], outputShape[NCHW::W], kw, pads[LRTBDim::Left], s, true);
+        if (!h || !w)
+            continue;
+        Stride2PadPlan plan;
+        plan.growBegin = {0, 0, h->grow, w->grow};
+        plan.extractOffset = {0, 0, h->extract, w->extract};
+        plan.paddedInputShape = {inputShape[NCHW::N], inputShape[NCHW::C], h->padded, w->padded};
+        plan.newPads = {w->lead, w->trail, h->lead, h->trail};
+        plan.newOutShape = {outputShape[NCHW::N], outputShape[NCHW::C], h->out, w->out};
+        plan.needsGrow = h->padded != inputShape[NCHW::H] || w->padded != inputShape[NCHW::W] ||
+                         h->grow || w->grow;
+        plan.needsFill = plan.needsGrow && (h->fill || w->fill);
+        // Prefer no input copy, then rows of the original width (a wider row moves every
+        // quadrant column), then the smallest buffer and output.
+        const bool wGrown = w->grow || w->padded != inputShape[NCHW::W];
+        int64_t cost = h->padded * w->padded + h->out * w->out +
+                       (plan.needsGrow ? (int64_t(1) << 40) : 0) +
+                       (wGrown ? (int64_t(1) << 32) : 0);
+        if (!best || cost < bestCost) {
+            best = plan;
+            bestCost = cost;
+        }
+    }
+    return best;
 }
 
 } // namespace mlir::syna::torq

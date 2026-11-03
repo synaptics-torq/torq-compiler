@@ -3,9 +3,7 @@ test_keras_model_torq[model084_tanh_zp76_int16-sim-sl2610-v1] synaptics-torq/tor
 test_keras_model_torq[model086_tanh_1x4x6x8_int16-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1390
 test_keras_model_torq[model086_tanh_1x4x6x8_int16-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1390
 test_keras_model_torq[conv2d_k5x4_s2x2_valid_12x52x10_oc23_int16-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1390
-test_keras_model_torq[conv2d_k5x4_s2x2_valid_12x52x10_oc23_int16-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1390
 test_keras_model_torq[conv2d_k5x4_s2x2_valid_12x52x10_oc23_int8-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1390
-test_keras_model_torq[conv2d_k5x4_s2x2_valid_12x52x10_oc23_int8-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1390
 test_keras_model_torq[convtranspose_test1_int8_nnr301_inp_16x1x48_k3x1_oc48_s2x1_same_int16-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#2058
 test_keras_model_torq[convtranspose_test2_int8_nnr301_inp_32x1x48_k3x1_oc48_s2x1_same_int16-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#2058
 test_keras_model_torq[convtranspose_test4_int8_nnr301_inp_64x1x32_k3x1_oc32_s2x1_same_int16-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#2058
@@ -27,9 +25,7 @@ test_keras_model_torq[model084_tanh_zp76_int16-sim-sr200-v1] synaptics-torq/torq
 test_keras_model_torq[model086_tanh_1x4x6x8_int16-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#1390
 test_keras_model_torq[model086_tanh_1x4x6x8_int16-sim-sr200-v1] synaptics-torq/torq-compiler-dev#1390
 test_keras_model_torq[conv2d_k5x4_s2x2_valid_12x52x10_oc23_int16-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#1390
-test_keras_model_torq[conv2d_k5x4_s2x2_valid_12x52x10_oc23_int16-sim-sr200-v1] synaptics-torq/torq-compiler-dev#1390
 test_keras_model_torq[conv2d_k5x4_s2x2_valid_12x52x10_oc23_int8-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#1390
-test_keras_model_torq[conv2d_k5x4_s2x2_valid_12x52x10_oc23_int8-sim-sr200-v1] synaptics-torq/torq-compiler-dev#1390
 test_keras_model_torq[convtranspose_test1_int8_nnr301_inp_16x1x48_k3x1_oc48_s2x1_same_int16-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#2058
 test_keras_model_torq[convtranspose_test2_int8_nnr301_inp_32x1x48_k3x1_oc48_s2x1_same_int16-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#2058
 test_keras_model_torq[convtranspose_test4_int8_nnr301_inp_64x1x32_k3x1_oc32_s2x1_same_int16-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#2058

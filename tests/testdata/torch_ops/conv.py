@@ -194,6 +194,22 @@ def make_conv_qdq_sliced_remainder_i8():
     return g.export(g.qdq(y, 0.0625, 0, dtype=F32, shape=[1, 20, 12, 12]))
 
 
+def make_conv2d_bf16_chain_k5s2_k3s2_k3s2():
+    """5x5 then two 3x3 stride-2 SAME convs with Relu, tiled and fused on 32x240x320."""
+    rng = np.random.default_rng(0)
+    g = OnnxGraph(22)
+    y = g.input("x", BF16, [1, 32, 240, 320])
+    for i, (k, out_hw) in enumerate([(5, [120, 160]), (3, [60, 80]), (3, [30, 40])]):
+        weights = g.const(rng.uniform(-0.1, 0.1, [32, 32, k, k]), BF16)
+        bias = g.const(rng.uniform(-0.1, 0.1, [32]), BF16)
+        y = g.op("Conv", y, weights, bias, auto_pad="NOTSET", dilations=[1, 1], group=1,
+                 kernel_shape=[k, k], pads=[k // 2] * 4, strides=[2, 2], dtype=BF16,
+                 shape=[1, 32, *out_hw])
+        if i < 2:
+            y = g.op("Relu", y, dtype=BF16, shape=[1, 32, *out_hw])
+    return g.export(y)
+
+
 # Conv attributes as the original models spelled them out.
 _CONV_3X3_ATTRS = {"auto_pad": "NOTSET", "dilations": [1, 1], "kernel_shape": [3, 3],
                "pads": [1, 1, 1, 1]}
@@ -216,6 +232,62 @@ CASES = {
     "conv2d_bf16_8x8x3x3_s2_into_s2_segment_output_8x8x40": partial(
         _make_conv_relu_conv, convolved_shape=[1, 8, 4, 20], output_shape=[1, 8, 2, 10],
         weights1_shape=[8, 8, 3, 3], **_CONV_3X3_ATTRS, group=1, strides=[2, 2],
+    ),
+    "conv2d_bf16_8x4x3x3_stride2x2_pad1_4x513x1025": partial(
+        _make_conv, [1, 4, 513, 1025], [8, 4, 3, 3], [1, 8, 257, 513], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=1, kernel_shape=[3, 3], pads=[1, 1, 1, 1],
+        strides=[2, 2],
+    ),
+    "conv2d_bf16_16x3x3x3_stride2x2_pad1_3x241x320": partial(
+        _make_conv, [1, 3, 241, 320], [16, 3, 3, 3], [1, 16, 121, 160], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=1, kernel_shape=[3, 3], pads=[1, 1, 1, 1],
+        strides=[2, 2],
+    ),
+    "conv2d_bf16_8x8x3x3_stride2x2_mixed_phase_pad_8x32x32": partial(
+        _make_conv, [1, 8, 32, 32], [8, 8, 3, 3], [1, 8, 16, 16], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=1, kernel_shape=[3, 3], pads=[0, 1, 1, 0],
+        strides=[2, 2],
+    ),
+    "conv2d_bf16_8x8x3x5_stride2x2_pads1001_mixed_phase_8x32x32": partial(
+        _make_conv, [1, 8, 32, 32], [8, 8, 3, 5], [1, 8, 16, 15], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=1, kernel_shape=[3, 5], pads=[1, 0, 0, 1],
+        strides=[2, 2],
+    ),
+    "conv2d_bf16_8x8x3x5_stride2x2_pads0111_8x32x32": partial(
+        _make_conv, [1, 8, 32, 32], [8, 8, 3, 5], [1, 8, 16, 15], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=1, kernel_shape=[3, 5], pads=[0, 1, 1, 1],
+        strides=[2, 2],
+    ),
+    "conv2d_bf16_8x8x5x5_stride2x2_pads0011_8x32x32": partial(
+        _make_conv, [1, 8, 32, 32], [8, 8, 5, 5], [1, 8, 15, 15], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=1, kernel_shape=[5, 5], pads=[0, 0, 1, 1],
+        strides=[2, 2],
+    ),
+    "conv2d_bf16_8x8x5x5_stride2x2_pads1111_8x32x32": partial(
+        _make_conv, [1, 8, 32, 32], [8, 8, 5, 5], [1, 8, 15, 15], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=1, kernel_shape=[5, 5], pads=[1, 1, 1, 1],
+        strides=[2, 2],
+    ),
+    "conv2d_bf16_8x8x5x5_stride2x2_pads2111_8x32x32": partial(
+        _make_conv, [1, 8, 32, 32], [8, 8, 5, 5], [1, 8, 16, 15], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=1, kernel_shape=[5, 5], pads=[2, 1, 1, 1],
+        strides=[2, 2],
+    ),
+    "conv2d_bf16_8x8x7x7_stride2x2_pads1122_8x32x32": partial(
+        _make_conv, [1, 8, 32, 32], [8, 8, 7, 7], [1, 8, 15, 15], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=1, kernel_shape=[7, 7], pads=[1, 1, 2, 2],
+        strides=[2, 2],
+    ),
+    "conv2d_bf16_chain_k5s2_k3s2_k3s2_32x240x320": make_conv2d_bf16_chain_k5s2_k3s2_k3s2,
+    "depthwise_conv2d_bf16_8x3x5_stride2x2_pads1001_mixed_phase_8x32x32": partial(
+        _make_conv, [1, 8, 32, 32], [8, 1, 3, 5], [1, 8, 16, 15], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=8, kernel_shape=[3, 5], pads=[1, 0, 0, 1],
+        strides=[2, 2],
+    ),
+    "depthwise_conv2d_bf16_8x5x5_stride2x2_pads0011_8x32x32": partial(
+        _make_conv, [1, 8, 32, 32], [8, 1, 5, 5], [1, 8, 15, 15], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=8, kernel_shape=[5, 5], pads=[0, 0, 1, 1],
+        strides=[2, 2],
     ),
     "encoder_bf16_layer_Conv_2-sim-sl2610-v1": partial(
         _make_conv, [1, 1, 80000], [288, 1, 127], [1, 288, 1249], weight_range=(-1.6875, 1.71875),
@@ -415,6 +487,9 @@ CASES = {
 }
 
 CONFIG = {
+    # bf16 intermediates: ~0.1% of the outputs are 1 ULP off after each of the first two convs,
+    # which the next convs amplify past the default tolerance on near-cancelling outputs.
+    "conv2d_bf16_chain_k5s2_k3s2_k3s2_32x240x320": {"comparison": {"allowed_wrong": 0.002}},
     "Conv2d_bf16_1x1x64x8192": {"comparison": {"fp_max_tol": 1.1, "fp_avg_tol": 0.2}},
     # Gates of one int8 step, not two: a few outputs differ from the float reference by one step.
     "conv-qdq-sliced-remainder-i8": {

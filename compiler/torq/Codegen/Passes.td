@@ -61,8 +61,8 @@ def DecomposeTensorConcat
   ];
 }
 
-// The four conv/pool kernel passes run after tiling, on the torq_hl conv2d, depthwise_conv2d and
-// max_pool2d ops of each tile, in this order: the three padding passes, then the kernel layout.
+// The five conv/pool kernel passes run after tiling, on the torq_hl conv2d, depthwise_conv2d and
+// max_pool2d ops of each tile, in this order: the four padding passes, then the kernel layout.
 
 def AlignStride2ConvPoolPadding
     : InterfacePass<"torq-align-stride2-conv-pool-padding", "mlir::FunctionOpInterface"> {
@@ -77,6 +77,27 @@ def AlignStride2ConvPoolPadding
 
   let dependentDialects = [
     "syna::torq_hl::TorqHLDialect",
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
+def LegalizeStride2ConvPadding
+    : InterfacePass<"torq-legalize-stride2-conv-padding", "mlir::FunctionOpInterface"> {
+
+  let summary = "Gives stride-2 convs and depthwise convs the windows their pads describe.";
+  let description = [{
+    The stride-2 conv and depthwise kernels read each output window from a fixed input offset,
+    whatever the pads say. Rewrites each static stride-2 conv or depthwise conv whose pads the
+    kernels don't express into an op on an even, possibly grown input whose pads give the kernels
+    the same windows, and extracts the original outputs. The later padding passes skip these ops.
+  }];
+
+  let constructor = "mlir::syna::torq::createLegalizeStride2ConvPaddingPass()";
+
+  let dependentDialects = [
+    "syna::torq_hl::TorqHLDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::arith::ArithDialect",
     "mlir::tensor::TensorDialect"
   ];
 }

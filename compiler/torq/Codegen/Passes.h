@@ -53,6 +53,8 @@ std::unique_ptr<OperationPass<func::FuncOp>> createDecomposeTensorConcatPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAlignStride2ConvPoolPaddingPass();
 
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createLegalizeStride2ConvPaddingPass();
+
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createEvenStride2ConvPoolInputsPass();
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createConvPoolSamePaddingPass();

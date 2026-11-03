@@ -137,6 +137,28 @@ LogicalResult getConvPoolKernelSize(TorqConvPoolOp op, int64_t &ksizeH, int64_t 
     }
 }
 
+// Stride-2 conv/depthwise convs that LegalizeStride2ConvPadPattern rewrites from their own pads
+// with the kernels' window model; the older padding patterns leave them alone.
+template <class TorqConvPoolOp> bool isPlannedStride2Conv(TorqConvPoolOp op) {
+    if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
+        return false;
+    }
+    else {
+        auto inputType = llvm::dyn_cast<RankedTensorType>(op.getInput().getType());
+        auto outputType = llvm::dyn_cast<RankedTensorType>(op.getResult(0).getType());
+        if (!inputType || !outputType || inputType.getRank() != 4 || outputType.getRank() != 4 ||
+            !inputType.hasStaticShape() || !outputType.hasStaticShape())
+            return false;
+        auto strides = op.getStride();
+        if (strides.size() != 2 || strides[0] != 2 || strides[1] != 2 || op.getPad().size() != 4)
+            return false;
+        if (op.getNhwcInput() || !llvm::all_of(op.getDilation(), [](int64_t d) { return d == 1; }))
+            return false;
+        int64_t kh, kw;
+        return succeeded(getConvPoolKernelSize(op, kh, kw)) && kh >= 2 && kw >= 2;
+    }
+}
+
 // stride_offset selects between the two hardware-valid SAME-pad alignments for a stride-2 op:
 // 1 = bottom/right-heavy (default), 0 = top/left-heavy. Non stride-2 ops, 1x1 kernels, and
 // inputs already using centre padding are top/left-heavy. See ConvertConvValidPadToSamePadPattern
@@ -219,6 +241,8 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPool
     using OpRewritePattern<TorqConvPoolOp>::OpRewritePattern;
 
     LogicalResult matchAndRewrite(TorqConvPoolOp op, PatternRewriter &rewriter) const override {
+        if (isPlannedStride2Conv(op))
+            return failure();
 
         auto inputType = llvm::cast<RankedTensorType>(op.getInput().getType());
         if (!inputType)
@@ -533,6 +557,8 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
     using OpRewritePattern<TorqConvPoolOp>::OpRewritePattern;
 
     LogicalResult matchAndRewrite(TorqConvPoolOp op, PatternRewriter &rewriter) const override {
+        if (isPlannedStride2Conv(op))
+            return failure();
         auto inputType = llvm::cast<RankedTensorType>(op.getInput().getType());
         if (!inputType || inputType.getRank() != 4)
             return failure();
@@ -835,6 +861,71 @@ class ConvertMixedPadPhasePoolPattern : public OpRewritePattern<torq_hl::MaxPool
     }
 };
 
+// The stride-2 conv and depthwise kernels read the window of output o from input 2*o + s - B
+// (stride2LoweringOffset), whatever the pads say. Rewrite each such op, from the windows its own
+// pads describe, into an op on an even, possibly grown input whose pads give the kernels exactly
+// those windows, followed by an extract of the original outputs.
+template <class TorqConvOp>
+class LegalizeStride2ConvPadPattern : public OpRewritePattern<TorqConvOp> {
+  public:
+    using OpRewritePattern<TorqConvOp>::OpRewritePattern;
+
+    LogicalResult matchAndRewrite(TorqConvOp op, PatternRewriter &rewriter) const override {
+        if (!isPlannedStride2Conv(op))
+            return failure();
+        int64_t kh, kw;
+        if (failed(getConvPoolKernelSize(op, kh, kw)))
+            return failure();
+        auto inputType = cast<RankedTensorType>(op.getInput().getType());
+        auto inShape = inputType.getShape();
+        auto outShape = cast<RankedTensorType>(op.getResult(0).getType()).getShape();
+        auto pads = op.getPad();
+        if (isStride2ConvPadLegal(inShape, outShape, kh, kw, pads))
+            return failure();
+        // With kernel axes of at least 2, stride_offset 0 always gives a plan.
+        auto plan = planStride2ConvPad(inShape, outShape, kh, kw, pads);
+        assert(plan && "no legal stride-2 form for a conv with kernel axes of at least 2");
+
+        Location loc = op.getLoc();
+        auto elemType = inputType.getElementType();
+        Value input = op.getInput();
+        if (plan->needsGrow) {
+            Value buffer = tensor::EmptyOp::create(rewriter, loc, plan->paddedInputShape, elemType);
+            if (plan->needsFill) {
+                TypedAttr fillAttr = makePadFillAttr(rewriter, elemType, op.getInputZp());
+                if (!fillAttr)
+                    return failure();
+                auto fillConst = arith::ConstantOp::create(rewriter, loc, fillAttr);
+                buffer = linalg::FillOp::create(rewriter, loc, ValueRange{fillConst}, buffer)
+                             .getResult(0);
+            }
+            SmallVector<OpFoldResult> offsets, sizes;
+            for (int64_t i = 0; i < 4; ++i) {
+                offsets.push_back(rewriter.getIndexAttr(plan->growBegin[i]));
+                sizes.push_back(rewriter.getIndexAttr(inShape[i]));
+            }
+            input = tensor::InsertSliceOp::create(
+                rewriter, loc, op.getInput(), buffer, offsets, sizes,
+                SmallVector<OpFoldResult>(4, rewriter.getIndexAttr(1))
+            );
+        }
+
+        auto newOp = createWithPadding(rewriter, op, input, plan->newPads, plan->newOutShape);
+        if (ArrayRef<int64_t>(plan->newOutShape) == outShape &&
+            llvm::all_of(plan->extractOffset, [](int64_t o) { return o == 0; })) {
+            rewriter.replaceOp(op, newOp.getResult(0));
+            return success();
+        }
+        const auto &e = plan->extractOffset;
+        rewriter.replaceOpWithNewOp<tensor::ExtractSliceOp>(
+            op, newOp.getOutput(), createVector({e[0], e[1], e[2], e[3]}, rewriter),
+            createVector({outShape[0], outShape[1], outShape[2], outShape[3]}, rewriter),
+            createVector({1, 1, 1, 1}, rewriter)
+        );
+        return success();
+    }
+};
+
 // Adds `Pattern<Conv2DOp>`, `Pattern<DepthwiseConv2DOp>` and `Pattern<MaxPool2dOp>`
 template <template <class> class Pattern> void addConvPoolPatterns(RewritePatternSet &patterns) {
     MLIRContext *ctx = patterns.getContext();
@@ -856,6 +947,18 @@ class AlignStride2ConvPoolPaddingPass
     void runOnOperation() override {
         RewritePatternSet patterns(&getContext());
         addConvPoolPatterns<AlignEvenKernelStride2PaddingPattern>(patterns);
+        if (failed(applyToExistingOps(getOperation(), std::move(patterns))))
+            return signalPassFailure();
+    }
+};
+
+class LegalizeStride2ConvPaddingPass
+    : public impl::LegalizeStride2ConvPaddingBase<LegalizeStride2ConvPaddingPass> {
+  public:
+    void runOnOperation() override {
+        RewritePatternSet patterns(&getContext());
+        patterns.add<LegalizeStride2ConvPadPattern<torq_hl::Conv2DOp>>(&getContext());
+        patterns.add<LegalizeStride2ConvPadPattern<torq_hl::DepthwiseConv2DOp>>(&getContext());
         if (failed(applyToExistingOps(getOperation(), std::move(patterns))))
             return signalPassFailure();
     }
@@ -887,6 +990,10 @@ class ConvPoolSamePaddingPass : public impl::ConvPoolSamePaddingBase<ConvPoolSam
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createAlignStride2ConvPoolPaddingPass() {
     return std::make_unique<AlignStride2ConvPoolPaddingPass>();
+}
+
+std::unique_ptr<InterfacePass<FunctionOpInterface>> createLegalizeStride2ConvPaddingPass() {
+    return std::make_unique<LegalizeStride2ConvPaddingPass>();
 }
 
 std::unique_ptr<InterfacePass<FunctionOpInterface>> createEvenStride2ConvPoolInputsPass() {

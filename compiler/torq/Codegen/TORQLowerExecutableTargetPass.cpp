@@ -205,6 +205,7 @@ void addPostTileAndFuseLoweringPasses(
     // Padding, then weight layout and input segmentation of the conv and pool kernels, in this
     // order and without a canonicalizer between them
     funcPm.addPass(createAlignStride2ConvPoolPaddingPass());
+    funcPm.addPass(createLegalizeStride2ConvPaddingPass());
     funcPm.addPass(createEvenStride2ConvPoolInputsPass());
     funcPm.addPass(createConvPoolSamePaddingPass());
     funcPm.addPass(createConvPoolKernelLayoutPass());

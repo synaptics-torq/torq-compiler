@@ -542,4 +542,35 @@ Value getDefaultBiasScale(
     Operation *srcOp, RankedTensorType opType, PatternRewriter &rewriter, int biasDim
 );
 
+// Stride-2 NSS conv and depthwise conv kernels (both strides 2): output o of an axis reads the
+// input window starting at 2*o + s - B, B = (k - 1) / 2 the leading kernel border, and s the
+// stride_offset they infer from the pads. Pad values only enable border forging.
+int64_t stride2LoweringOffset(::llvm::ArrayRef<int64_t> pads, int64_t kh, int64_t kw);
+
+// True when the windows the kernels compute (see stride2LoweringOffset) are the windows the pads
+// describe and the shapes fit the quadrant layout: even input extents, leading pads B - s, an
+// output W of half the input W and an output H no taller. Shapes NCHW, pads LRTB.
+bool isStride2ConvPadLegal(
+    ::llvm::ArrayRef<int64_t> inputShape, ::llvm::ArrayRef<int64_t> outputShape, int64_t kh,
+    int64_t kw, ::llvm::ArrayRef<int64_t> pads
+);
+
+// A stride-2 conv/depthwise conv rewritten into a legal one: the input is copied at growBegin
+// into a buffer of paddedInputShape (filled with the pad value if needsFill), the op runs with
+// newPads into newOutShape, and the original output is extracted at extractOffset.
+struct Stride2PadPlan {
+    SmallVector<int64_t, 4> growBegin;        // NCHW
+    SmallVector<int64_t, 4> paddedInputShape; // NCHW
+    SmallVector<int64_t, 4> newPads;          // LRTB
+    SmallVector<int64_t, 4> newOutShape;      // NCHW
+    SmallVector<int64_t, 4> extractOffset;    // NCHW
+    bool needsGrow = false;
+    bool needsFill = false;
+};
+
+std::optional<Stride2PadPlan> planStride2ConvPad(
+    ::llvm::ArrayRef<int64_t> inputShape, ::llvm::ArrayRef<int64_t> outputShape, int64_t kh,
+    int64_t kw, ::llvm::ArrayRef<int64_t> pads
+);
+
 } // namespace mlir::syna::torq
