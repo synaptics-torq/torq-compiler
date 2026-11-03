@@ -421,7 +421,12 @@ void SliceTask::setTable(ArrayRef<int32_t> arraytable) {
         return;
     }
 
+    // torq_api copies the whole table memory (TBL_MEM, 512 entries) into the descriptor, so a
+    // 256-entry LUT is padded with zeros: the copy must not read past the end of the table.
+    constexpr size_t kTableMemEntries = 512;
+    assert(arraytable.size() <= kTableMemEntries && "LUT larger than the table memory");
     table.assign(arraytable.begin(), arraytable.end());
+    table.resize(kTableMemEntries, 0);
     d->cfg.table = reinterpret_cast<uint8_t *>(table.data());
 }
 
