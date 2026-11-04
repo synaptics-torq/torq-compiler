@@ -41,6 +41,18 @@ def test_float_beyond_tolerance_fails():
     assert result.tensors[0].max_rel_diff > 0.3
 
 
+def test_unmatched_infinity_fails_but_matching_infinity_passes():
+    expected = np.array([1.0, np.inf, -np.inf], np.float32)
+    observed = np.array([np.inf, np.inf, -np.inf], np.float32)
+    result = compare_outputs([observed], [expected])
+    assert not result.passed
+    assert result.tensors[0].num_diffs == 1
+    assert result.tensors[0].max_rel_diff == np.inf
+
+    matching = np.array([np.inf, -np.inf], np.float32)
+    assert compare_outputs([matching], [matching]).passed
+
+
 def test_allowed_wrong_fraction():
     expected = np.array([1.0, 1.0, 1.0, 1.0], np.float32)
     observed = np.array([1.0, 1.0, 1.0, 2.0], np.float32)

@@ -91,7 +91,18 @@ def _compare_one(idx, observed, expected, cfg) -> TensorComparison:
         passed = num_diffs == 0
         reason = "" if passed else f"{num_diffs}/{observed.size} boolean differences"
     else:
-        abs_diff = np.abs(expected.astype(np.float32) - observed.astype(np.float32))
+        # Replace all items that are NaNs or Infinite in both tensors with 0
+        # This to avoid the abs_diff becoming NaN when for example both sides are NaN or Inf
+        both_nan = np.isnan(observed) & np.isnan(expected)
+        both_plus_inf = np.isposinf(observed) & np.isposinf(expected)
+        both_minus_inf = np.isneginf(observed) & np.isneginf(expected)
+        both_non_finite = both_nan | both_plus_inf | both_minus_inf
+        observed_val = observed.copy()
+        expected_val = expected.copy()
+        observed_val[both_non_finite] = 0
+        expected_val[both_non_finite] = 0
+
+        abs_diff = np.abs(expected_val.astype(np.float32) - observed_val.astype(np.float32))
         max_abs = float(np.max(abs_diff)) if abs_diff.size else 0.0
         if np.issubdtype(expected.dtype, np.integer):
             diff_mask = abs_diff > cfg["int_tol"]
@@ -104,10 +115,12 @@ def _compare_one(idx, observed, expected, cfg) -> TensorComparison:
             gated = abs_diff * diff_mask
             gated_max = float(np.max(gated)) if gated.size else 0.0
             passed = gated_max <= cfg["int_thld"] and num_diffs == 0
-            reason = "" if passed else f"{num_diffs}/{observed.size} exceed int_tol {cfg['int_tol']}"
+            reason = "" if passed else f"{num_diffs}/{observed_val.size} exceed int_tol {cfg['int_tol']}"
         else:
-            scale = np.abs(expected.astype(np.float32)) + np.abs(observed.astype(np.float32)) + cfg["epsilon"]
-            rel_diff = abs_diff / scale
+            scale = np.abs(expected_val.astype(np.float32)) + np.abs(observed_val.astype(np.float32)) + cfg["epsilon"]
+            unmatched_inf = (np.isinf(observed) | np.isinf(expected)) & ~(both_plus_inf | both_minus_inf)
+            rel_diff = np.divide(abs_diff, scale, out=np.zeros_like(abs_diff), where=~unmatched_inf)
+            rel_diff[unmatched_inf] = np.inf
             max_rel = float(np.max(rel_diff)) if rel_diff.size else 0.0
             num_diffs = int(np.sum(rel_diff > cfg["fp_avg_tol"]))
             if cfg["use_abs_tol_gate"]:
@@ -117,7 +130,8 @@ def _compare_one(idx, observed, expected, cfg) -> TensorComparison:
                 # cancellation outputs, where small (bf16 ULP-sized) absolute error produces a
                 # large relative difference.  Opt-in via use_abs_tol_gate so existing callers
                 # keep the pure relative gate unchanged.
-                abs_tol = cfg["fp_abs_tol_frac"] * np.max(np.abs(expected.astype(np.float32)))
+                expected_fp = expected_val.astype(np.float32)
+                abs_tol = cfg["fp_abs_tol_frac"] * np.max(np.abs(expected_fp[np.isfinite(expected_fp)]))
                 wrong = int(np.sum((rel_diff > cfg["fp_max_tol"]) & (abs_diff > abs_tol)))
             else:
                 wrong = int(np.sum(rel_diff > cfg["fp_max_tol"]))
