@@ -61,7 +61,6 @@ LogicalResult ZeroPointBiasTablePattern::transform(
         input.dim(0)
     );
     input.vectorize(vectorSize);
-    table.vectorize(vectorSize);
     biasScale.reshapeDim(0, {-1, biasScaleWidth(input.elementType())});
 
     WData wdata = slice.wram.load(aZp);

@@ -126,16 +126,15 @@ static Slice convertBlock(LData input, LData output) {
         enum { NonDenseDims, H = -2, W = -1 };
     };
 
-    struct In {
-        enum { HGroups = -6, HBlocks, Vectors, HLinePairs, HLinesInPair, Elements };
+    struct In : Vectorized {
+        enum { HGroups = -6, HBlocks, HLinePairs, HLinesInPair };
     };
     struct Out {
-        enum { HGroups = -5, HLinePairs, Vectors, HLinesInPair, Elements };
+        enum { HGroups = -5, HWriteGroups, RowsPerWrite, WChunks, ElementsInChunk };
     };
 
-    DType elementType = input.elementType();
-    int elementSize = sizeofType(elementType);
-    assert(elementSize <= 2);
+    int elSize = sizeofType(input.elementType());
+    assert(elSize <= 2);
 
     Slice slice("transpose-block");
 
@@ -143,24 +142,16 @@ static Slice convertBlock(LData input, LData output) {
     const int blocksInGroup = 4;
     const int linesInBlock = 8;
     const int transposeBlockSize = blocksInGroup * linesInBlock;
-    int vectorSize = transposeBlockSize / sizeofType(elementType);
+    int vectorSize = transposeBlockSize / elSize;
     input.forceReshapeDim(Dim::H, {-1, blocksInGroup, linesInBlock / 2, 2}).vectorize(vectorSize);
-    // Move the vectors dimension just after the HBlocks, so that we can load multiple lines at once
-    input.moveDim(Vectorized::Vectors, In::Vectors);
 
-    if (elementSize == 2) {
-        // Write out chunks of 32 int16, 1 chunk per cycle (64 bytes total)
-        // FIXME: don't use force
-        output.forceReshapeDim(Dim::H, {-1, transposeBlockSize / elementSize});
-        output.vectorize(transposeBlockSize);
-    }
-    else {
-        // Write out chunks of 32 int8, 2 chunks in nearby lines per cycle (64 bytes total)
-        // FIXME: don't use force
-        output.forceReshapeDim(Dim::H, {-1, transposeBlockSize / 2, 2});
-        output.vectorize(transposeBlockSize);
-        output.moveDim(-2, Out::Vectors);
-    }
+    // i8: write out chunks of 32 values, 2 chunks in nearby lines per cycle (64 bytes total)
+    // i16/bf16: write out chunks of 32 values, 1 chunk per cycle (64 bytes total)
+    // /!\ the last chunk of a row is written whole: we assume that the output tensor has been
+    // either padded to whole blocks or cut to whole chunks by the caller
+    int rowsPerWrite = elSize == 1 ? 2 : 1;
+    output.forceReshapeDim(Dim::H, {-1, transposeBlockSize / elSize / rowsPerWrite, rowsPerWrite});
+    output.forceReshapeDim(-1, {-1, transposeBlockSize});
 
     For(auto ndd = slice.iterate(input.dims(Dim::NonDenseDims, In::HGroups))) {
         // Process input rows in reverse order so that we generate the output from right to left,
@@ -169,13 +160,14 @@ static Slice convertBlock(LData input, LData output) {
         For(auto hg = slice.iterate(input.dim(In::HGroups)).reverse()) {
             For(auto iv = slice.iterate(input.dim(In::Vectors))) {
                 PData pdata;
-                For(auto hb = slice.iterate(input.dim(In::HBlocks))) {     // 4 blocks
-                    IData idata = slice.iram.load(input[ndd][hg][hb][iv]); // 8lines 32:i8 or 16:i16
+                For(auto hb = slice.iterate(input.dim(In::HBlocks))) { // 4 blocks
+                    // Load 8 lines of 32:i8 or 16:i16
+                    IData idata = slice.iram.load(input[ndd][hg][hb][":"][":"][iv]);
                     pdata = slice.alu.transpose(idata);
                 }
                 For(auto outLinePair = slice.iterate(pdata.dim(PData::Vectors))) {
                     QData res = slice.act.load(pdata[outLinePair]);
-                    slice.store(output[ndd][iv][outLinePair][hg], res);
+                    slice.store(output[ndd][iv][outLinePair][":"][hg], res);
                 }
             }
         }
@@ -245,51 +237,40 @@ static Slice convertGeneralizedShapes(LData input, LData output) {
 static Slice convertGeneralized(torq_hl::TransposeOp op, PatternRewriter &rewriter) {
     // Generalized transpose
     ArrayRef<int64_t> perm = op.getPerm();
-
-    // Input
-    auto input_type = llvm::cast<MemRefType>(op.getInput().getType());
-    auto input_shape = input_type.getShape();
-    auto input_strides = getEncodedStridesElements(input_type);
-    DType elementType = getDType(input_type.getElementType());
-
-    // Output
-    auto output_type = llvm::cast<MemRefType>(op.getInit().getType());
-    auto output_shape = output_type.getShape();
-    auto output_strides = getEncodedStridesElements(output_type);
+    LData input(op.getInput());
+    LData output(op.getInit());
 
 #if TORQ_TRANSPOSE_WRITE_SEQUENTIAL
     // Write sequential
     // The input can have any number of dimensions with any stride
     Shape inputShape;
-    for (int i = 0; i < input_shape.size(); ++i) {
-        inputShape.push_back(
-            {input_shape[perm[i]], input_strides[perm[i]] * sizeofType(elementType)}
-        );
+    for (int i = 0; i < input.shape().size(); ++i) {
+        inputShape.push_back(input.shape()[perm[i]]);
     }
 
     // The output can have any number of dimensions with any stride
     Shape outputShape;
-    for (int i = 0; i < input_shape.size(); ++i) {
-        outputShape.push_back({output_shape[i], output_strides[i]});
+    for (int i = 0; i < output.shape().size(); ++i) {
+        outputShape.push_back(output.shape()[i]);
     }
 #else
     // Read sequential
     Shape inputShape;
-    for (int i = 0; i < input_shape.size(); ++i) {
-        inputShape.push_back({input_shape[i], input_strides[i]});
+    for (int i = 0; i < input.shape().size(); ++i) {
+        inputShape.push_back(input.shape()[i]);
     }
 
     // The output can have any number of dimensions with any stride
     auto revPerm = getReversePerm(perm);
     Shape outputShape;
-    for (int i = 0; i < input_shape.size(); ++i) {
-        outputShape.push_back({output_shape[revPerm[i]], output_strides[revPerm[i]]});
+    for (int i = 0; i < output.shape().size(); ++i) {
+        outputShape.push_back(output.shape()[revPerm[i]]);
     }
 #endif
 
-    return convertGeneralizedShapes(
-        LData(inputShape, elementType), LData(outputShape, elementType)
-    );
+    input.setShape(inputShape);
+    output.setShape(outputShape);
+    return convertGeneralizedShapes(input, output);
 }
 
 template <>
@@ -372,17 +353,7 @@ TransposePattern::transform(torq_hl::TransposeOp op, PatternRewriter &rewriter) 
     }
 
     for (Slice &slice : slices) {
-        torq_hw::SliceTaskOp::create(
-            rewriter, op.getLoc(),
-            slice.name(),              // Task name
-            ValueRange{op.getInput()}, // Input tensor
-            ValueRange{},              // Weights
-            ValueRange{},              // BiasScale tensor,
-            ValueRange{op.getInit()},  // Output tensor initializer
-            ValueRange{},              // Symbols
-            slice.getCfgAttr(rewriter.getContext()),
-            slice.getNdls() // NDLs
-        );
+        slice.createSliceTaskOp(rewriter, op.getLoc());
     }
     rewriter.eraseOp(op);
     return success();

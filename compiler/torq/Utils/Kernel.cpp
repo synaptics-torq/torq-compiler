@@ -1584,10 +1584,6 @@ int SlicePrivate::addMemNdlDims(
             // as required by the hardware.
             // Note: probably we don't really need to use tha A tag if strideVal == 0
             auto memDimTag = useSDims && !iv ? MemDimTag::A : tagToMemDimTag(tag, _forStack[i].tag);
-            if (misalignedSplit && memDimTag == MemDimTag::A) {
-                // An A dim would move the position in the XY view, each word must start at 0
-                memDimTag = _forStack[i].tag;
-            }
             ndlDims.push_back({DimType::H, memDimTag, loopIterCount, strideVal * elementSize});
         }
     }
@@ -2455,6 +2451,11 @@ void SlicePrivate::debr(const LData &data) {
 }
 
 void SlicePrivate::deqw(const LData &output, int appendBlockSize) {
+    // Check that the output tensor hasn't been vectorized or contain any dim with "main" tag
+    // Main tag is used internally to handle XY dims.
+    for (const auto &d : output.shape()) {
+        assert(d.tag != ShapeItem::Tag::Main && "Vectorized tensor or with main tag not allowed");
+    }
     _ndls.add(memNdl(NdlType::DEQW, output, true, NdlSyncMode::NONE, appendBlockSize));
 }
 
@@ -3121,6 +3122,7 @@ void Slice::append(const LData &output, const QData &data) {
     debugTensor("QTensor", output);
     assert(data.indexes().size() == 0 && "QData can't be indexed during append");
     assert(data.shape().size() == 1 && "Unexpected QData rank during append");
+    assert(output.unpaddedDimCount() < 0 && "Padded output not supported");
     checkTypeCompatibility(output, data);
     d->deqw(output, backDimCount(data.subShape()));
     d->ref(output);
@@ -3151,6 +3153,7 @@ void Slice::store(const LData &output, const QData &data) {
     debugTensor("QTensor", output);
     assert(data.indexes().size() == 0 && "QData can't be indexed during store");
     assert(data.shape().size() == 1 && "Unexpected QData rank during store");
+    assert(output.unpaddedDimCount() < 0 && "Padded output not supported");
     checkCompatibility(output, data);
     d->deqw(output);
     d->ref(output);
@@ -3161,6 +3164,7 @@ void Slice::storeIndexed(const LData &table, const LData &indices, const QData &
     debugTensor("QTable", table);
     debugTensor("QIndices", indices);
     assert(data.indexes().size() == 0 && "QData can't be indexed during store");
+    assert(table.unpaddedDimCount() < 0 && "Padded output not supported");
     const LData row = indexedRow(table);
     checkIndices(indices, 1);
     checkCompatibility(row, data);
@@ -3201,6 +3205,7 @@ void Slice::storeIndexed(const LData &table, const LData &indices, const QData &
 
 void Slice::store(const LData &output, int value) {
     debugTensor("QTensor", output);
+    assert(output.unpaddedDimCount() < 0 && "Padded output not supported");
     // Check that no values loaded in RAM by mistake
     if (d->_iram.loadNesting >= 0 || d->_wram.loadNesting >= 0 || d->_bram.loadNesting >= 0) {
         llvm::errs() << "Error: values loaded in memory not used";

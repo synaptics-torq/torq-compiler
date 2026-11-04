@@ -335,8 +335,8 @@ class LData : public DataT<LData> {
     // Vectorize the last dimension into vectors of the specified size and stride.
     // The last dimension must be dense.
     // If the number of elements is not multiple of vectorStride the last vector
-    // will actually go beyond the end of the data shape, in any case the stride
-    // of the dimension above is kept to the actual element count.
+    // will actually go beyond the end of the data shape so this must not be used on output tensors.
+    // In any case the stride of the dimension above is kept to the actual element count.
     // If vectorStride is not specified it is assumed to be the same as vectorSize
     // Example:
     // data shape: {1, 16, 5, 5}, vectorSize: 4, dims: {2, 3}
