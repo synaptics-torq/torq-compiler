@@ -40,8 +40,16 @@ test_keras_model_llvm[conv2d_transpose_k1x3_s1x2_same_1x4x8_oc8_int8-aws_fpga-sr
 test_keras_model_llvm[conv2d_transpose_k1x3_s1x2_same_1x4x8_oc8_int8-sim-sr200-v1] synaptics-torq/torq-compiler-dev#2058
 test_keras_model_llvm[conv2d_transpose_k1x3_s1x2_valid_1x4x8_oc8_int8-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#2058
 test_keras_model_llvm[conv2d_transpose_k1x3_s1x2_valid_1x4x8_oc8_int8-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#2058
+test_keras_model_llvm[conv2d_transpose_k1x3_s1x2_same_1x8x8_oc8_shared_input_int8-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#2058
+test_keras_model_llvm[conv2d_transpose_k1x3_s1x2_same_1x8x8_oc8_shared_input_int8-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#2058
+test_keras_model_llvm[conv2d_transpose_k1x5_s1x2_same_1x8x8_oc8_int8-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#2058
+test_keras_model_llvm[conv2d_transpose_k1x5_s1x2_same_1x8x8_oc8_int8-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#2058
 test_keras_model_llvm[conv2d_transpose_k1x3_s1x2_valid_1x4x8_oc8_int8-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#2058
 test_keras_model_llvm[conv2d_transpose_k1x3_s1x2_valid_1x4x8_oc8_int8-sim-sr200-v1] synaptics-torq/torq-compiler-dev#2058
+test_keras_model_llvm[conv2d_transpose_k1x3_s1x2_same_1x8x8_oc8_shared_input_int8-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#2058
+test_keras_model_llvm[conv2d_transpose_k1x3_s1x2_same_1x8x8_oc8_shared_input_int8-sim-sr200-v1] synaptics-torq/torq-compiler-dev#2058
+test_keras_model_llvm[conv2d_transpose_k1x5_s1x2_same_1x8x8_oc8_int8-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#2058
+test_keras_model_llvm[conv2d_transpose_k1x5_s1x2_same_1x8x8_oc8_int8-sim-sr200-v1] synaptics-torq/torq-compiler-dev#2058
 test_keras_model_torq[fc_in700_out500_sigmoid_int16-aws_fpga-sl2610-v1] synaptics-torq/torq-compiler-dev#1390
 test_keras_model_torq[fc_in700_out500_sigmoid_int16-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1390
 test_keras_model_torq[fc_in700_out500_sigmoid_int16-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#1390

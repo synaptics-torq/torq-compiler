@@ -4,7 +4,9 @@ Each case name says what it tests: kernel, strides, padding, input shape (H x W 
 channels and nobias for convs without bias, e.g. conv2d_transpose_k1x3_s1x2_same_1x4x1_oc1.
 """
 
-from torq.testing.keras_builder import layers, sequential, conv2d_transpose
+import tensorflow as tf
+
+from torq.testing.keras_builder import conv2d_transpose, functional, layers, sequential
 
 # (input H, W, C), output channels, kernel (h, w), strides (h, w), padding
 _WITH_BIAS = [
@@ -35,6 +37,7 @@ _WITH_BIAS = [
     ((1, 64, 32), 32, (1, 3), (1, 1), "same"),
     ((5, 5, 3), 23, (4, 4), (1, 1), "valid"),
     ((11, 10, 7), 11, (2, 4), (2, 4), "valid"),
+    ((1, 8, 8), 8, (1, 5), (1, 2), "same"),
 ]
 
 _NO_BIAS = [
@@ -79,3 +82,14 @@ _add("conv2d_transpose_k4x4_s2x2_same_8x8x4_oc4_seed21321", sequential(
     layers.Conv2DTranspose(filters=4, kernel_size=4, strides=2, padding="same"),
     seed=21321,
 ))
+
+
+def _shared_input_convt(x):
+    """A 1x1 conv whose output feeds a stride (1, 2) 1x3 ConvT and another 1x1 conv."""
+    y = tf.keras.layers.Conv2D(8, 1)(x)
+    return [tf.keras.layers.Conv2DTranspose(8, (1, 3), strides=(1, 2), padding="same")(y),
+            tf.keras.layers.Conv2D(8, 1)(y)]
+
+
+_add("conv2d_transpose_k1x3_s1x2_same_1x8x8_oc8_shared_input",
+     functional((1, 8, 8), _shared_input_convt))

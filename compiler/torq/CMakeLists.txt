@@ -12,6 +12,7 @@ add_subdirectory(Dialect/TorqHW)
 add_subdirectory(Utils)
 add_subdirectory(Transforms/Linalg)
 add_subdirectory(Transforms/TorqHL)
+add_subdirectory(Transforms/Tosa)
 add_subdirectory(Conversions/TosaToLinalg)
 add_subdirectory(Conversions/LinalgToTorqHL)
 add_subdirectory(Conversions/TorqHLToLinalg)
@@ -40,6 +41,7 @@ iree_cc_library(
     iree::target::torq::Dialect::TorqHW::Dialect
     iree::target::torq::Transforms::TorqHL::Transforms
     iree::target::torq::Transforms::Linalg::Transforms
+    iree::target::torq::Transforms::Tosa::Transforms
     iree::target::torq::Codegen
     iree::target::torq::Pipelines
     iree::target::torq::Conversions::TorqHLToLinalg::TorqHLToLinalg

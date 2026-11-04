@@ -12,6 +12,7 @@
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Transforms/Linalg/Passes.h"
 #include "torq/Transforms/TorqHL/Passes.h"
+#include "torq/Transforms/Tosa/Passes.h"
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -59,6 +60,9 @@ static llvm::cl::opt<bool> clAnnotateTiedOperands(
 );
 
 void buildTosaTransformPassPipeline(OpPassManager &passManager) {
+
+    // rewrite TOSA in a form the Torq kernels support, before the upstream TOSA decompositions
+    passManager.addNestedPass<func::FuncOp>(createOptimizeTosaForTorqPass());
 
     // lower specific TOSA to linalg
     passManager.addNestedPass<func::FuncOp>(createTosaToLinalgConversionPass());

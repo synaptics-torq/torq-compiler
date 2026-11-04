@@ -1,0 +1,30 @@
+iree_tablegen_library(
+  NAME
+    PassesIncGen
+  TD_FILE
+    Passes.td
+  OUTS
+    --gen-pass-decls Passes.h.inc
+)
+
+iree_cc_library(
+  NAME
+    Transforms
+  HDRS
+    Passes.h
+    PassesDetail.h
+    Patterns.h
+    Passes.h.inc
+  SRCS
+    Passes.cpp
+    TransposeConvPhaseConvPattern.cpp
+  DEPS
+    ::PassesIncGen
+    MLIRFunctionInterfaces
+    MLIRIR
+    MLIRPass
+    MLIRTosaDialect
+    MLIRTransformUtils
+    iree::target::torq::Utils
+  PUBLIC
+)
