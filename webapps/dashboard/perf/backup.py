@@ -4,13 +4,15 @@ import signal
 import subprocess
 import threading
 import zlib
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, TemporaryFile
+from urllib.parse import urlsplit
 
+import requests
 from django import forms
 from django.contrib import admin, messages
 from django.conf import settings
 from django.core.files.base import File
-from django.http import FileResponse, Http404
+from django.http import Http404
 from django.shortcuts import redirect, render
 from django.utils import timezone
 
@@ -163,6 +165,26 @@ def _format_restore_error(exc):
     return str(exc)
 
 
+def _download_backup_from_url(source_url, record):
+    filename = f"backup_import_{timezone.now().strftime('%Y%m%d_%H%M%S')}.sql.gz"
+
+    with TemporaryFile(mode='w+b') as temp_file:
+        with requests.get(
+            source_url,
+            stream=True,
+            allow_redirects=False,
+            timeout=(10, 300),
+        ) as response:
+            if response.status_code != 200:
+                raise RuntimeError(f'Backup URL returned HTTP {response.status_code}.')
+            for chunk in response.raw.stream(CHUNK_SIZE, decode_content=False):
+                if chunk:
+                    temp_file.write(chunk)
+
+        temp_file.seek(0)
+        backup_store.save_backup_file(record, filename, File(temp_file))
+
+
 @spool
 def create_database_backup(args):
     """
@@ -202,6 +224,29 @@ def create_database_backup(args):
             with open(dump_path, 'rb') as f:
                 backup_store.save_backup_file(record, filename, File(f))
         record.status = backup_store.Status.DONE
+    except Exception as exc:
+        record.status = backup_store.Status.FAILED
+        record.error_message = str(exc)
+    finally:
+        record.finished_at = backup_store.timestamp()
+        backup_store.save_backup(record)
+
+
+@spool
+def import_database_backup_from_url(args):
+    record = backup_store.get_backup(args['backup_id'])
+    if record is None or record.status != backup_store.Status.PENDING:
+        return
+
+    record.status = backup_store.Status.RUNNING
+    backup_store.save_backup(record)
+    try:
+        source_url = args['source_url']
+        _download_backup_from_url(source_url, record)
+        record.status = backup_store.Status.DONE
+    except requests.RequestException as exc:
+        record.status = backup_store.Status.FAILED
+        record.error_message = f'Unable to fetch backup URL ({type(exc).__name__}).'
     except Exception as exc:
         record.status = backup_store.Status.FAILED
         record.error_message = str(exc)
@@ -275,7 +320,28 @@ class UploadBackupForm(forms.Form):
     backup_file = forms.FileField(
         label='SQL backup file',
         help_text='Upload a .sql.gz file to add it to the list of backups below, from which it can then be restored.',
+        required=False,
     )
+    backup_url = forms.URLField(
+        label='Signed backup URL',
+        help_text='Or import a .sql.gz backup from an HTTPS signed URL.',
+        max_length=4096,
+        required=False,
+    )
+
+    def clean(self):
+        cleaned_data = super().clean()
+        if bool(cleaned_data.get('backup_file')) == bool(cleaned_data.get('backup_url')):
+            raise forms.ValidationError('Provide either a backup file or a signed URL, not both.')
+        return cleaned_data
+
+    def clean_backup_url(self):
+        source_url = self.cleaned_data.get('backup_url')
+        if source_url:
+            parsed = urlsplit(source_url)
+            if parsed.scheme != 'https' or parsed.username or parsed.password or parsed.fragment:
+                raise forms.ValidationError('Enter an HTTPS URL without credentials or a fragment.')
+        return source_url
 
 
 def backup_database_view(request):
@@ -303,21 +369,33 @@ def download_backup_view(request, backup_id):
     if record is None or record.status != backup_store.Status.DONE or not record.filename:
         raise Http404('Backup is not available for download.')
 
-    response = FileResponse(backup_store.open_backup_file(record), content_type='application/gzip')
-    response['Content-Disposition'] = f'attachment; filename="{os.path.basename(record.filename)}"'
-    return response
+    context = {
+        **admin.site.each_context(request),
+        'backup': record,
+        'backup_url': backup_store.get_backup_url(record),
+        'title': 'Export Backup URL',
+    }
+    return render(request, 'admin/perf/backup_url.html', context)
 
 
 def upload_backup_view(request):
     if request.method == 'POST':
         form = UploadBackupForm(request.POST, request.FILES)
         if form.is_valid():
-            uploaded_file = request.FILES['backup_file']
             record = backup_store.create_backup_record()
-            record.status = backup_store.Status.DONE
-            record.finished_at = backup_store.timestamp()
-            backup_store.save_backup_file(record, uploaded_file.name, uploaded_file)
-            messages.success(request, f'Uploaded "{uploaded_file.name}" as a new backup.')
+            uploaded_file = form.cleaned_data['backup_file']
+            source_url = form.cleaned_data['backup_url']
+            if uploaded_file:
+                record.status = backup_store.Status.DONE
+                record.finished_at = backup_store.timestamp()
+                backup_store.save_backup_file(record, uploaded_file.name, uploaded_file)
+                messages.success(request, f'Uploaded "{uploaded_file.name}" as a new backup.')
+            else:
+                import_database_backup_from_url.spool(
+                    backup_id=record.id.encode('utf-8'),
+                    source_url=source_url.encode('utf-8'),
+                )
+                messages.info(request, 'Backup import started in the background. Refresh this page to check its progress.')
             return redirect('admin_database_backup')
     else:
         form = UploadBackupForm()

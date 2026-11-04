@@ -29,7 +29,7 @@
         <th scope="col">Created</th>
         <th scope="col">Status</th>
         <th scope="col">Size</th>
-        <th scope="col">Download</th>
+        <th scope="col">Export</th>
         <th scope="col">Restore</th>
         <th scope="col">Delete</th>
       </tr>
@@ -49,7 +49,7 @@
         </td>
         <td>
           {% if backup.status == 'done' %}
-          <a href="{% url 'admin_database_backup_download' backup.id %}">Download</a>
+          <a href="{% url 'admin_database_backup_download' backup.id %}">Show signed URL</a>
           {% else %}
           &mdash;
           {% endif %}

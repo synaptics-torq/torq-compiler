@@ -1,0 +1,30 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Home</a>
+  &rsaquo; <a href="{% url 'admin_database_backup' %}">Backup Database</a>
+  &rsaquo; Export URL
+</div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+  <p class="help">
+    This signed URL expires in one hour. Anyone with the URL can download this backup until it expires.
+  </p>
+
+  <fieldset class="module aligned">
+    <div class="form-row">
+      <label for="backup-url">Presigned S3 URL</label>
+      <textarea id="backup-url" rows="4" readonly>{{ backup_url }}</textarea>
+    </div>
+  </fieldset>
+
+  <div class="submit-row">
+    <a class="default" href="{{ backup_url }}">Download backup</a>
+    <a href="{% url 'admin_database_backup' %}" class="closelink">Back to backups</a>
+  </div>
+</div>
+{% endblock %}

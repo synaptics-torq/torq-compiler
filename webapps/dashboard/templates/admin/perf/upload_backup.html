@@ -12,7 +12,7 @@
 {% block content %}
 <div id="content-main">
   <p class="help">
-    Upload a .sql.gz file to add it to the list of backups. It will not be applied automatically &mdash;
+    Upload a .sql.gz file or import one from an HTTPS signed URL. It will not be applied automatically &mdash;
     use the "Restore" action next to it once it is listed.
   </p>
 
@@ -33,7 +33,7 @@
       {% endfor %}
     </fieldset>
     <div class="submit-row">
-      <input type="submit" value="Upload Backup" class="default">
+      <input type="submit" value="Add Backup" class="default">
       <a href="{% url 'admin_database_backup' %}" class="closelink">Cancel</a>
     </div>
   </form>

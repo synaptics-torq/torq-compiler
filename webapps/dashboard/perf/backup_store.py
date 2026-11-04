@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
+from django.utils.http import content_disposition_header
 
 # Backups are stored directly in the default (S3) storage backend, outside of the
 # application database, so that they remain available even after a database restore
@@ -102,6 +103,15 @@ def save_backup_file(record, filename, file_obj):
 
 def open_backup_file(record):
     return default_storage.open(record.filename, 'rb')
+
+
+def get_backup_url(record, expire=3600):
+    filename = record.filename.rsplit('/', 1)[-1]
+    return default_storage.url(
+        record.filename,
+        parameters={'ResponseContentDisposition': content_disposition_header(True, filename)},
+        expire=expire,
+    )
 
 
 def delete_backup(record):
