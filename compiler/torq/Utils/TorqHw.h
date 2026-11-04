@@ -82,8 +82,6 @@ class TorqHw {
     std::string _hostCpuFeatures{};
     double _dmaTheoreticalBytesPerCycle = 0.0;
     double _dmaFactor = 1.0;
-
-    static const TorqHw *_instance;
 };
 
 } // namespace mlir::syna::torq

@@ -169,15 +169,11 @@ static llvm::cl::opt<std::string> clPrintCssTargetFlags(
     })
 );
 
-static std::optional<TorqHw> instance{std::nullopt};
-
 const TorqHw &TorqHw::get() {
-
-    if (!instance.has_value()) {
-        instance = clTorqHw;
-    }
-
-    return *instance;
+    // The first call can come from many compiler threads at the same time (one pass pipeline
+    // for each executable). A function-local static is initialized only once and is thread-safe.
+    static const TorqHw instance = clTorqHw;
+    return instance;
 }
 
 CssConfig TorqHw::getCssConfig() const {
