@@ -163,13 +163,19 @@ template <class TorqConvPoolOp> bool isPlannedStride2Conv(TorqConvPoolOp op) {
 // 1 = bottom/right-heavy (default), 0 = top/left-heavy. Non stride-2 ops, 1x1 kernels, and
 // inputs already using centre padding are top/left-heavy. See ConvertConvValidPadToSamePadPattern
 // for the full explanation.
+// Each leading pad is compared with the centre of its own kernel axis. A kernel that is not
+// square has a different centre on H and W. A stride-1 W axis keeps the H centre, so stride
+// (2, 1) results do not change. A W kernel of 1 has no centre to match, so only the top pad
+// sets stride_offset for a Kx1 kernel.
 int computeStrideOffset(
-    int64_t strideH, int64_t ksizeH, int64_t ksizeW, llvm::ArrayRef<int64_t> pads
+    int64_t strideH, int64_t strideW, int64_t ksizeH, int64_t ksizeW, llvm::ArrayRef<int64_t> pads
 ) {
     if (strideH != 2)
         return 0;
-    int mid = (ksizeH - 1) / 2;
-    if (pads[LRTBDim::Left] == mid || pads[LRTBDim::Top] == mid)
+    int64_t midH = (ksizeH - 1) / 2;
+    int64_t midW = strideW == 2 ? (ksizeW - 1) / 2 : midH;
+    bool leftAtCentre = ksizeW > 1 && pads[LRTBDim::Left] == midW;
+    if (leftAtCentre || pads[LRTBDim::Top] == midH)
         return 0;
     if (ksizeH == 1 && ksizeW == 1)
         return 0;
@@ -332,9 +338,9 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPool
         //
         // If the existing pad already equals the kernel centre (mid), the input was already
         // using top/left-heavy padding, so stride_offset = 0. 1x1 kernels have no asymmetry
-        // and always use stride_offset = 0. Either dimension (H or W) can be used to detect
-        // this because both axes always share the same orientation.
-        int stride_offset = computeStrideOffset(stride_h, ksize_h, ksize_w, pads);
+        // and always use stride_offset = 0. Both axes share one stride_offset, so a pad
+        // equal to the centre of its own axis (H or W) sets it.
+        int stride_offset = computeStrideOffset(stride_h, stride_w, ksize_h, ksize_w, pads);
 
         int64_t extractOffsetH = 0, extractOffsetW = 0;
         if (has_valid_pad_h) {
@@ -623,7 +629,7 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
         newPads[LRTBDim::Bottom] = totalPadH - newPads[LRTBDim::Top];
 
         // Find the stride_offset 0 or 1, from the pad info
-        int stride_offset = computeStrideOffset(strides[0], kh, kw, pads);
+        int stride_offset = computeStrideOffset(strides[0], strides[1], kh, kw, pads);
 
         if (stride_offset == 0) {
             std::swap(newPads[LRTBDim::Top], newPads[LRTBDim::Bottom]);

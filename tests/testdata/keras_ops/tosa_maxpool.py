@@ -30,6 +30,13 @@ def _maxpools(shape, *pools, concat=False):
     return functional(shape, build)
 
 
+def _padded_maxpool(shape, pad, pool_size, strides):
+    """A VALID max pool after a ZeroPadding2D of ((top, bottom), (left, right)). The inputs are
+    calibrated on [0, 1), so a zero pad is the lowest value and the pad folds into the pool."""
+    return functional(shape, lambda x: tf.keras.layers.MaxPooling2D(
+        pool_size=pool_size, strides=strides)(tf.keras.layers.ZeroPadding2D(pad)(x)))
+
+
 # Not ported: maxpool2d-stride1-k3x3-32x32x4 and maxpool_int16_batch1_3x3_stride1x1_16x4
 # (test_tile_fit_probe uses their MLIR files).
 CASES = {
@@ -71,6 +78,9 @@ CASES = {
     "maxpool_k3x2_s2_pad1101_11x11x8": _maxpool((11, 11, 8), (3, 2), 2, "same"),
     "maxpool_k3x2_s2x1_17x16x8": _maxpool((17, 16, 8), (3, 2), (2, 1)),
     "maxpool_k3x5_s2_same_11x11x8": _maxpool((11, 11, 8), (3, 5), 2, "same"),
+    # From synaptics-torq/torq-compiler-dev#2743: stride 2, H VALID and W padded with the W kernel
+    # centre, so the stride offset must come from the centre of each axis.
+    "maxpool_k3x5_s2_pad_w_only_9x41x8": _padded_maxpool((9, 41, 8), ((0, 0), (2, 2)), (3, 5), 2),
     "maxpool_k4_s1_16x16x8": _maxpool((16, 16, 8), 4, 1),
     "maxpool_k4_s1_pad12_16x16x8": _maxpool((16, 16, 8), 4, 1, "same"),
     "maxpool_k4_s2_20x20x8": _maxpool((20, 20, 8), 4, 2),

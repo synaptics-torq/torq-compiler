@@ -72,8 +72,20 @@ CASES = {
         (3, 129, 6), ((0, 0), (2, 2)),
         lambda: tf.keras.layers.DepthwiseConv2D((3, 5), strides=2, **_BIAS)
     ),
+    # As dw_3x5_stride2_pad_w_only_3x129x6, with an input that doesn't fit in LRAM, so the conv
+    # is tiled by rows.
+    "dw_3x5_stride2_pad_w_only_tiled_513x1025x4": _padded(
+        (513, 1025, 4), ((0, 0), (2, 2)),
+        lambda: tf.keras.layers.DepthwiseConv2D((3, 5), strides=2, **_BIAS)
+    ),
     "dw_3x7_stride2_same_11x11x8": _depthwise((11, 11, 8), (3, 7), 2, "same"),
     "dw_5x3_stride2_same_11x11x8": _depthwise((11, 11, 8), (5, 3), 2, "same"),
+    # From synaptics-torq/torq-compiler-dev#2743, as conv2d_3x5_stride2_pad_w_only_9x41x4 with the
+    # kernel axes swapped.
+    "dw_5x3_stride2_pad_w_only_9x41x6": _padded(
+        (9, 41, 6), ((0, 0), (1, 1)),
+        lambda: tf.keras.layers.DepthwiseConv2D((5, 3), strides=2, **_BIAS)
+    ),
     "dw_4x4_stride2_valid_12x12x8": _depthwise((12, 12, 8), 4, 2),
     "dw_4x6_stride2_valid_12x12x8": _depthwise((12, 12, 8), (4, 6), 2),
     "dw_6x6_stride2_valid_12x12x8": _depthwise((12, 12, 8), 6, 2),
