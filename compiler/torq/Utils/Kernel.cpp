@@ -430,35 +430,16 @@ int sizeofType(DType type) {
 }
 
 DType getDType(mlir::Type mlirType) {
-    if (mlirType.isUnsignedInteger(2)) {
-        return DType::uint2;
-    }
-    else if (mlirType.isInteger(2)) {
-        return DType::int2;
-    }
-    else if (mlirType.isUnsignedInteger(4)) {
-        return DType::uint4;
-    }
-    else if (mlirType.isInteger(4)) {
-        return DType::int4;
-    }
-    else if (mlirType.isInteger(8) || mlirType.isInteger(1)) {
-        return DType::int8;
-    }
-    else if (mlirType.isUnsignedInteger(8)) {
+    // In MLIR sub-byte values could be either compressed (multiple values per byte) or not.
+    // The convention is that signless int1 are *bool* and are *not* compressed,
+    // while all other sub-byte values including sint1 and uint1 are.
+    // TODO: consider introducing `bool` in DType behaving as uint8 except for the value range
+    if (mlirType.isSignlessInteger(1)) {
         return DType::uint8;
     }
-    else if (mlirType.isInteger(16)) {
-        return DType::int16;
-    }
-    else if (mlirType.isUnsignedInteger(16)) {
-        return DType::uint16;
-    }
-    else if (mlirType.isInteger(32)) {
-        return DType::int32;
-    }
-    else if (mlirType.isUnsignedInteger(32)) {
-        return DType::uint32;
+    else if (mlirType.isInteger()) {
+        DType intType = getIntDType(mlirType.getIntOrFloatBitWidth());
+        return mlirType.isUnsignedInteger() ? toUnsigned(intType) : intType;
     }
     else if (mlirType.isBF16()) {
         return DType::bf16;
@@ -472,7 +453,7 @@ DType getDType(mlir::Type mlirType) {
     else if (isa<Float8E5M2Type>(mlirType)) {
         return DType::fp8e5m2;
     }
-    // TODO: assert(false && "Unsupported data type");
+    assert(false && "Unsupported data type");
     return DType::none;
 }
 
@@ -570,6 +551,27 @@ DType toUncompressed(DType type) {
         uncompressedType = DType::bf16;
     }
     return uncompressedType;
+}
+
+DType getIntDType(int sizeInBits) {
+    switch (sizeInBits) {
+    case 1:
+        return DType::int1;
+    case 2:
+        return DType::int2;
+    case 4:
+        return DType::int4;
+    case 6:
+        return DType::int6;
+    case 8:
+        return DType::int8;
+    case 16:
+        return DType::int16;
+    case 32:
+        return DType::int32;
+    }
+    assert(false && "Unsupported bit size");
+    return DType::none;
 }
 
 // Deduce the uncompressed weight type to be used according to input and [compressed] weight types

@@ -19,32 +19,22 @@ namespace mlir::syna::torq {
 template <>
 LogicalResult SelectPattern::transform(torq_hl::SelectOp op, PatternRewriter &rewriter) const {
 
-    auto ctx = op.getContext();
     LData weights(op.getInput1());
-    LData input(op.getInput2());
+    LData input1(op.getInput2());
     LData input2(op.getInput3());
     LData output(op.getInit());
 
     // Handle implicit broadcasting (weights and inputs must have the same rank as output)
     weights.broadcastAs(output);
-    input.broadcastAs(output);
+    input1.broadcastAs(output);
     input2.broadcastAs(output);
 
-    // Keep i1 conditions unsigned as predicates travel through a byte-oriented path.
-    auto conditionType = llvm::cast<ShapedType>(op.getInput1().getType()).getElementType();
-    if (conditionType.isInteger(1)) {
-        weights.setElementType(DType::uint8);
-    }
-
-    // SelectOp doesn’t involve computation, so there is no such concepts as floating point or
-    // integer. we keep the element type as integer type for simplicity.
-    if (input.elementType() == DType::bf16) {
-        input.setElementType(DType::int16);
-        output.setElementType(DType::int16);
-    }
-    else if (input.elementType() == DType::fp32) {
-        input.setElementType(DType::int32);
-        output.setElementType(DType::int32);
+    if (isFloat(input1.elementType())) {
+        // ALU doen't support select on floating point, cast to int of the same size
+        DType intType = getIntDType(sizeofTypeBits(input1.elementType()));
+        input1.bitCast(intType);
+        input2.bitCast(intType);
+        output.bitCast(intType);
     }
 
     // Dimensions of the input data for processing
@@ -55,20 +45,18 @@ LogicalResult SelectPattern::transform(torq_hl::SelectOp op, PatternRewriter &re
         };
     };
 
-    // Add an additional dimension of size 2 at the beginning to represent the 2 input tensors
-    // The difference between the two input addresses is used as offset to fetch the data
-    auto inputDiff = startAddressDistance(ctx, op.getInput2(), op.getInput3());
-    input.insertDim(In::InputTensors, {2, Stride(inputDiff)});
-
-    int denseDims = std::min(input.denseDims(), output.denseDims());
-    Slice slice;
+    int denseInDims = std::min(input1.denseDims(), input2.denseDims());
+    int denseOutDims = output.denseDims();
+    int denseDims = std::min(denseInDims, denseOutDims);
 
     // Vectorize the input tensor
-    int vectorSizeI = slice.alu.iWidth(input.elementType(), weights.elementType());
+    Slice slice("Select");
+    int vectorSizeI = slice.alu.iWidth(input1.elementType(), weights.elementType());
     int vectorSizeW = slice.alu.wWidth(weights.elementType());
     int vectorSize = std::min(vectorSizeI, vectorSizeW);
-
-    input.fuse(denseDims).vectorize(vectorSize);
+    input1.fuse(denseDims).vectorize(vectorSize);
+    input2.fuse(denseDims).vectorize(vectorSize);
+    auto input = stack(rewriter, input1, input2);
     weights.fuse(denseDims).vectorize(vectorSize);
 
     For(auto ndd = slice.iterate(input.dims(In::NonDenseDims, In::Vectors))) {
@@ -86,20 +74,7 @@ LogicalResult SelectPattern::transform(torq_hl::SelectOp op, PatternRewriter &re
         }
     }
 
-    auto trueInputAddr = GetAddressOp::create(rewriter, op.getLoc(), op.getInput2()).getAddress();
-    auto falseInputAddr = GetAddressOp::create(rewriter, op.getLoc(), op.getInput3()).getAddress();
-    rewriter.replaceOpWithNewOp<torq_hw::SliceTaskOp>(
-        op,                                         // Operation to replace
-        "select",                                   // Task name
-        ValueRange{op.getInput2(), op.getInput3()}, // Input tensor
-        ValueRange{op.getInput1()},                 // Weights
-        ValueRange{},                               // BiasScale tensor
-        ValueRange{op.getInit()},                   // Output tensor initializer
-        ValueRange{trueInputAddr, falseInputAddr},  // Symbols used to compute the NDLs
-        slice.getCfgAttr(ctx),                      // Slice configuration
-        slice.getNdls()
-    );
-
+    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
     return success();
 }
 

@@ -1057,6 +1057,9 @@ DType toUnsigned(DType type);
 // If the type was not compressed, return the type itself
 DType toUncompressed(DType type);
 
+// Return signed integer type with the given bit size
+DType getIntDType(int sizeInBits);
+
 // Return the max value for the given DType as an integer constant
 int32_t maxVal(DType type);
 
