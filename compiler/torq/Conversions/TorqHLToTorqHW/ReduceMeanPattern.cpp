@@ -37,7 +37,7 @@ ReduceMeanPattern::transform(torq_hl::ReduceMeanOp op, PatternRewriter &rewriter
     const uint32_t frame_size = height * width;
     assert(frame_size > 0 && "frame size must be greater than 0");
 
-    Slice slice;
+    Slice slice("reduce_mean");
 
     const auto dataType = DType::bf16;
     const auto weightType = DType::bf16;
@@ -57,9 +57,14 @@ ReduceMeanPattern::transform(torq_hl::ReduceMeanOp op, PatternRewriter &rewriter
         "reduce_mean batch fold requires N contiguous over C"
     );
 
-    LData input({input_channel, {height, row_stride}, blockCount, blockSize}, DType::bf16);
-    LData weight({1}, weightType);
-    LData biasScale({1}, DType::fp32);
+    // Read each channel as rows of whole blocks (the last block may read past the end of a row)
+    LData input(op.getInput());
+    if (input.elementType() != dataType) {
+        return op.emitError("reduce_mean only supports bf16 input");
+    }
+    input.setShape({input_channel, {height, row_stride}, blockCount, blockSize});
+    LData weight = LData(op.getWeights()).subviewDim(0, 0, 1);
+    LData biasScale = LData(op.getScaleBias()).subviewDim(0, 0, 1);
 
     // For bf16, activation unit combines 2 partials into 1 result, so effective output width is
     // act_width/2
@@ -67,9 +72,9 @@ ReduceMeanPattern::transform(torq_hl::ReduceMeanOp op, PatternRewriter &rewriter
     const DType inputType = getDType(input_element_type);
     const uint32_t actOutputWidth = slice.act.width(inputType, weightType); // 16 / 2 = 8 for bf16
 
-    LData output(
-        {input_channel, blockCount, blockSize / actOutputWidth, actOutputWidth}, DType::bf16
-    );
+    // The output is written in whole blocks too
+    LData output(op.getInit());
+    output.setShape({input_channel, blockCount, blockSize / actOutputWidth, actOutputWidth});
 
     BData bdata = slice.bram.load(biasScale);
     WData wdata = slice.wram.load(weight);
@@ -92,16 +97,7 @@ ReduceMeanPattern::transform(torq_hl::ReduceMeanOp op, PatternRewriter &rewriter
         }
     }
 
-    rewriter.replaceOpWithNewOp<torq_hw::SliceTaskOp>(
-        op,                                      // Operation to replace
-        "reduce_mean",                           // Task name
-        op.getInput(),                           // Input tensor
-        op.getWeights(),                         // Weights
-        op.getScaleBias(),                       // BiasScale tensor,
-        op.getInit(),                            // Output tensor initia
-        slice.getCfgAttr(rewriter.getContext()), // Slice configuration
-        slice.getNdls()
-    );
+    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
 
     return success();
 }

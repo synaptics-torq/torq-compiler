@@ -22,12 +22,12 @@ namespace mlir::syna::torq {
 // Non-dense Input 1 is loaded from the data path, and Input 2, which is a scalar constant,
 // is loaded once as bias/scale. The ALU multiplies Input 1 by the scalar weight (-1 for
 // `c - x`).
-FailureOr<torq_hw::SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
+FailureOr<Operation *> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
 
 // Dense Input 1 is loaded from the data path, and Input 2, which is a scalar constant,
 // is loaded once as bias/scale. The ALU multiplies Input 1 by the scalar weight (-1 for
 // `c - x`).
-FailureOr<torq_hw::SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
+FailureOr<Operation *> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
 
 // ALU is working with MUL and ACC operations on 32 input pixels at a time.
 // The 2 inputs are loaded from 2 different addresses. For non-fp32 data, each
@@ -35,7 +35,7 @@ FailureOr<torq_hw::SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::A
 // 16-bits weight (4 weights bytes in total precomputed in lram). fp32 data
 // cannot use the MUL mode, which only takes 16-bit weights, so it is added
 // with the accumulate mode's implicit unit weights instead.
-FailureOr<torq_hw::SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
+FailureOr<Operation *> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
 
 LogicalResult convertToHw(torq_hl::AddOp op, PatternRewriter &rewriter);
 
@@ -65,7 +65,7 @@ LogicalResult AddPattern::transform(torq_hl::AddOp addOp, PatternRewriter &rewri
                    << params.input1Shape[i] << " and output shape: " << params.outputShape[i];
         }
     }
-    FailureOr<torq_hw::SliceTaskOp> sliceTaskOp = failure();
+    FailureOr<Operation *> sliceTaskOp = failure();
 
     if (addOp.getRhsIsScalar() && params.input2Shape.size() == 1) {
         // The dense path streams input1 as one linear block and writes the output as a single
@@ -109,30 +109,34 @@ LogicalResult AddPattern::transform(torq_hl::AddOp addOp, PatternRewriter &rewri
     if (failed(sliceTaskOp)) {
         return failure();
     }
-    rewriter.replaceOp(addOp, sliceTaskOp->getOperation()->getResults());
+    rewriter.replaceOp(addOp, *sliceTaskOp);
 
     return success();
 }
 
-FailureOr<torq_hw::SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
-    Slice slice("add");
-    // By default consider the entire input as a single channel
-    DType elementType = getDType(params.inputElementType);
+// The scalar paths fold the scalar into the bias: only the weight of input 1 is used
+static LData scalarWeight(BinaryOpParams<torq_hl::AddOp> &params) {
+    return LData(params.op.getWeights()).subviewDim(0, 0, 1);
+}
+
+// All the items use the same bias and scale
+static LData scalarBiasScale(BinaryOpParams<torq_hl::AddOp> &params) {
+    int biasNum = biasScaleWidth(getDType(params.inputElementType));
+    return LData(params.op.getScaleBias()).subviewDim(0, 0, biasNum);
+}
+
+FailureOr<Operation *> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
+    Slice slice(params.op.getName().str());
 
     auto shift = params.op.getShiftFactor();
     auto min = params.op.getOutputMin();
     auto max = params.op.getOutputMax();
     auto zp = params.op.getOutputZp();
 
-    int biasNum = 2;
-    if (getDType(params.inputElementType) == DType::bf16) {
-        biasNum = 1;
-    }
-    LData biasScale({biasNum}, getDType(params.op.getScaleBias().getType().getElementType()));
-
     LData input(params.op.getInput1());
     LData output(params.op.getInit());
-    LData weights({1}, params.inputElementType.isInteger(32) ? DType::int8 : elementType);
+    LData weights = scalarWeight(params);
+    LData biasScale = scalarBiasScale(params);
     WData wdata = slice.wram.load(weights);
     BData bdata = slice.bram.load(biasScale);
 
@@ -157,19 +161,7 @@ FailureOr<torq_hw::SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::A
         }
     }
 
-    auto sliceTaskOp = torq_hw::SliceTaskOp::create(
-        params.rewriter,
-        params.loc,                                     // Location
-        params.op.getName(),                            // Operation to replace
-        ValueRange{params.op.getInput1()},              // Input tensor
-        ValueRange{params.op.getWeights()},             // Weights
-        ValueRange{params.op.getScaleBias()},           // BiasScale tensor,
-        ValueRange{params.op.getInit()},                // Output tensor initializer
-        ValueRange{},                                   // Symbols
-        slice.getCfgAttr(params.rewriter.getContext()), // Slice configuration
-        slice.getNdls()                                 // NDLs
-    );
-    return sliceTaskOp;
+    return slice.createSliceTaskOp(params.rewriter, params.loc).getOperation();
 }
 
 // The largest block size not above `maxBlock` that divides `size`.
@@ -182,19 +174,15 @@ static int largestDivisorAtMost(int size, int maxBlock) {
     return 1;
 }
 
-FailureOr<torq_hw::SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
-    Slice slice("add");
+FailureOr<Operation *> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
+    Slice slice(params.op.getName().str());
     DType elementType = getDType(params.inputElementType);
-    Shape inputShape;
 
     auto shift = params.op.getShiftFactor();
     auto min = params.op.getOutputMin();
     auto max = params.op.getOutputMax();
     auto zp = params.op.getOutputZp();
 
-    for (int i = 0; i < params.input1Shape.size() - 1; ++i) {
-        inputShape.push_back({params.input1Shape[i], params.input1Strides[i]});
-    }
     int lastDimSize = params.input1Shape.back();
     // The input is multiplied by the scalar weight, as in buildScalarDenseTaskOp: it is
     // -1 for `c - x`, which a plain ALU load would turn into `x + c`.
@@ -205,27 +193,14 @@ FailureOr<torq_hw::SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl
     // The width depends on the weight type: one activation pass holds 4 int16 x int16
     // or int32 x int8 products, but 8 bf16 or 16 int8 ones.
     int blockSize = largestDivisorAtMost(lastDimSize, slice.act.width(elementType, weightType));
-    if (blockSize == lastDimSize) {
-        inputShape.push_back({lastDimSize, 1});
+    LData input(params.op.getInput1());
+    LData output(params.op.getInit());
+    if (blockSize != lastDimSize) {
+        input.reshapeDim(-1, {-1, blockSize});
+        output.reshapeDim(-1, {-1, blockSize});
     }
-    else {
-        inputShape.push_back({lastDimSize / blockSize, blockSize});
-        inputShape.push_back({blockSize, 1});
-    }
-
-    // The output is a dense version of the input
-    Shape outputShape;
-    for (int i = 0; i < inputShape.size(); ++i) {
-        outputShape.push_back(inputShape[i]);
-    }
-    int biasNum = 2;
-    if (getDType(params.inputElementType) == DType::bf16) {
-        biasNum = 1;
-    }
-    LData biasScale({biasNum}, getDType(params.op.getScaleBias().getType().getElementType()));
-    LData input(inputShape, elementType, params.inputOffsetBytes);
-    LData output(outputShape, elementType);
-    LData weights({1}, weightType);
+    LData weights = scalarWeight(params);
+    LData biasScale = scalarBiasScale(params);
     WData wdata = slice.wram.load(weights);
     BData bdata = slice.bram.load(biasScale);
 
@@ -238,21 +213,10 @@ FailureOr<torq_hw::SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl
         }
     }
 
-    auto sliceTaskOp = torq_hw::SliceTaskOp::create(
-        params.rewriter, params.loc,
-        params.op.getName(),                            // Operation to replace
-        ValueRange{params.op.getInput1()},              // Input tensor
-        ValueRange{params.op.getWeights()},             // Weights
-        ValueRange{params.op.getScaleBias()},           // BiasScale tensor,
-        ValueRange{params.op.getInit()},                // Output tensor initializer
-        ValueRange{},                                   // Symbols
-        slice.getCfgAttr(params.rewriter.getContext()), // Slice configuration
-        slice.getNdls()                                 // NDLs
-    );
-    return sliceTaskOp;
+    return slice.createSliceTaskOp(params.rewriter, params.loc).getOperation();
 }
 
-FailureOr<torq_hw::SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
+FailureOr<Operation *> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
     auto op = params.op;
     const auto shift = op.getShiftFactor();
     const auto min = op.getOutputMin();
@@ -349,7 +313,7 @@ FailureOr<torq_hw::SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::Add
         }
     }
 
-    return slice.createSliceTaskOp(params.rewriter, params.loc);
+    return slice.createSliceTaskOp(params.rewriter, params.loc).getOperation();
 }
 
 } // namespace mlir::syna::torq

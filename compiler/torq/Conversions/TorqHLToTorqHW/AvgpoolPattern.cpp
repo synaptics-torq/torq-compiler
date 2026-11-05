@@ -140,8 +140,6 @@ Avgpool2DPattern::transform(torq_hl::AvgPool2DOp op, PatternRewriter &rewriter) 
 
     const DType weightDType =
         getDType(llvm::cast<MemRefType>(op.getWeights().getType()).getElementType());
-    auto biasElementType = llvm::cast<MemRefType>(op.getScaleBias().getType()).getElementType();
-    const DType biasDType = getDType(biasElementType);
 
     // avgpool input is NHWC
     const uint32_t input_channel = input_shape[input_shape.size() - 1];
@@ -152,7 +150,7 @@ Avgpool2DPattern::transform(torq_hl::AvgPool2DOp op, PatternRewriter &rewriter) 
     }
     assert(frame_size > 0 && "frame size must be greater than 0");
 
-    Slice slice;
+    Slice slice("avgpool2d");
 
     const uint32_t blockSize = slice.alu.iWidth(inputDType, weightDType);
 
@@ -173,16 +171,21 @@ Avgpool2DPattern::transform(torq_hl::AvgPool2DOp op, PatternRewriter &rewriter) 
     uint32_t frameSizeStride = rank > 2 ? strides[rank - 2] : input_channel;
 
     // input memory read address when we do loop
-    LData input({{frame_size, frameSizeStride}, blockCount, blockSize}, inputDType);
+    // (the last block may read past the end of the channels)
+    LData input(op.getInput());
+    input.setShape({{frame_size, frameSizeStride}, blockCount, blockSize});
 
     // Same weight used for the entire computation
-    LData weights({1}, weightDType);
+    LData weights(op.getWeights());
+    weights.setShape({1});
 
     // all blocks use the same bias and scale
-    LData biasScale({biasElementType.isInteger() ? 2 : 1}, biasDType);
+    LData biasScale = LData(op.getScaleBias()).subviewDim(0, 0, biasScaleWidth(inputDType));
 
+    // The output is written in whole blocks too
     const uint32_t actOutputWidth = slice.act.width(inputDType, weightDType);
-    LData output({blockCount, blockSize / actOutputWidth, actOutputWidth}, inputDType);
+    LData output(op.getInit());
+    output.setShape({blockCount, blockSize / actOutputWidth, actOutputWidth});
 
     WData wdata = slice.wram.load(weights);
     BData bdata = slice.bram.load(biasScale);
@@ -204,16 +207,7 @@ Avgpool2DPattern::transform(torq_hl::AvgPool2DOp op, PatternRewriter &rewriter) 
         }
     }
 
-    rewriter.replaceOpWithNewOp<torq_hw::SliceTaskOp>(
-        op,                                      // Operation to replace
-        "avgpool2d",                             // Task name
-        op.getInput(),                           // Input tensor
-        op.getWeights(),                         // Weights
-        op.getScaleBias(),                       // BiasScale tensor,
-        op.getInit(),                            // Output tensor initia
-        slice.getCfgAttr(rewriter.getContext()), // Slice configuration
-        slice.getNdls()
-    );
+    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
 
     return success();
 }
