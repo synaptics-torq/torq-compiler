@@ -525,7 +525,19 @@ KernelEncoding GatherOp::getKernelEncoding() {
     return encoding;
 }
 
-KernelEncoding AvgPool2DOp::getKernelEncoding() { return {{}, {{}, 64}}; }
+KernelEncoding AvgPool2DOp::getKernelEncoding() {
+    if (getSlidingPool()) {
+        // Channels only need to be contiguous: the junk lanes read past the last channel only
+        // feed results that the kernel discards, and its appends never write past a pixel.
+        KernelEncoding encoding;
+        KernelTensorEncoding channelsDense;
+        channelsDense.denseInnerDims = 1;
+        encoding.inputEncodings.push_back({getInputMutable().getOperandNumber(), channelsDense});
+        encoding.outputEncoding = channelsDense;
+        return encoding;
+    }
+    return {{}, {{}, 64}};
+}
 
 KernelEncoding ConvertOp::getKernelEncoding() { return getDenseEncoding(); }
 

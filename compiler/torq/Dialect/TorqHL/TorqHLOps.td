@@ -278,7 +278,18 @@ def TorqHL_FullyConnectedOp: TorqHL_LayerOp<"fully_connected"> {
 def TorqHL_AvgPool2DOp: TorqHL_LayerOp<"avg_pool2d"> {
   let summary = "Average 2-D pooling operation";
   let description = [{
-    Average 2-D pooling operation
+    Global pooling by default. With sliding_pool=true, accumulate a sliding
+    NHWC window described by kernel, stride and dilation, then apply the fused
+    fixed-point scale/bias, zero point and clamp. Padding must be explicit in
+    the input. The scale includes the averaging divisor.
+    Sliding pooling uses one i8 weight and i32 [bias, multiplier] pairs,
+    broadcast across channels. Without scale_regions, one pair and shift_factor
+    apply to the entire output. Otherwise scale_regions contains flattened
+    [y, x, height, width, shift] records in output coordinates; scale_bias is a
+    flat tensor with one pair per record. The non-overlapping regions must cover
+    the output frame. EasyKernel handles their input/output addressing and
+    fixed-point rescaling without splitting this operation into tensor slices.
+    Fold any input zero-point correction into bias and set input_zp to zero.
   }];
 
   let arguments = !con(commonArgs, (ins
@@ -289,8 +300,14 @@ def TorqHL_AvgPool2DOp: TorqHL_LayerOp<"avg_pool2d"> {
     I32Attr:$shift_factor,
     TensorOrMemref:$weights,
     TensorOrMemref:$scale_bias,
-    TensorOrMemref:$input
+    TensorOrMemref:$input,
+    DefaultValuedOptionalAttr<BoolAttr, "false">:$sliding_pool,
+    OptionalAttr<DenseI64ArrayAttr>:$kernel,
+    OptionalAttr<DenseI64ArrayAttr>:$stride,
+    OptionalAttr<DenseI64ArrayAttr>:$dilation,
+    OptionalAttr<DenseI64ArrayAttr>:$scale_regions
   ));
+  let hasVerifier = 1;
 }
 
 def TorqHL_ReduceMeanOp: TorqHL_LayerOp<"reduce_mean"> {

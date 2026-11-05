@@ -1,4 +1,6 @@
+import subprocess
 from fnmatch import fnmatchcase
+from pathlib import Path
 
 import pytest
 
@@ -88,3 +90,15 @@ def test_mlir_files_torq(request, torq_results, llvmcpu_reference_results, case_
 def test_mlir_files_llvmcpu(request, llvmcpu_reference_results, case_config):
     # this test just makes sure we can create llvmcpu_reference_results for the test case
     pass
+
+
+@pytest.mark.ci
+def test_avg_pool2d_verifier_errors(torq_compiler):
+    test_file = MODELS_DIR / "verifier" / "avg_pool2d.mlir"
+    optimizer = Path(torq_compiler.file_path).parent / "iree-opt"
+    proc = subprocess.run(
+        [str(optimizer), "--split-input-file", "--verify-diagnostics", str(test_file)],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr

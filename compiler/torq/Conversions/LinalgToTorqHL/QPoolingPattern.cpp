@@ -146,7 +146,9 @@ struct QGlobalAveragePoolConvert : public OpRewritePattern<linalg::PoolingNchwSu
         auto avgPoolOp = torq_hl::AvgPool2DOp::create(
             rewriter, loc, nhwcOutputType, createInitTensor(poolOp, rewriter, nhwcOutputType),
             /*input_zp=*/chain.inputInfo.zp, outputZp, outputMin, outputMax, shift, weights,
-            scaleBias, nhwcInput
+            scaleBias, nhwcInput, /*sliding_pool=*/false,
+            /*kernel=*/nullptr, /*stride=*/nullptr, /*dilation=*/nullptr,
+            /*scale_regions=*/nullptr
         );
 
         Value torqOut = transposeValue(avgPoolOp.getOutput(), nchwToNhwc.reverse(), loc, rewriter);

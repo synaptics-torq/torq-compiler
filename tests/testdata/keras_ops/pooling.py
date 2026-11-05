@@ -15,6 +15,7 @@ _LAYERS = [
     ("avgpool", (5, 5), (5, 5), "valid", (10, 10, 4)),
     ("avgpool", (1, 3), (1, 3), "valid", (10, 10, 4)),
     ("avgpool", (3, 3), (3, 3), "same", (10, 10, 4)),
+    ("avgpool", (3, 3), (1, 1), "same", (4, 58, 11)),
     ("avgpool", (4, 4), (4, 4), "same", (10, 10, 4)),
     ("avgpool", (5, 5), (5, 5), "same", (10, 10, 4)),
     ("avgpool", (1, 3), (1, 3), "same", (10, 10, 4)),
@@ -37,6 +38,11 @@ _LAYERS = [
     ("avgpool", (2, 2), (2, 2), "valid", (65, 77, 10)),
     ("avgpool", (2, 2), (2, 2), "valid", (30, 36, 15)),
 ]
+
+# Sliding average-pool lowering currently supports the i8 path only.
+CONFIG = {
+    "avgpool_k3x3_s1x1_same_4x58x11": {"quantize": "int8"},
+}
 
 
 def _name(pool, size, strides, padding, shape):

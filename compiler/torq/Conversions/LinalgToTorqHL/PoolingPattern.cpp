@@ -13,11 +13,13 @@
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
 #include "torq/Conversions/LinalgToTorqHL/MatchingFunctions.h"
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Tosa/IR/TosaOps.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/Attributes.h"
@@ -27,6 +29,7 @@
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/Debug.h"
 #include <optional>
 
@@ -310,6 +313,425 @@ struct PoolingMaxOpConversionBase : public OpRewritePattern<PoolingOpType> {
 using PoolingNhwcMaxOpConversion = PoolingMaxOpConversionBase<linalg::PoolingNhwcMaxOp, false>;
 using PoolingNchwMaxOpConversion = PoolingMaxOpConversionBase<linalg::PoolingNchwMaxOp, true>;
 
+namespace {
+
+// Zero-based shape indices; stride/dilation arrays use the kernel axis order.
+enum NhwcDim : unsigned { NHWC_BATCH = 0, NHWC_HEIGHT = 1, NHWC_WIDTH = 2, NHWC_CHANNEL = 3 };
+
+enum NchwDim : unsigned { NCHW_BATCH = 0, NCHW_CHANNEL = 1, NCHW_HEIGHT = 2, NCHW_WIDTH = 3 };
+
+enum KernelDim : unsigned { KERNEL_HEIGHT = 0, KERNEL_WIDTH = 1 };
+
+// Compiler-work budgets, not hardware limits. Only position-dependent scales
+// need a scan of H*W pixels; constant scales bypass that scan and its limit.
+constexpr int64_t kMaxSlidingPoolScalePixels = 65536;
+// Bound scale metadata and the number of tasks expanded by EasyKernel.
+constexpr size_t kMaxSlidingPoolScaleRegions = 64;
+
+struct PoolScale {
+    int32_t multiplier;
+    int32_t shift;
+
+    bool operator==(const PoolScale &other) const {
+        return multiplier == other.multiplier && shift == other.shift;
+    }
+};
+
+struct PoolScaleRegion {
+    int64_t y, x, height, width;
+    PoolScale scale;
+};
+
+struct PoolRescaleInfo {
+    tosa::ApplyScaleOp apply;
+    int32_t zeroPoint, min, max;
+};
+
+// Evaluate the original rescale exactly; padded windows may use different divisors.
+class PoolScaleEvaluator {
+  public:
+    PoolScaleEvaluator(tosa::ApplyScaleOp apply, bool nchw)
+        : apply(apply), hDim(NHWC_HEIGHT), wDim(NHWC_WIDTH) {
+        if (nchw) {
+            hDim = NCHW_HEIGHT;
+            wDim = NCHW_WIDTH;
+        }
+    }
+
+    std::optional<PoolScale> scaleAt(int64_t y, int64_t x) {
+        h = y;
+        w = x;
+        cache.clear(); // Index-derived values change at every output position.
+        auto multiplier = evaluate(apply.getMultiplier());
+        auto shift = evaluate(apply.getShift());
+        if (!multiplier || !shift || multiplier->isNegative() || shift->getSExtValue() < 0 ||
+            shift->getSExtValue() > 62)
+            return std::nullopt;
+        return PoolScale{
+            static_cast<int32_t>(multiplier->getSExtValue()),
+            static_cast<int32_t>(shift->getSExtValue())
+        };
+    }
+
+  private:
+    std::optional<APInt> evaluate(Value value);
+    std::optional<APInt> evaluateAffine(Operation *op, unsigned bits);
+    std::optional<APInt> evaluateUnary(Operation *op, unsigned bits);
+    std::optional<APInt> evaluateBinary(Operation *op);
+
+    tosa::ApplyScaleOp apply;
+    unsigned hDim, wDim;
+    int64_t h = 0, w = 0;
+    DenseMap<Value, APInt> cache;
+};
+
+std::optional<APInt> PoolScaleEvaluator::evaluate(Value value) {
+    if (auto it = cache.find(value); it != cache.end())
+        return it->second;
+    auto op = value.getDefiningOp();
+    if (!op || !value.getType().isIntOrIndex())
+        return std::nullopt;
+    unsigned bits = value.getType().isIndex() ? 64 : value.getType().getIntOrFloatBitWidth();
+    std::optional<APInt> result;
+    if (auto constant = dyn_cast<arith::ConstantOp>(op)) {
+        if (auto attr = dyn_cast<IntegerAttr>(constant.getValue()))
+            result = attr.getValue().sextOrTrunc(bits);
+    }
+    else if (auto index = dyn_cast<linalg::IndexOp>(op)) {
+        if (index.getDim() == hDim || index.getDim() == wDim)
+            result = APInt(bits, index.getDim() == hDim ? h : w);
+    }
+    else if (isa<affine::AffineApplyOp, affine::AffineMinOp, affine::AffineMaxOp>(op))
+        result = evaluateAffine(op, bits);
+    else if (op->getNumOperands() == 1)
+        result = evaluateUnary(op, bits);
+    else if (op->getNumOperands() == 2)
+        result = evaluateBinary(op);
+    if (result)
+        cache.try_emplace(value, *result);
+    return result;
+}
+
+std::optional<APInt> PoolScaleEvaluator::evaluateAffine(Operation *op, unsigned bits) {
+    AffineMap map;
+    if (auto apply = dyn_cast<affine::AffineApplyOp>(op))
+        map = apply.getAffineMap();
+    else if (auto min = dyn_cast<affine::AffineMinOp>(op))
+        map = min.getAffineMap();
+    else
+        map = cast<affine::AffineMaxOp>(op).getAffineMap();
+    SmallVector<Attribute> operands;
+    for (Value operand : op->getOperands()) {
+        auto evaluated = evaluate(operand);
+        if (!evaluated)
+            return std::nullopt;
+        operands.push_back(IntegerAttr::get(operand.getType(), *evaluated));
+    }
+    // Preserve global tile offsets and signed floor/ceil division semantics.
+    SmallVector<Attribute> folded;
+    bool hasPoison = false;
+    if (failed(map.constantFold(operands, folded, &hasPoison)) || hasPoison || folded.empty())
+        return std::nullopt;
+    std::optional<APInt> result;
+    const bool isMin = isa<affine::AffineMinOp>(op);
+    for (Attribute attr : folded) {
+        auto candidate = cast<IntegerAttr>(attr).getValue().sextOrTrunc(bits);
+        if (!result || (isMin ? candidate.slt(*result) : candidate.sgt(*result)))
+            result = candidate;
+    }
+    return result;
+}
+
+std::optional<APInt> PoolScaleEvaluator::evaluateUnary(Operation *op, unsigned bits) {
+    auto operand = evaluate(op->getOperand(0));
+    if (!operand)
+        return std::nullopt;
+    if (isa<arith::IndexCastOp, arith::ExtSIOp>(op))
+        return operand->sextOrTrunc(bits);
+    if (isa<arith::ExtUIOp, arith::TruncIOp>(op))
+        return operand->zextOrTrunc(bits);
+    if (isa<math::CountLeadingZerosOp>(op))
+        return APInt(bits, operand->countLeadingZeros());
+    return std::nullopt;
+}
+
+std::optional<APInt> PoolScaleEvaluator::evaluateBinary(Operation *op) {
+    auto lhs = evaluate(op->getOperand(0));
+    auto rhs = evaluate(op->getOperand(1));
+    if (!lhs || !rhs || lhs->getBitWidth() != rhs->getBitWidth())
+        return std::nullopt;
+    if (isa<arith::AddIOp>(op))
+        return *lhs + *rhs;
+    if (isa<arith::SubIOp>(op))
+        return *lhs - *rhs;
+    if (isa<arith::MulIOp>(op))
+        return *lhs * *rhs;
+    if (isa<arith::MinSIOp>(op))
+        return lhs->slt(*rhs) ? *lhs : *rhs;
+    if (isa<arith::MaxSIOp>(op))
+        return lhs->sgt(*rhs) ? *lhs : *rhs;
+    if (isa<arith::DivUIOp>(op) && !rhs->isZero())
+        return lhs->udiv(*rhs);
+    if (isa<arith::ShLIOp>(op) && rhs->ult(lhs->getBitWidth()))
+        return lhs->shl(rhs->getZExtValue());
+    return std::nullopt;
+}
+
+// Match apply_scale -> optional output zero point -> clamp -> i8 truncation.
+static std::optional<PoolRescaleInfo> matchPoolRescale(linalg::GenericOp generic) {
+    auto yield = cast<linalg::YieldOp>(generic.getBody()->getTerminator());
+    auto trunc = yield.getValues()[0].getDefiningOp<arith::TruncIOp>();
+    auto min = trunc ? trunc.getIn().getDefiningOp<arith::MinSIOp>() : nullptr;
+    auto max = min ? min.getLhs().getDefiningOp<arith::MaxSIOp>() : nullptr;
+    if (!max)
+        return std::nullopt;
+    auto minValue = getConstIntValue(max.getRhs());
+    auto maxValue = getConstIntValue(min.getRhs());
+    if (!minValue || !maxValue || *minValue < -128 || *maxValue > 127 || *minValue > *maxValue)
+        return std::nullopt;
+
+    Value scaled = max.getLhs();
+    int32_t zeroPoint = 0;
+    if (auto add = scaled.getDefiningOp<arith::AddIOp>()) {
+        auto constant = getConstIntValue(add.getRhs());
+        if (!constant || *constant < -128 || *constant > 127)
+            return std::nullopt;
+        zeroPoint = *constant;
+        scaled = add.getLhs();
+    }
+    auto apply = scaled.getDefiningOp<tosa::ApplyScaleOp>();
+    if (!apply || apply.getValue() != generic.getBody()->getArgument(0) ||
+        apply.getRoundingMode() != tosa::RoundingMode::SINGLE_ROUND)
+        return std::nullopt;
+    return PoolRescaleInfo{
+        apply, zeroPoint, static_cast<int32_t>(*minValue), static_cast<int32_t>(*maxValue)
+    };
+}
+
+static LogicalResult appendPoolScaleRun(
+    SmallVectorImpl<PoolScaleRegion> &regions, ArrayRef<size_t> previousRow,
+    SmallVectorImpl<size_t> &currentRow, int64_t y, int64_t start, int64_t end,
+    const PoolScale &scale
+) {
+    // Only matching rectangles in the preceding row can extend vertically.
+    auto previous = llvm::find_if(previousRow, [&](size_t index) {
+        const auto &region = regions[index];
+        return region.x == start && region.width == end - start && region.scale == scale;
+    });
+    if (previous != previousRow.end()) {
+        ++regions[*previous].height;
+        currentRow.push_back(*previous);
+    }
+    else {
+        if (regions.size() == kMaxSlidingPoolScaleRegions)
+            return failure();
+        currentRow.push_back(regions.size());
+        regions.push_back({y, start, 1, end - start, scale});
+    }
+    return success();
+}
+
+static FailureOr<SmallVector<PoolScaleRegion>>
+collectPoolScaleRegions(tosa::ApplyScaleOp apply, int64_t height, int64_t width, bool nchwRescale) {
+    PoolScaleEvaluator evaluator(apply, nchwRescale);
+    if (getConstIntValue(apply.getMultiplier()) && getConstIntValue(apply.getShift())) {
+        auto scale = evaluator.scaleAt(0, 0);
+        if (!scale)
+            return failure();
+        return SmallVector<PoolScaleRegion>{{0, 0, height, width, *scale}};
+    }
+    // Division avoids overflow when checking H*W against the scan budget.
+    if (height > kMaxSlidingPoolScalePixels / width)
+        return failure();
+
+    SmallVector<PoolScaleRegion> regions;
+    SmallVector<size_t> previousRow, currentRow;
+    for (int64_t y = 0; y < height; ++y) {
+        auto scale = evaluator.scaleAt(y, 0);
+        if (!scale)
+            return failure();
+        int64_t start = 0;
+        for (int64_t x = 1; x < width; ++x) {
+            auto nextScale = evaluator.scaleAt(y, x);
+            if (!nextScale)
+                return failure();
+            if (*nextScale == *scale)
+                continue;
+            if (failed(appendPoolScaleRun(regions, previousRow, currentRow, y, start, x, *scale)))
+                return failure();
+            start = x;
+            scale = nextScale;
+        }
+        if (failed(appendPoolScaleRun(regions, previousRow, currentRow, y, start, width, *scale)))
+            return failure();
+        previousRow.swap(currentRow);
+        currentRow.clear();
+    }
+    return regions;
+}
+
+struct SlidingPoolInfo {
+    linalg::PoolingNhwcSumOp pool;
+    linalg::TransposeOp transpose;
+    RankedTensorType outputType;
+    SmallVector<int64_t> kernel, stride, dilation;
+};
+
+static bool hasZeroPoolInit(linalg::PoolingNhwcSumOp pool) {
+    auto init = pool.getOutputs()[0].getDefiningOp();
+    if (auto fill = dyn_cast_or_null<torq_hl::FillOp>(init))
+        return fill.getValue() == 0;
+    if (auto fill = dyn_cast_or_null<linalg::FillOp>(init))
+        return getConstIntValue(fill.getInputs()[0]) == 0;
+    return false;
+}
+
+static bool hasValidSlidingPoolGeometry(const SlidingPoolInfo &info, ArrayRef<int64_t> in) {
+    auto out = info.outputType.getShape();
+    const auto &kernel = info.kernel, &stride = info.stride, &dilation = info.dilation;
+    // Leave whole-frame pooling to the existing global pattern.
+    if (kernel[KERNEL_HEIGHT] == in[NHWC_HEIGHT] && kernel[KERNEL_WIDTH] == in[NHWC_WIDTH])
+        return false;
+    if (out[NHWC_BATCH] != 1 || in[NHWC_BATCH] != out[NHWC_BATCH] || in[NHWC_HEIGHT] <= 0 ||
+        in[NHWC_WIDTH] <= 0 || in[NHWC_CHANNEL] != out[NHWC_CHANNEL] || out[NHWC_CHANNEL] <= 0 ||
+        out[NHWC_HEIGHT] <= 0 || out[NHWC_WIDTH] <= 0 || stride.size() != 2 || dilation.size() != 2)
+        return false;
+    for (KernelDim axis : {KERNEL_HEIGHT, KERNEL_WIDTH}) {
+        const NhwcDim spatialDim = axis == KERNEL_HEIGHT ? NHWC_HEIGHT : NHWC_WIDTH;
+        const int64_t inputSize = in[spatialDim];
+        // Check before multiplying to avoid overflowing the dilated window.
+        if (kernel[axis] <= 0 || stride[axis] <= 0 || dilation[axis] <= 0 ||
+            kernel[axis] - 1 > (inputSize - 1) / dilation[axis])
+            return false;
+        const int64_t window = (kernel[axis] - 1) * dilation[axis] + 1;
+        if (out[spatialDim] != (inputSize - window) / stride[axis] + 1)
+            return false;
+    }
+    return hasZeroPoolInit(info.pool);
+}
+
+static std::optional<SlidingPoolInfo> matchSlidingPool(linalg::GenericOp generic, bool mark) {
+    if (generic.getNumDpsInputs() != 1 || generic.getNumDpsInits() != 1 ||
+        generic.getNumLoops() != 4 || generic.getNumReductionLoops() != 0 ||
+        llvm::any_of(generic.getIndexingMapsArray(), [](AffineMap m) { return !m.isIdentity(); }))
+        return std::nullopt;
+    Value sum = generic.getInputs()[0];
+    auto transpose = sum.getDefiningOp<linalg::TransposeOp>();
+    if (transpose) {
+        // Fuse only an exclusively owned NHWC -> NCHW transpose.
+        if (!transpose->getResult(0).hasOneUse() ||
+            transpose.getPermutation() !=
+                ArrayRef<int64_t>{NHWC_BATCH, NHWC_CHANNEL, NHWC_HEIGHT, NHWC_WIDTH})
+            return std::nullopt;
+        sum = transpose.getInput();
+    }
+    auto pool = sum.getDefiningOp<linalg::PoolingNhwcSumOp>();
+    if (!pool || !pool.getResult(0).hasOneUse() || (mark && isMarkedFuseGroup(pool)))
+        return std::nullopt;
+    auto inputType = dyn_cast<RankedTensorType>(pool.getInputs()[0].getType());
+    auto sumType = dyn_cast<RankedTensorType>(pool.getResult(0).getType());
+    auto outputType = dyn_cast<RankedTensorType>(generic.getResult(0).getType());
+    if (!outputType || outputType.getRank() != 4)
+        return std::nullopt;
+    if (transpose)
+        outputType = transposeType(outputType, Permutation::nchw2nhwc());
+    auto kernelType = dyn_cast<RankedTensorType>(pool.getInputs()[1].getType());
+    if (!inputType || !sumType || !kernelType || !inputType.hasStaticShape() ||
+        !outputType.hasStaticShape() || !kernelType.hasStaticShape() || inputType.getRank() != 4 ||
+        kernelType.getRank() != 2 || !inputType.getElementType().isInteger(8) ||
+        !sumType.getElementType().isInteger(32) || !outputType.getElementType().isInteger(8) ||
+        sumType.getShape() != outputType.getShape())
+        return std::nullopt;
+    SlidingPoolInfo info{
+        pool,
+        transpose,
+        outputType,
+        llvm::to_vector(kernelType.getShape()),
+        llvm::to_vector(attrValuesAsVec(pool.getStrides())),
+        llvm::to_vector(attrValuesAsVec(pool.getDilations()))
+    };
+    if (!hasValidSlidingPoolGeometry(info, inputType.getShape()))
+        return std::nullopt;
+    return info;
+}
+
+static Value createSlidingAvgPool(
+    linalg::GenericOp generic, SlidingPoolInfo &info, const PoolRescaleInfo &rescale,
+    ArrayRef<PoolScaleRegion> regions, PatternRewriter &rewriter
+) {
+    // Keep one NHWC layer; only EasyKernel expands the scale regions into tasks.
+    Value output = info.transpose ? createInitTensor(info.pool, rewriter, info.outputType)
+                                  : generic.getOutputs()[0];
+    Value weights = createI8Const(rewriter, info.pool, {1}, {1, 1, 1, 1});
+    SmallVector<int32_t> biasScales;
+    SmallVector<int64_t> scaleRegions;
+    for (const auto &region : regions) {
+        biasScales.append({0, region.scale.multiplier});
+        scaleRegions.append({region.y, region.x, region.height, region.width, region.scale.shift});
+    }
+    auto regionsAttr =
+        regions.size() == 1 ? DenseI64ArrayAttr{} : rewriter.getDenseI64ArrayAttr(scaleRegions);
+    Value biasScale = createI32Const(rewriter, info.pool, biasScales);
+    auto avg = torq_hl::AvgPool2DOp::create(
+        rewriter, generic.getLoc(), info.outputType, output, /*input_zp=*/0, rescale.zeroPoint,
+        rescale.min, rescale.max, regions.front().scale.shift, weights, biasScale,
+        info.pool.getInputs()[0], /*sliding_pool=*/true, rewriter.getDenseI64ArrayAttr(info.kernel),
+        rewriter.getDenseI64ArrayAttr(info.stride), rewriter.getDenseI64ArrayAttr(info.dilation),
+        regionsAttr
+    );
+    output = avg.getOutput();
+    if (info.transpose)
+        output = transposeValue(output, Permutation::nhwc2nchw(), generic.getLoc(), rewriter);
+    return output;
+}
+
+} // namespace
+
+// Anchor on the rescale generic: local integer NHWC pooling is deliberately
+// legal for CSS fallback, but its scale generic must still get a chance to fuse.
+struct SlidingNhwcAveragePoolConversion : public OpRewritePattern<linalg::GenericOp> {
+    const bool markFuseGroups;
+    SlidingNhwcAveragePoolConversion(MLIRContext *context, bool mark)
+        : OpRewritePattern<linalg::GenericOp>(context, /*benefit=*/10), markFuseGroups(mark) {}
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp generic, PatternRewriter &rewriter) const override {
+        auto info = matchSlidingPool(generic, markFuseGroups);
+        if (!info)
+            return failure();
+        auto rescale = matchPoolRescale(generic);
+        if (!rescale)
+            return failure();
+        auto out = info->outputType.getShape();
+        // Index queries still name the rescale generic's loops (NCHW after
+        // a transpose); scale rectangles and the AvgPool2D op remain NHWC.
+        auto regions = collectPoolScaleRegions(
+            rescale->apply, out[NHWC_HEIGHT], out[NHWC_WIDTH], bool(info->transpose)
+        );
+        if (failed(regions))
+            return rewriter.notifyMatchFailure(
+                generic, "unsupported sliding pooling rescale or scale analysis limit exceeded"
+            );
+        if (markFuseGroups) {
+            auto group = info->pool->getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID);
+            if (!group)
+                return failure();
+            return success(markFuseGroupBackward(
+                generic.getResult(0),
+                {peelPadAndReshapeSource(info->pool.getInputs()[0]), info->pool.getInputs()[1]},
+                rewriter, group
+            ));
+        }
+        rewriter.replaceOp(
+            generic, createSlidingAvgPool(generic, *info, *rescale, *regions, rewriter)
+        );
+        if (info->transpose)
+            rewriter.eraseOp(info->transpose);
+        rewriter.eraseOp(info->pool);
+        return success();
+    }
+};
+
 struct PoolingNhwcSumOpConversion : public OpRewritePattern<linalg::PoolingNhwcSumOp> {
   public:
     using LinalgOpT = linalg::PoolingNhwcSumOp;
@@ -391,7 +813,9 @@ struct PoolingNhwcSumOpConversion : public OpRewritePattern<linalg::PoolingNhwcS
         auto torqOp = TorqOp::create(
             rewriter, linalgOp.getLoc(), torqOutType,
             createInitTensor(linalgOp, rewriter, torqOutType), scInfo.zp, scInfo.zp, scInfo.min,
-            scInfo.max, scInfo.scaleShift, weights, biasScale, input0
+            scInfo.max, scInfo.scaleShift, weights, biasScale, input0, /*sliding_pool=*/false,
+            /*kernel=*/nullptr, /*stride=*/nullptr, /*dilation=*/nullptr,
+            /*scale_regions=*/nullptr
         );
         auto torqOut = transposeValue(torqOp.getOutput(), dataPerm.reverse(), loc, rewriter);
 
@@ -527,7 +951,9 @@ struct PoolingNchwSumOpConversion : public OpRewritePattern<linalg::PoolingNchwS
         auto torqOp = TorqOp::create(
             rewriter, linalgOp.getLoc(), torqOutType,
             createInitTensor(linalgOp, rewriter, torqOutType), inputZp, outputZp, outputMin,
-            outputMax, shiftFactor, weights, biasScale, input0
+            outputMax, shiftFactor, weights, biasScale, input0, /*sliding_pool=*/false,
+            /*kernel=*/nullptr, /*stride=*/nullptr, /*dilation=*/nullptr,
+            /*scale_regions=*/nullptr
         );
         auto torqOut = transposeValue(torqOp.getOutput(), dataPerm.reverse(), loc, rewriter);
 
@@ -672,6 +1098,7 @@ struct PoolingNchwSumOpToDW2DConversion : public OpRewritePattern<linalg::Poolin
 void populateLinalgToTorqHLPoolingPatterns(
     MLIRContext *context, RewritePatternSet &patterns, bool markFuseGroups
 ) {
+    patterns.insert<SlidingNhwcAveragePoolConversion>(context, markFuseGroups);
     patterns.insert<PoolingNchwMaxOpConversion>(context, markFuseGroups);
     patterns.insert<PoolingNhwcSumOpConversion>(context, 20, 20 /* FIXME */, markFuseGroups);
     patterns.insert<PoolingNchwSumOpToDW2DConversion>(context, markFuseGroups);

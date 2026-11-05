@@ -194,7 +194,9 @@ struct ReduceMeanPattern : public OpRewritePattern<linalg::GenericOp> {
 
         auto avgpoolOp = torq_hl::AvgPool2DOp::create(
             rewriter, loc, avgpoolOutType, createInitTensor(reducesumOp, rewriter, avgpoolOutType),
-            0, 0, 0xff800000, 0x7f800000, 0, weights, biasScale, input
+            0, 0, 0xff800000, 0x7f800000, 0, weights, biasScale, input, /*sliding_pool=*/false,
+            /*kernel=*/nullptr, /*stride=*/nullptr, /*dilation=*/nullptr,
+            /*scale_regions=*/nullptr
         );
 
         if (foldedReshape) {

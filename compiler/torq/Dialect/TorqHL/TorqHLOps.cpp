@@ -49,6 +49,117 @@ using namespace mlir::syna::torq_hl;
 
 namespace mlir::syna::torq_hl {
 
+namespace {
+
+static LogicalResult verifySlidingPoolTypes(AvgPool2DOp op) {
+    auto input = cast<ShapedType>(op.getInput().getType());
+    auto output = cast<ShapedType>(op.getInit().getType());
+    if (!input.hasRank() || !output.hasRank() || !input.hasStaticShape() ||
+        !output.hasStaticShape() || input.getRank() != 4 || output.getRank() != 4 ||
+        !input.getElementType().isInteger(8) || !output.getElementType().isInteger(8))
+        return op.emitOpError("sliding pooling requires static rank-4 NHWC i8 tensors");
+    if (llvm::any_of(input.getShape(), [](int64_t dim) { return dim <= 0; }) ||
+        llvm::any_of(output.getShape(), [](int64_t dim) { return dim <= 0; }))
+        return op.emitOpError("sliding pooling requires positive dimensions");
+    return success();
+}
+
+static LogicalResult verifySlidingPoolParameters(AvgPool2DOp op) {
+    auto regionsAttr = op.getScaleRegionsAttr();
+    if (regionsAttr && (regionsAttr.empty() || regionsAttr.size() % 5 != 0))
+        return op.emitOpError("scale_regions requires [y, x, height, width, shift] records");
+    const int64_t scaleCount = regionsAttr ? regionsAttr.size() / 5 : 1;
+    // Each region has one [bias, multiplier] pair, broadcast across channels.
+    auto weights = cast<ShapedType>(op.getWeights().getType());
+    auto scaleBias = cast<ShapedType>(op.getScaleBias().getType());
+    if (!weights.hasStaticShape() || !weights.getElementType().isInteger(8) ||
+        weights.getNumElements() != 1 || !scaleBias.hasStaticShape() ||
+        !scaleBias.getElementType().isInteger(32) || scaleBias.getNumElements() != 2 * scaleCount ||
+        (regionsAttr && (!scaleBias.hasRank() || scaleBias.getRank() != 1)))
+        return op.emitOpError(
+            "sliding pooling requires one i8 weight and one i32 bias/scale pair per scale region"
+        );
+    if (op.getInputZp() != 0)
+        return op.emitOpError("sliding pooling expects input zero-point correction folded into bias"
+        );
+    if (op.getShiftFactor() < 0 || op.getShiftFactor() > 62)
+        return op.emitOpError("sliding pooling shift must be between 0 and 62");
+    return success();
+}
+
+static LogicalResult verifySlidingPoolWindow(AvgPool2DOp op) {
+    auto input = cast<ShapedType>(op.getInput().getType());
+    auto output = cast<ShapedType>(op.getInit().getType());
+    auto kernel = op.getKernelAttr();
+    auto stride = op.getStrideAttr();
+    auto dilation = op.getDilationAttr();
+    if (!kernel || !stride || !dilation || kernel.size() != 2 || stride.size() != 2 ||
+        dilation.size() != 2)
+        return op.emitOpError("sliding pooling requires two kernel, stride and dilation values");
+    if (input.getDimSize(0) != output.getDimSize(0) || input.getDimSize(3) != output.getDimSize(3))
+        return op.emitOpError("sliding pooling must preserve batch and channel dimensions");
+    for (unsigned i = 0; i < 2; ++i) {
+        const int64_t inputSize = input.getDimSize(i + 1);
+        // Check the dilated window fits before multiplying, avoiding int64 overflow.
+        if (kernel[i] <= 0 || stride[i] <= 0 || dilation[i] <= 0 ||
+            kernel[i] - 1 > (inputSize - 1) / dilation[i])
+            return op.emitOpError("invalid sliding pooling window or output shape");
+        const int64_t windowSize = (kernel[i] - 1) * dilation[i] + 1;
+        // Padding is explicit, so use VALID-window geometry.
+        const int64_t expectedSize = (inputSize - windowSize) / stride[i] + 1;
+        if (output.getDimSize(i + 1) != expectedSize)
+            return op.emitOpError("invalid sliding pooling window or output shape");
+    }
+    return success();
+}
+
+static LogicalResult verifySlidingPoolRegions(AvgPool2DOp op) {
+    auto regionsAttr = op.getScaleRegionsAttr();
+    if (!regionsAttr)
+        return success();
+    auto regions = regionsAttr.asArrayRef();
+    auto output = cast<ShapedType>(op.getInit().getType());
+    const int64_t height = output.getDimSize(1), width = output.getDimSize(2);
+    // Disjoint regions with equal total area cover the frame; use wide arithmetic.
+    llvm::APInt frameArea = llvm::APInt(128, height) * llvm::APInt(128, width);
+    llvm::APInt coveredArea(128, 0);
+    for (size_t i = 0; i < regions.size(); i += 5) {
+        const int64_t y = regions[i], x = regions[i + 1];
+        const int64_t h = regions[i + 2], w = regions[i + 3], shift = regions[i + 4];
+        if (y < 0 || x < 0 || y >= height || x >= width || h <= 0 || w <= 0 || h > height - y ||
+            w > width - x)
+            return op.emitOpError("scale region is outside the output frame");
+        if (shift < 0 || shift > 62)
+            return op.emitOpError("scale region shift must be between 0 and 62");
+        for (size_t j = 0; j < i; j += 5) {
+            if (y < regions[j] + regions[j + 2] && regions[j] < y + h &&
+                x < regions[j + 1] + regions[j + 3] && regions[j + 1] < x + w)
+                return op.emitOpError("scale regions must not overlap");
+        }
+        coveredArea += llvm::APInt(128, h) * llvm::APInt(128, w);
+        if (coveredArea.ugt(frameArea))
+            return op.emitOpError("scale regions must cover the output frame exactly");
+    }
+    if (coveredArea != frameArea)
+        return op.emitOpError("scale regions must cover the output frame exactly");
+    return success();
+}
+
+} // namespace
+
+LogicalResult AvgPool2DOp::verify() {
+    // Preserve the legacy/global pooling contract.
+    if (!getSlidingPool()) {
+        if (getScaleRegionsAttr())
+            return emitOpError("scale_regions is only supported for sliding pooling");
+        return success();
+    }
+    if (failed(verifySlidingPoolTypes(*this)) || failed(verifySlidingPoolParameters(*this)) ||
+        failed(verifySlidingPoolWindow(*this)))
+        return failure();
+    return verifySlidingPoolRegions(*this);
+}
+
 /// Pattern to fuse a load/store op with MemRefCast arguments.
 ///
 /// Example:

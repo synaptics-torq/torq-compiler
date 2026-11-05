@@ -16,9 +16,118 @@
 
 namespace mlir::syna::torq {
 
+namespace {
+
+struct PoolOutputRegion {
+    int64_t y, x, height, width;
+};
+
+// Address views keep every region on the original layer's buffers, without slices.
+static LData slidingPoolInputView(
+    torq_hl::AvgPool2DOp op, PoolOutputRegion region, uint32_t blockSize, uint32_t channelBlocks
+) {
+    auto [y, x, height, width] = region;
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    auto inputStrides = getEncodedStridesElements(inputType);
+    auto kernel = op.getKernelAttr().asArrayRef();
+    auto stride = op.getStrideAttr().asArrayRef();
+    auto dilation = op.getDilationAttr().asArrayRef();
+    // Output (h,w) starts at (h*strideH,w*strideW); kernel offsets use dilation.
+    LData input(op.getInput());
+    input.subviewDim(
+        1, y * stride[0], (height - 1) * stride[0] + (kernel[0] - 1) * dilation[0] + 1
+    );
+    input.subviewDim(2, x * stride[1], (width - 1) * stride[1] + (kernel[1] - 1) * dilation[1] + 1);
+    input.setShape(
+        {{inputType.getShape()[0], inputStrides[0]},
+         {height, stride[0] * inputStrides[1]},
+         {width, stride[1] * inputStrides[2]},
+         {channelBlocks, blockSize},
+         {kernel[0], dilation[0] * inputStrides[1]},
+         {kernel[1], dilation[1] * inputStrides[2]},
+         blockSize}
+    );
+    return input;
+}
+
+static LData slidingPoolOutputView(torq_hl::AvgPool2DOp op, PoolOutputRegion region) {
+    auto [y, x, height, width] = region;
+    LData output(op.getInit());
+    output.subviewDim(1, y, height).subviewDim(2, x, width);
+    return output;
+}
+
+static void emitSlidingAvgPoolRegion(
+    torq_hl::AvgPool2DOp op, PatternRewriter &rewriter, PoolOutputRegion region, int64_t shift,
+    int64_t scaleIndex
+) {
+    auto outputShape = cast<MemRefType>(op.getInit().getType()).getShape();
+    auto kernel = op.getKernelAttr().asArrayRef();
+    Slice slice("sliding_avgpool2d");
+    const uint32_t blockSize = slice.alu.iWidth(DType::int8, DType::int8);
+    const uint32_t channelBlocks = div_ceil(outputShape[3], blockSize);
+    const uint32_t actWidth = slice.act.width(DType::int8, DType::int8);
+    const uint32_t actBlocks = blockSize / actWidth;
+    LData input = slidingPoolInputView(op, region, blockSize, channelBlocks);
+    LData output = slidingPoolOutputView(op, region);
+    LData weights(op.getWeights());
+    weights.fuse(weights.shape().size());
+    LData biasScale(op.getScaleBias());
+    biasScale.fuse(biasScale.shape().size()).subviewDim(0, scaleIndex * 2, 2);
+    WData wdata = slice.wram.load(weights);
+    BData bdata = slice.bram.load(biasScale);
+    For(auto n = slice.iterate(outputShape[0])) {
+        For(auto h = slice.iterate(region.height)) {
+            For(auto w = slice.iterate(region.width)) {
+                For(auto b = slice.iterate(channelBlocks)) {
+                    // Start a fresh accumulator for each output pixel/block.
+                    PData pdata;
+                    For(auto kh = slice.iterate(kernel[0])) {
+                        For(auto kw = slice.iterate(kernel[1])) {
+                            IData idata = slice.iram.load(input[n][h][w][b][kh][kw]);
+                            pdata = slice.alu.scalarProductAccumulate(idata, wdata);
+                        }
+                    }
+                    For(auto a = slice.iterate(actBlocks)) {
+                        QData result = slice.act.rescaleClamp(
+                            pdata[a], bdata, shift, op.getOutputZp(), op.getOutputMin(),
+                            op.getOutputMax()
+                        );
+                        // Appending to the pixel drops the lanes past its last channel.
+                        slice.append(output[n][h][w], result);
+                    }
+                }
+            }
+        }
+    }
+    slice.createSliceTaskOp(rewriter, op.getLoc());
+}
+
+static LogicalResult lowerSlidingAvgPool(torq_hl::AvgPool2DOp op, PatternRewriter &rewriter) {
+    if (auto regionsAttr = op.getScaleRegionsAttr()) {
+        // ACT has one right shift per configuration, so emit one task per region.
+        auto regions = regionsAttr.asArrayRef();
+        for (size_t i = 0; i < regions.size(); i += 5)
+            emitSlidingAvgPoolRegion(
+                op, rewriter, {regions[i], regions[i + 1], regions[i + 2], regions[i + 3]},
+                regions[i + 4], i / 5
+            );
+    }
+    else {
+        auto shape = cast<MemRefType>(op.getInit().getType()).getShape();
+        emitSlidingAvgPoolRegion(op, rewriter, {0, 0, shape[1], shape[2]}, op.getShiftFactor(), 0);
+    }
+    rewriter.eraseOp(op);
+    return success();
+}
+
+} // namespace
+
 template <>
 LogicalResult
 Avgpool2DPattern::transform(torq_hl::AvgPool2DOp op, PatternRewriter &rewriter) const {
+    if (op.getSlidingPool())
+        return lowerSlidingAvgPool(op, rewriter);
     // input
     auto input_type = llvm::cast<MemRefType>(op.getInput().getType());
     auto input_shape = input_type.getShape();
