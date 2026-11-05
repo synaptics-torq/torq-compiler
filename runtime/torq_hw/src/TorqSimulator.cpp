@@ -19,6 +19,13 @@
 #include <cstring>
 #include <iostream>
 
+#ifndef RT_BUILD
+IREE_FLAG(int32_t, torq_sim_timeout_seconds, 300,
+          "Maximum wait per NSS job in seconds; not a whole-model timeout (must be positive)");
+#else
+static constexpr int32_t FLAG_torq_sim_timeout_seconds = 300;
+#endif
+
 using namespace std;
 
 namespace synaptics {
@@ -26,6 +33,11 @@ namespace synaptics {
 typedef void (*simulator_fun)(void *);
 
 bool TorqSimulator::open() {
+    if (FLAG_torq_sim_timeout_seconds <= 0) {
+        cerr << "torq_sim_timeout_seconds must be positive" << endl;
+        return false;
+    }
+
     cm = torq_cm_open(_xram.data(), _xramStartAddr, _xram.size());
 
     torq_cm__set_css_cpu_code(cm, &run_cpu_mpact_binary);
@@ -48,6 +60,10 @@ void TorqSimulator::setDumpDirectory(std::string dump_dir) {
 
 bool TorqSimulator::close() { 
     return torq_cm_close(cm) >= 0;
+}
+
+Timer::Duration TorqSimulator::waitTimeout() {
+    return Timer::Duration(FLAG_torq_sim_timeout_seconds) * 1000000;
 }
 
 bool TorqSimulator::wfi() { return true; }
