@@ -12,8 +12,6 @@
 
 #define DEBUG_TYPE "torq-lower-torqhl"
 
-using namespace mlir::syna::torq_hw;
-
 namespace mlir::syna::torq {
 
 template <>
@@ -40,31 +38,26 @@ LogicalResult ElementWiseUnaryPattern::transform(
     }
 
     Slice slice(std::string("Eltwise-") + std::string(stringifyElementwiseOpEnum(opType)));
-    DType elementType = getDType(input_type.getElementType());
-    int blockSize = slice.act.width(elementType);
-    const int blockCount = div_ceil(input_type.getNumElements(), blockSize);
+    LData input(op.getInput());
+    LData output(op.getInit());
+    if (input.denseDims() != (int)input.dims().size() ||
+        output.denseDims() != (int)output.dims().size()) {
+        return op.emitError("elementwise unary input and output must be dense");
+    }
 
-    LData input({blockCount, blockSize}, elementType);
-    LData output({blockCount, blockSize}, elementType);
+    // Process the data as a flat array of blocks; the last block is read and written whole
+    int blockSize = slice.act.width(input.elementType());
+    input.fuse(input.dims().size()).forceReshapeDim(-1, {-1, blockSize});
+    output.fuse(output.dims().size()).forceReshapeDim(-1, {-1, blockSize});
 
-    For(auto b = slice.iterate(blockCount)) {
+    For(auto b = slice.iterate(input.dim(0))) {
         IData idata = slice.iram.load(input[b]);
         PData pdata = slice.alu.accumulate(idata, hwOp1Mode);
         QData res = slice.act.load(pdata);
         slice.store(output[b], res);
     }
 
-    rewriter.replaceOpWithNewOp<SliceTaskOp>(
-        op,
-        slice.name(),                            // Operation to replace
-        ValueRange{op.getInput()},               // Input tensor
-        ValueRange{},                            // Weights
-        ValueRange{},                            // BiasScale tensor,
-        ValueRange{op.getInit()},                // Output tensor initializer
-        ValueRange{},                            // Symbols
-        slice.getCfgAttr(rewriter.getContext()), // Slice configuration
-        slice.getNdls()                          // NDLs
-    );
+    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
 
     return success();
 }

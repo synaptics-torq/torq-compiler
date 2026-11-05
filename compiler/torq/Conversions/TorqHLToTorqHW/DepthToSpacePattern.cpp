@@ -6,6 +6,7 @@
 
 #include "Patterns.h"
 #include "torq/Utils/ConversionUtils.h"
+#include "torq/Utils/EncodingUtils.h"
 #include "torq/Utils/Kernel.h"
 #include "torq/Utils/TorqUtils.h"
 

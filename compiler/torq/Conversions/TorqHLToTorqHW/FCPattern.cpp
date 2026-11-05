@@ -4,15 +4,13 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// FCPattern.cpp - lower torq_hl FullyConnected to torq_hw::SliceTaskOp
+// FCPattern.cpp - lower torq_hl FullyConnected to slice tasks
 #include "Patterns.h"
 
 #include "torq/Utils/ConversionUtils.h"
 #include "torq/Utils/Kernel.h"
 #include "torq/Utils/TorqUtils.h"
 #include "llvm/Support/Debug.h"
-
-using namespace mlir::syna::torq_hw;
 
 #define DEBUG_TYPE "torq-lower-torqhl"
 
@@ -48,7 +46,7 @@ struct BiasScale {
 //
 // `rowOffset` / `rowCount` select a range of input rows (N). They are the whole tensor
 // unless the fast kernel below peeled a tail of rows off for this kernel to pick up.
-static torq_hw::SliceTaskOp lowerToHwPerChannel(
+static Operation *lowerToHwPerChannel(
     torq_hl::FullyConnectedOp op, PatternRewriter &rewriter, int rowOffset, int rowCount
 ) {
 
@@ -104,7 +102,7 @@ static torq_hw::SliceTaskOp lowerToHwPerChannel(
 //
 // Used when op.getIsBatchScaled() is set, or when a single bias (biasScale.dim(0)==1)
 // is broadcast over the whole batch.
-static torq_hw::SliceTaskOp
+static Operation *
 lowerToHwBatchScaled(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter, bool isSingleBias) {
 
     LData input(op.getInput());
@@ -137,12 +135,7 @@ lowerToHwBatchScaled(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter, bo
         }
     }
 
-    // Pass weights first (IData) and input second (WData) so the runtime maps them
-    // to the expected memories for FC lowering.
-    return torq_hw::SliceTaskOp::create(
-        rewriter, op.getLoc(), slice.name(), op.getWeights(), op.getInput(), op.getScaleBias(),
-        op.getInit(), slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
-    );
+    return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
 // Row-blocked variant of the kernel above: groups up to wram.transposeHeight() input rows
@@ -150,7 +143,7 @@ lowerToHwBatchScaled(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter, bo
 // but with WRAM holding the input rows. bias/scale is indexed by output channel only, so a
 // group shares one BREG. A rowCount below the transpose height runs in one pass with a
 // shorter block, the same way lowerToFastMatmul() handles M < 4.
-static torq_hw::SliceTaskOp lowerToHwPerChannelFast(
+static Operation *lowerToHwPerChannelFast(
     torq_hl::FullyConnectedOp op, PatternRewriter &rewriter, int rowOffset, int rowCount
 ) {
 
@@ -245,7 +238,7 @@ static bool canUseFastPerChannel(torq_hl::FullyConnectedOp op) {
     return isFloat(input.elementType()) && input.dims().size() == 2 && output.dims().size() == 2;
 }
 
-static torq_hw::SliceTaskOp lowerToHw(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter) {
+static Operation *lowerToHw(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter) {
     LData biasScale(op.getScaleBias());
     bool isSingleBias =
         (biasScale.shape().size() == 1 || biasScale.shape().size() == 2) && biasScale.dim(0) == 1;
@@ -283,12 +276,12 @@ LogicalResult FCPattern::transform(torq_hl::FullyConnectedOp op, PatternRewriter
     // kernels with their peels) covers everything the test set lowers. A shape
     // the EK path cannot take now fails loudly as an unconverted op instead of
     // falling back.
-    torq_hw::SliceTaskOp hwOp;
+    Operation *hwOp = nullptr;
 
     if (!(hwOp = lowerToHw(op, rewriter))) {
         return failure();
     }
-    rewriter.replaceOp(op, hwOp.getOperation()->getResults());
+    rewriter.replaceOp(op, hwOp);
     return success();
 }
 

@@ -12,13 +12,10 @@
 
 #define DEBUG_TYPE "torq-lower-torqhl"
 
-using namespace mlir::syna::torq_hw;
-
 namespace mlir::syna::torq {
 
 // Segment H and W dimensions to 2 segments each (4 quadrants) EE, EO, OE, OO
-static torq_hw::SliceTaskOp
-segmentToQuadrants(torq_hl::SegmentationOp op, PatternRewriter &rewriter) {
+static Operation *segmentToQuadrants(torq_hl::SegmentationOp op, PatternRewriter &rewriter) {
     struct In : NCHW, Vectorized {};
 
     Slice slice("segmentation-hw");
@@ -77,7 +74,7 @@ segmentToQuadrants(torq_hl::SegmentationOp op, PatternRewriter &rewriter) {
 
 // Segment H dimension to the specified number of segments
 // E.g.: ensor with lines [a,b,c,d,e,f] and hSegments == 2 is converted to [a,c,e,b,d,f]
-static torq_hw::SliceTaskOp
+static Operation *
 segmentHDim(torq_hl::SegmentationOp op, PatternRewriter &rewriter, int hSegments) {
     Slice slice("segmentation-h");
     LData input(op.getInput());
@@ -121,7 +118,7 @@ SegmentationPattern::transform(torq_hl::SegmentationOp op, PatternRewriter &rewr
     const int hSegments = op.getHSegments();
     const int wSegments = op.getWSegments();
 
-    torq_hw::SliceTaskOp hwOp;
+    Operation *hwOp = nullptr;
     if (hSegments == 2 && wSegments == 2) {
         hwOp = segmentToQuadrants(op, rewriter);
     }
@@ -132,7 +129,7 @@ SegmentationPattern::transform(torq_hl::SegmentationOp op, PatternRewriter &rewr
         return rewriter.notifyMatchFailure(op, "Unsupported segmentation configuration");
     }
 
-    rewriter.replaceOp(op, hwOp.getOperation()->getResults());
+    rewriter.replaceOp(op, hwOp);
     return success();
 }
 

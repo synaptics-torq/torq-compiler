@@ -8,13 +8,7 @@
 
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
-#include "torq/Dialect/TorqHW/TorqHWDialect.h"
-#include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Dialect/TorqHW/TorqHWOps.h"
-#include "torq/Utils/EncodingUtils.h"
-#include "torq/Utils/MemoryUtils.h"
-
-#include "llvm/Support/CommandLine.h"
 
 namespace mlir::syna::torq {
 

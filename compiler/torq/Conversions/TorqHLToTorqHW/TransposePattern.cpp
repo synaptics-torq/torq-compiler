@@ -59,8 +59,6 @@ strides which would not be possible if we convert the output type to int32
 
 */
 
-using namespace mlir::syna::torq_hw;
-
 namespace mlir::syna::torq {
 
 static std::vector<int64_t> getReversePerm(std::vector<int64_t> perm) {

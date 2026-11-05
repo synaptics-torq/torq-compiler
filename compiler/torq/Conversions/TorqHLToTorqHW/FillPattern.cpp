@@ -12,8 +12,6 @@
 
 #define DEBUG_TYPE "torq-lower-torqhl"
 
-using namespace mlir::syna::torq_hw;
-
 namespace mlir::syna::torq {
 
 template <>

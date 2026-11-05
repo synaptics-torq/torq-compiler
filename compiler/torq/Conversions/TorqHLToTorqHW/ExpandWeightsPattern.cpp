@@ -11,8 +11,6 @@
 #include "llvm/Support/Debug.h"
 #define DEBUG_TYPE "torq-lower-torqhl-expand-weights"
 
-using namespace mlir::syna::torq_hw;
-
 namespace mlir::syna::torq {
 
 // Expand kernel for block-wise expand_weights without bias.
@@ -22,7 +20,7 @@ namespace mlir::syna::torq {
 //
 //   output = (decompressed_tensor(on-fly) * scale)
 //
-static FailureOr<SliceTaskOp> createBlockExpandWithoutBias(
+static Operation *createBlockExpandWithoutBias(
     torq_hl::ExpandWeightsOp op, PatternRewriter &rewriter, int blockSize
 ) {
 
@@ -74,7 +72,7 @@ static FailureOr<SliceTaskOp> createBlockExpandWithoutBias(
 // simplified to:
 //
 //   output = (decompressed_weights(on-fly) * scale) + (-1 * bias)
-static FailureOr<SliceTaskOp>
+static Operation *
 createBlockExpandWithBias(torq_hl::ExpandWeightsOp op, PatternRewriter &rewriter, int blockSize) {
 
     Slice slice("ExpandWeights-Block-Expand-with-bias");
@@ -137,14 +135,10 @@ ExpandWeightsPattern::transform(torq_hl::ExpandWeightsOp op, PatternRewriter &re
         return op.emitOpError("expected positive block_size for expand_weights");
     }
 
-    FailureOr<SliceTaskOp> expandWeightsTask =
-        op.getBias() ? createBlockExpandWithBias(op, rewriter, blockSize)
-                     : createBlockExpandWithoutBias(op, rewriter, blockSize);
-    if (failed(expandWeightsTask)) {
-        return failure();
-    }
-
-    rewriter.replaceOp(op, expandWeightsTask->getOperation());
+    Operation *expandWeightsTask = op.getBias()
+                                       ? createBlockExpandWithBias(op, rewriter, blockSize)
+                                       : createBlockExpandWithoutBias(op, rewriter, blockSize);
+    rewriter.replaceOp(op, expandWeightsTask);
 
     return success();
 }

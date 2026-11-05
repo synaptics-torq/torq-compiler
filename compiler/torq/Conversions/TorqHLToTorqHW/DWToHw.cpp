@@ -17,8 +17,6 @@
 
 #define DEBUG_TYPE "torq-lower-torqhl"
 
-using namespace mlir::syna::torq_hw;
-
 namespace mlir::syna::torq {
 
 // Layout of the input/output memref data before vectorization
@@ -56,15 +54,14 @@ getSubview(LData &input, LData &output, LData &weight, LData &biasScale, int chO
     biasScale.subviewDim(0, chOffs * sbWidth, chCount * sbWidth);
 }
 
-// Lower depthwise 1D stride=1 special case to SliceTaskOp
+// Lower depthwise 1D stride=1 special case to a slice task
 // Input: NHWC format [N, 1, Width, Channels]
 // Weight: Packed format [Ch_outer, Kh, Kw, 32] where Ch_outer = Channels/32
 // Lower depthwise 1D stride=1 convolution to hardware
 // Processing strategy: For each channel block (16 for BF16, 32 for INT8),
 // accumulate across kernel width using element-wise multiply-accumulate
-static torq_hw::SliceTaskOp lowerDw1dStride1ToHw(
-    torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset,
-    int chCount
+static Operation *lowerDw1dStride1ToHw(
+    torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter, int chOffset, int chCount
 ) {
     if (!hasEkLoweringConv(op)) {
         return {};
@@ -148,12 +145,12 @@ static bool isGlobalNhwcDw(torq_hl::DepthwiseConv2DOp op) {
            llvm::all_of(op.getPad(), [](int64_t p) { return p == 0; });
 }
 
-// Lower a global depthwise conv with NHWC input to SliceTaskOp
+// Lower a global depthwise conv with NHWC input to a slice task
 // Input: [N, H, W, C], weight: [KH, 1, KW, C'] with KH == H, KW == W and C' >= C (zero padded),
 // output: [N, 1, 1, C].
 // For each block of chVectSize channels, accumulate the elementwise product of all the KH * KW
 // input pixels with the weights.
-static torq_hw::SliceTaskOp lowerDwGlobalNhwcToHw(
+static Operation *lowerDwGlobalNhwcToHw(
     torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter, int chOffset, int chCount,
     int chVectSize
 ) {
@@ -227,7 +224,7 @@ convertGlobalNhwcDwToHw(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter
 
     // Process the channels in up to three parts so each one has a whole number of vectors and
     // activation blocks: full vectors, then whole activation blocks, then the rest.
-    torq_hw::SliceTaskOp hwOp;
+    Operation *hwOp = nullptr;
     int chOffset = 0;
     for (int vect : {mainVect, actWidth, 0}) {
         int remaining = chCount - chOffset;
@@ -240,13 +237,12 @@ convertGlobalNhwcDwToHw(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter
         }
         chOffset += count;
     }
-    rewriter.replaceOp(op, hwOp.getOperation()->getResults());
+    rewriter.replaceOp(op, hwOp);
     return success();
 }
 
-static torq_hw::SliceTaskOp lowerDwStride2ToHw(
-    torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset,
-    int chCount
+static Operation *lowerDwStride2ToHw(
+    torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter, int chOffset, int chCount
 ) {
     struct In : Vectorized {
         enum { N, CVectors, CItems, CInGroup, RowQuadrant, ColQuadrant, KernelRows, KernelColGrps };
@@ -434,11 +430,9 @@ static torq_hw::SliceTaskOp lowerDwStride2ToHw(
     return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
-// Lower torq_hl op to SliceTaskOp
-static torq_hw::SliceTaskOp lowerToHw(
-    torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset,
-    int chCount
-) {
+// Lower torq_hl op to a slice task
+static Operation *
+lowerToHw(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter, int chOffset, int chCount) {
     // Layout of the in/out/weight tensors for processing
     struct In : Vectorized {
         enum { N, CVectors, CItems, CInGroup, KernelRows, KernelColGroups };
@@ -450,7 +444,7 @@ static torq_hw::SliceTaskOp lowerToHw(
 
     int stride = op.getStride()[0];
     if (stride == 2) {
-        return lowerDwStride2ToHw(op, rewriter, taskInitTensor, chOffset, chCount);
+        return lowerDwStride2ToHw(op, rewriter, chOffset, chCount);
     }
 
     // Define operands in LRAM
@@ -561,8 +555,6 @@ static LogicalResult convertToHw(torq_hl::DepthwiseConv2DOp op, PatternRewriter 
         return convertGlobalNhwcDwToHw(op, rewriter);
     }
 
-    Value initValue = op.getInit();
-
     auto wDims = LData(op.getWeights()).dims();
     // Get the vector size from the last dimension of the weight tensor
     // For depthwise 1D stride=1: weight is [Ch_outer, Kh, Kw, inner] so inner is at index 3
@@ -574,7 +566,7 @@ static LogicalResult convertToHw(torq_hl::DepthwiseConv2DOp op, PatternRewriter 
     LData outputData(op.getInit());
     int outChCount = isDw1dStride1 ? outputData.dim(outputData.shape().size() - 1) // NHWC: last dim
                                    : outputData.dim(Dim::C);                       // NCHW: dim 1
-    torq_hw::SliceTaskOp hwOp;
+    Operation *hwOp = nullptr;
 
     if (isDw1dStride1) {
         // Use specialized lowering for depthwise 1D stride=1
@@ -582,20 +574,18 @@ static LogicalResult convertToHw(torq_hl::DepthwiseConv2DOp op, PatternRewriter 
 
         // Peel-off channels not multiple of output channel grouping
         if (int peeledOutCh = outChCount % outChVectSize) {
-            if (!(hwOp = lowerDw1dStride1ToHw(
-                      op, rewriter, initValue, outChCount - peeledOutCh, peeledOutCh
-                  ))) {
+            if (!(hwOp =
+                      lowerDw1dStride1ToHw(op, rewriter, outChCount - peeledOutCh, peeledOutCh))) {
                 return failure();
             }
-            initValue = hwOp.getQ()[0];
             outChCount -= peeledOutCh;
         }
         if (outChCount > 0) {
-            if (!(hwOp = lowerDw1dStride1ToHw(op, rewriter, initValue, 0, outChCount))) {
+            if (!(hwOp = lowerDw1dStride1ToHw(op, rewriter, 0, outChCount))) {
                 return failure();
             }
         }
-        rewriter.replaceOp(op, hwOp.getOperation()->getResults());
+        rewriter.replaceOp(op, hwOp);
         return success();
     }
 
@@ -605,18 +595,17 @@ static LogicalResult convertToHw(torq_hl::DepthwiseConv2DOp op, PatternRewriter 
     // requirement for output channels padding.
     // Here we could check output stride to see if we have padding, in which case peeling not needed
     if (int peeledOutCh = outChCount % outChVectSize) {
-        if (!(hwOp = lowerToHw(op, rewriter, initValue, outChCount - peeledOutCh, peeledOutCh))) {
+        if (!(hwOp = lowerToHw(op, rewriter, outChCount - peeledOutCh, peeledOutCh))) {
             return failure();
         }
-        initValue = hwOp.getQ()[0];
         outChCount -= peeledOutCh;
     }
     if (outChCount > 0) {
-        if (!(hwOp = lowerToHw(op, rewriter, initValue, 0, outChCount))) {
+        if (!(hwOp = lowerToHw(op, rewriter, 0, outChCount))) {
             return failure();
         }
     }
-    rewriter.replaceOp(op, hwOp.getOperation()->getResults());
+    rewriter.replaceOp(op, hwOp);
     return success();
 }
 

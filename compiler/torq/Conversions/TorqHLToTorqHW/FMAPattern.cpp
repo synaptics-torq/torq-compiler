@@ -13,8 +13,6 @@
 
 #define DEBUG_TYPE "torq-lower-torqhl"
 
-using namespace mlir::syna::torq_hw;
-
 namespace mlir::syna::torq {
 
 template <>
@@ -40,7 +38,7 @@ LogicalResult FMAPattern::transform(torq_hl::FMAOp op, PatternRewriter &rewriter
         enum { NonDenseDims };
     };
 
-    Slice slice;
+    Slice slice("fma");
 
     // (A per-tensor scale_bias is the 1-D [2] form, so it never enters this path.)
     if (biasScale.dims().size() == 2 && biasScale.dim(0) > 1 &&
@@ -77,16 +75,7 @@ LogicalResult FMAPattern::transform(torq_hl::FMAOp op, PatternRewriter &rewriter
             }
         }
 
-        rewriter.replaceOpWithNewOp<torq_hw::SliceTaskOp>(
-            op, // Operation to replace
-            "fma",
-            op.getInput(),                           // Input tensor
-            op.getWeights(),                         // Weights
-            op.getScaleBias(),                       // BiasScale tensor
-            op.getInit(),                            // Output tensor initializer
-            slice.getCfgAttr(rewriter.getContext()), // Slice configuration
-            slice.getNdls()                          // NDLs
-        );
+        rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
 
         return success();
     }
@@ -106,16 +95,7 @@ LogicalResult FMAPattern::transform(torq_hl::FMAOp op, PatternRewriter &rewriter
         }
     }
 
-    rewriter.replaceOpWithNewOp<torq_hw::SliceTaskOp>(
-        op, // Operation to replace
-        "fma",
-        op.getInput(),                           // Input tensor
-        op.getWeights(),                         // Weights
-        op.getScaleBias(),                       // BiasScale tensor
-        op.getInit(),                            // Output tensor initializer
-        slice.getCfgAttr(rewriter.getContext()), // Slice configuration
-        slice.getNdls()                          // NDLs
-    );
+    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
 
     return success();
 }

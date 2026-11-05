@@ -11,8 +11,6 @@
 
 #define DEBUG_TYPE "torq-lower-torqhl"
 
-using namespace mlir::syna::torq_hw;
-
 namespace mlir::syna::torq {
 
 static torq_hw::ALUOp1Mode opTypeToAluOpMode(torq_hl::ElementwiseOpEnum opType) {

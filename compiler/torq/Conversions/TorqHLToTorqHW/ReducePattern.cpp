@@ -20,8 +20,6 @@ static llvm::cl::opt<bool> clTorqFakeReduce(
     llvm::cl::init(false)
 );
 
-using namespace mlir::syna::torq_hw;
-
 namespace mlir::syna::torq {
 
 namespace {

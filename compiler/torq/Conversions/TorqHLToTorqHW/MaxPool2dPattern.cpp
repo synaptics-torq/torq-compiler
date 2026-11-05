@@ -17,8 +17,6 @@
 
 #define DEBUG_TYPE "torq-lower-torqhl"
 
-using namespace mlir::syna::torq_hw;
-
 namespace mlir::syna::torq {
 
 // Layout of the input/output memref data before vectorization
@@ -38,7 +36,7 @@ static QData loadClamped(Slice &slice, const PData &pdata, torq_hl::MaxPool2dOp 
 }
 
 // Lower MaxPool 1D to hardware using Slice API
-static torq_hw::SliceTaskOp lowerMaxPool1DToHw(
+static Operation *lowerMaxPool1DToHw(
     torq_hl::MaxPool2dOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset,
     int chCount
 ) {
@@ -101,7 +99,7 @@ static torq_hw::SliceTaskOp lowerMaxPool1DToHw(
 }
 
 // Pool along W only (kh==1, kw>1) by splitting the dense W dimension into [outputWidth, kw].
-static torq_hw::SliceTaskOp lowerMaxPool1DHorizontalToHw(
+static Operation *lowerMaxPool1DHorizontalToHw(
     torq_hl::MaxPool2dOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset,
     int chCount
 ) {
@@ -174,7 +172,7 @@ static torq_hw::SliceTaskOp lowerMaxPool1DHorizontalToHw(
     return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
-static torq_hw::SliceTaskOp lowerMaxPool2DToHw(
+static Operation *lowerMaxPool2DToHw(
     torq_hl::MaxPool2dOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset,
     int chCount
 ) {
@@ -264,7 +262,7 @@ static torq_hw::SliceTaskOp lowerMaxPool2DToHw(
 // Same structure as the depthwise stride-2 kernel (lowerDwStride2ToHw in DWToHw.cpp) with a MAX
 // accumulation instead of the products: the spatial domain is decomposed into 4 quadrants
 // (EE/EO/OE/OO) and the kernel iterates over both quadrants and kernel positions.
-static torq_hw::SliceTaskOp lowerMaxPool2DStride2ToHw(
+static Operation *lowerMaxPool2DStride2ToHw(
     torq_hl::MaxPool2dOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset,
     int chCount
 ) {
@@ -400,7 +398,7 @@ static torq_hw::SliceTaskOp lowerMaxPool2DStride2ToHw(
 // 4 quadrants (even rows and columns first, see ConvPoolKernelLayoutPass.cpp and
 // lowerMaxPool2DStride2ToHw), so the result is the first quadrant of each channel: copy it. The
 // stride-2 kernel doesn't support 1x1 kernels (the NPU hangs).
-static torq_hw::SliceTaskOp lowerMaxPool1x1Stride2ToHw(
+static Operation *lowerMaxPool1x1Stride2ToHw(
     torq_hl::MaxPool2dOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset,
     int chCount
 ) {
@@ -453,7 +451,7 @@ MaxPool2dPattern::transform(torq_hl::MaxPool2dOp op, PatternRewriter &rewriter) 
 
     int outChCount = outputData.dim(Dim::C);
 
-    torq_hw::SliceTaskOp hwOp;
+    Operation *hwOp = nullptr;
 
     if (lowering == MaxPoolLowering::Vertical1D) {
         LLVM_DEBUG(llvm::dbgs() << "Lowering MaxPool 1D (vertical) case\n");
@@ -504,7 +502,7 @@ MaxPool2dPattern::transform(torq_hl::MaxPool2dOp op, PatternRewriter &rewriter) 
         }
     }
 
-    rewriter.replaceOp(op, hwOp.getOperation()->getResults());
+    rewriter.replaceOp(op, hwOp);
     return success();
 }
 

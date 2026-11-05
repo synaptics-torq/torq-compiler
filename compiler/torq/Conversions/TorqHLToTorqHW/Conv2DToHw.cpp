@@ -17,8 +17,6 @@
 
 #define DEBUG_TYPE "torq-lower-torqhl"
 
-using namespace mlir::syna::torq_hw;
-
 namespace mlir::syna::torq {
 
 // TODO: check if this option is worth it in terms of performance gain
@@ -92,13 +90,12 @@ advantage of the hardware capabilities:
    can be done simply by indexing the first dimension.
 */
 
-// Lower stride-2 Conv2DOp to SliceTaskOp.
+// Lower stride-2 Conv2DOp to a slice task.
 // The spatial domain is decomposed into 4 quadrants (EE/EO/OE/OO) by reshaping the fused H*W
 // dimension as {RowQuadrant=2, ColQuadrant=2, Vectors}. The kernel then iterates over both
 // quadrants and kernel positions, halving the effective kernel step count along each axis.
-static torq_hw::SliceTaskOp lowerConvStride2ToHw(
-    torq_hl::Conv2DOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset, int chCount
-) {
+static Operation *
+lowerConvStride2ToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter, int chOffset, int chCount) {
     struct In : Vectorized {
         enum { N, C, RowQuadrant, ColQuadrant, KernelRows, KernelColGrps };
     };
@@ -247,16 +244,12 @@ static torq_hw::SliceTaskOp lowerConvStride2ToHw(
         }
     }
 
-    return torq_hw::SliceTaskOp::create(
-        rewriter, op.getLoc(), slice.name(), op.getInput(), op.getWeights(), op.getScaleBias(),
-        taskInitTensor, slice.getCfgAttr(rewriter.getContext()), slice.getNdls()
-    );
+    return slice.createSliceTaskOp(rewriter, op.getLoc());
 }
 
-// Lower torq_hl op to SliceTaskOp
-static torq_hw::SliceTaskOp lowerToHw(
-    torq_hl::Conv2DOp op, PatternRewriter &rewriter, Value taskInitTensor, int chOffset, int chCount
-) {
+// Lower torq_hl op to a slice task
+static Operation *
+lowerToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter, int chOffset, int chCount) {
     if (!hasEkLoweringConv(op)) {
         return {};
     }
@@ -272,7 +265,7 @@ static torq_hw::SliceTaskOp lowerToHw(
             // Fall through to the stride-1 path below (stride variable not used further here).
         }
         else {
-            return lowerConvStride2ToHw(op, rewriter, taskInitTensor, chOffset, chCount);
+            return lowerConvStride2ToHw(op, rewriter, chOffset, chCount);
         }
     }
 
@@ -381,28 +374,26 @@ static torq_hw::SliceTaskOp lowerToHw(
 }
 
 static LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {
-    Value initValue = op.getInit();
     auto wDims = LData(op.getWeights()).dims();
     int outChVectSize = wDims.size() > Weight::OCVectorItems ? wDims[Weight::OCVectorItems] : 1;
     int outChCount = LData(op.getInit()).dim(Dim::C);
-    torq_hw::SliceTaskOp hwOp;
+    Operation *hwOp = nullptr;
 
     // Peel-off channels not multiple of output channel grouping. This removes any
     // requirement for output channels padding.
     // Here we could check output stride to see if we have padding, in which case peeling not needed
     if (int peeledOutCh = outChCount % outChVectSize) {
-        if (!(hwOp = lowerToHw(op, rewriter, initValue, outChCount - peeledOutCh, peeledOutCh))) {
+        if (!(hwOp = lowerToHw(op, rewriter, outChCount - peeledOutCh, peeledOutCh))) {
             return failure();
         }
-        initValue = hwOp.getQ()[0];
         outChCount -= peeledOutCh;
     }
     if (outChCount > 0) {
-        if (!(hwOp = lowerToHw(op, rewriter, initValue, 0, outChCount))) {
+        if (!(hwOp = lowerToHw(op, rewriter, 0, outChCount))) {
             return failure();
         }
     }
-    rewriter.replaceOp(op, hwOp.getOperation()->getResults());
+    rewriter.replaceOp(op, hwOp);
     return success();
 }
 

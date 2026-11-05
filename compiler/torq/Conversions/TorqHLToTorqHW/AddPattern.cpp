@@ -17,19 +17,17 @@
 
 #define DEBUG_TYPE "torq-lower-torqhl-add"
 
-using namespace mlir::syna::torq_hw;
-
 namespace mlir::syna::torq {
 
 // Non-dense Input 1 is loaded from the data path, and Input 2, which is a scalar constant,
 // is loaded once as bias/scale. The ALU multiplies Input 1 by the scalar weight (-1 for
 // `c - x`).
-FailureOr<SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
+FailureOr<torq_hw::SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
 
 // Dense Input 1 is loaded from the data path, and Input 2, which is a scalar constant,
 // is loaded once as bias/scale. The ALU multiplies Input 1 by the scalar weight (-1 for
 // `c - x`).
-FailureOr<SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
+FailureOr<torq_hw::SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
 
 // ALU is working with MUL and ACC operations on 32 input pixels at a time.
 // The 2 inputs are loaded from 2 different addresses. For non-fp32 data, each
@@ -37,7 +35,7 @@ FailureOr<SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &pa
 // 16-bits weight (4 weights bytes in total precomputed in lram). fp32 data
 // cannot use the MUL mode, which only takes 16-bit weights, so it is added
 // with the accumulate mode's implicit unit weights instead.
-FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
+FailureOr<torq_hw::SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
 
 LogicalResult convertToHw(torq_hl::AddOp op, PatternRewriter &rewriter);
 
@@ -67,7 +65,7 @@ LogicalResult AddPattern::transform(torq_hl::AddOp addOp, PatternRewriter &rewri
                    << params.input1Shape[i] << " and output shape: " << params.outputShape[i];
         }
     }
-    FailureOr<SliceTaskOp> sliceTaskOp = failure();
+    FailureOr<torq_hw::SliceTaskOp> sliceTaskOp = failure();
 
     if (addOp.getRhsIsScalar() && params.input2Shape.size() == 1) {
         // The dense path streams input1 as one linear block and writes the output as a single
@@ -116,7 +114,7 @@ LogicalResult AddPattern::transform(torq_hl::AddOp addOp, PatternRewriter &rewri
     return success();
 }
 
-FailureOr<SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
+FailureOr<torq_hw::SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
     Slice slice("add");
     // By default consider the entire input as a single channel
     DType elementType = getDType(params.inputElementType);
@@ -159,7 +157,7 @@ FailureOr<SliceTaskOp> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &pa
         }
     }
 
-    auto sliceTaskOp = SliceTaskOp::create(
+    auto sliceTaskOp = torq_hw::SliceTaskOp::create(
         params.rewriter,
         params.loc,                                     // Location
         params.op.getName(),                            // Operation to replace
@@ -184,7 +182,7 @@ static int largestDivisorAtMost(int size, int maxBlock) {
     return 1;
 }
 
-FailureOr<SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
+FailureOr<torq_hw::SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
     Slice slice("add");
     DType elementType = getDType(params.inputElementType);
     Shape inputShape;
@@ -240,7 +238,7 @@ FailureOr<SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> 
         }
     }
 
-    auto sliceTaskOp = SliceTaskOp::create(
+    auto sliceTaskOp = torq_hw::SliceTaskOp::create(
         params.rewriter, params.loc,
         params.op.getName(),                            // Operation to replace
         ValueRange{params.op.getInput1()},              // Input tensor
@@ -254,7 +252,7 @@ FailureOr<SliceTaskOp> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> 
     return sliceTaskOp;
 }
 
-FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
+FailureOr<torq_hw::SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
     auto op = params.op;
     const auto shift = op.getShiftFactor();
     const auto min = op.getOutputMin();
@@ -323,9 +321,9 @@ FailureOr<SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
 
     // Vectorize the input tensors and stack them
     Slice slice("add");
-    int vectorSize = isFp32
-                         ? slice.alu.iWidthForAccumulateClamp(input1.elementType(), ALUOp1Mode::ACC)
-                         : slice.alu.iWidth(input1.elementType(), weights.elementType());
+    int vectorSize =
+        isFp32 ? slice.alu.iWidthForAccumulateClamp(input1.elementType(), torq_hw::ALUOp1Mode::ACC)
+               : slice.alu.iWidth(input1.elementType(), weights.elementType());
     input1.fuse(denseDims).vectorize(vectorSize);
     input2.fuse(denseDims).vectorize(vectorSize);
     auto input = stack(params.rewriter, input1, input2);

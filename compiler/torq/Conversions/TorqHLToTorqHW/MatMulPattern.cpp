@@ -16,7 +16,7 @@
 
 namespace mlir::syna::torq {
 
-static torq_hw::SliceTaskOp lowerToMatmul(
+static Operation *lowerToMatmul(
     torq_hl::MatMulOp op, PatternRewriter &rewriter, Value init, int rowOffset, int rowCount
 ) {
     struct MatA { // Loaded as weights
@@ -117,7 +117,7 @@ static int fastMatmulRowChunkSize(torq_hl::MatMulOp op) {
     return slice.wram.optimalTransposeWidth(matA.dims().back(), exactFit);
 }
 
-static torq_hw::SliceTaskOp lowerToFastMatmul(
+static Operation *lowerToFastMatmul(
     torq_hl::MatMulOp op, PatternRewriter &rewriter, Value init, int rowOffset, int rowCount
 ) {
     struct MatA { // Loaded as weights
@@ -211,12 +211,12 @@ static torq_hw::SliceTaskOp lowerToFastMatmul(
 // This kernel supports matmul, dot product and matrix-vector multiplication
 template <>
 LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &rewriter) const {
-    Value initValue = op.getInit();
+    const Value initValue = op.getInit();
     LData wdata(op.getInput1());
     auto wDims = wdata.dims();
     int outRowVectSize = Slice().wram.transposeHeight();
     int outRowCount = wDims.size() == 1 ? 1 : wDims.size() == 2 ? wDims[0] : wDims[1];
-    torq_hw::SliceTaskOp hwOp;
+    Operation *hwOp = nullptr;
 
     if (isFloat(wdata.elementType()) && outRowCount > 1 &&
         wDims.back() % fastMatmulRowChunkSize(op) != 0) {
@@ -226,7 +226,6 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
         // The exception is the last row: reading the junk beyond the last row
         // may collect NaNs in the accumulation, so this line has to be handled separately
         hwOp = lowerToMatmul(op, rewriter, initValue, --outRowCount, 1);
-        initValue = hwOp.getQ()[0];
     }
 
     if (int peeledRows = outRowCount % outRowVectSize) {
@@ -239,7 +238,6 @@ LogicalResult MatMulPattern::transform(torq_hl::MatMulOp op, PatternRewriter &re
         if (!hwOp) {
             return failure();
         }
-        initValue = hwOp.getQ()[0];
         outRowCount -= peeledRows;
     }
     if (outRowCount > 0) {

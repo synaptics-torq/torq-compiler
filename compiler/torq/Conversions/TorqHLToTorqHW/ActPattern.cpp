@@ -12,8 +12,6 @@
 
 #define DEBUG_TYPE "torq-lower-torqhl"
 
-using namespace mlir::syna::torq_hw;
-
 namespace mlir::syna::torq {
 
 namespace {
@@ -143,7 +141,6 @@ FailureOr<ActConfig> configureActivation(
 
 template <>
 LogicalResult ActPattern::transform(torq_hl::ActOp op, PatternRewriter &rewriter) const {
-    auto ctx = op.getContext();
     LData input(op.getInput());
     LData output(op.getInit());
     DType inputDType = input.elementType();
@@ -155,7 +152,7 @@ LogicalResult ActPattern::transform(torq_hl::ActOp op, PatternRewriter &rewriter
     };
 
     auto opName = op.getName().str();
-    Slice slice(std::string("Act-" + opName));
+    Slice slice("Act-" + opName);
     int vectorSize = std::min(slice.act.width(inputDType), slice.act.width(outputDType));
     input.fuse(std::min(input.denseDims(), output.denseDims())).vectorize(vectorSize);
 
@@ -206,11 +203,7 @@ LogicalResult ActPattern::transform(torq_hl::ActOp op, PatternRewriter &rewriter
     }
 
     // Replace with hardware operation
-    rewriter.replaceOpWithNewOp<SliceTaskOp>(
-        op, op.getName(), ValueRange{op.getInput()},
-        op.getWeights() ? ValueRange{op.getWeights()} : ValueRange{}, ValueRange{},
-        ValueRange{op.getInit()}, ValueRange{}, slice.getCfgAttr(ctx), slice.getNdls()
-    );
+    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
 
     LLVM_DEBUG(llvm::dbgs() << "Successfully lowered " << opName << " to ActHwPattern\n");
     return success();

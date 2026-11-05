@@ -17,8 +17,6 @@
 
 #define DEBUG_TYPE "torq-lower-torqhl-interleaved-insert"
 
-using namespace mlir::syna::torq_hw;
-
 namespace mlir::syna::torq {
 
 // Layout of the input tensor
@@ -33,7 +31,7 @@ struct Out {
 // For stride-2: [1, 0] means write data at pos 0, write zero at pos 1
 // No struct needed - weight is indexed directly as weight[stride_pos]
 
-// Lower torq_hl::InterleavedInsertOp to SliceTaskOp
+// Lower torq_hl::InterleavedInsertOp to a slice task
 //
 // InterleavedInsert is used for transposed convolution upsampling where input rows
 // are inserted into output with stride > 1, creating gaps (usually filled with zeros).
@@ -47,7 +45,7 @@ struct Out {
 //
 // The weights tensor contains the interleaving pattern (e.g., [1, 0] for stride-2)
 // which determines which positions get data vs zeros.
-static torq_hw::SliceTaskOp
+static Operation *
 lowerToHw(torq_hl::InterleavedInsertOp op, PatternRewriter &rewriter, Value taskInitTensor) {
 
     // Perform rank expansion if needed
@@ -132,13 +130,13 @@ LogicalResult InterleavedInsertPattern::transform(
 ) const {
     // InterleavedInsert processes all channels uniformly - no channel peeling needed
     // The operation applies the same interleaving pattern across all channels
-    torq_hw::SliceTaskOp hwOp = lowerToHw(op, rewriter, op.getInit());
+    Operation *hwOp = lowerToHw(op, rewriter, op.getInit());
 
     if (!hwOp) {
         return failure();
     }
 
-    rewriter.replaceOp(op, hwOp.getOperation()->getResults());
+    rewriter.replaceOp(op, hwOp);
     return success();
 }
 

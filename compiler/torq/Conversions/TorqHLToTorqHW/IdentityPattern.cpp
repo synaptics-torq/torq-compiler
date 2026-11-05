@@ -15,8 +15,6 @@
 // Allow to enable the desired test code
 #define IDENTITY_TEST_MODE 0
 
-using namespace mlir::syna::torq_hw;
-
 namespace mlir::syna::torq {
 
 template <>

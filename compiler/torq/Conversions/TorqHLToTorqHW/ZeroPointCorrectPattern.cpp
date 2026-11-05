@@ -15,8 +15,6 @@
 
 #define DEBUG_TYPE "torq-lower-torqhl"
 
-using namespace mlir::syna::torq_hw;
-
 namespace mlir::syna::torq {
 
 // Both kernels walk a dimension whose neighbours are live -- the next row of the result, the
