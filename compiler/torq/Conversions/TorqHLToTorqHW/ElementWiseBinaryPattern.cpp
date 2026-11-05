@@ -13,30 +13,30 @@
 
 namespace mlir::syna::torq {
 
-static torq_hw::ALUOp1Mode opTypeToAluOpMode(torq_hl::ElementwiseOpEnum opType) {
+static Alu::Mode opTypeToAluOpMode(torq_hl::ElementwiseOpEnum opType) {
     switch (opType) {
     case torq_hl::ElementwiseOpEnum::BITWISE_AND:
-        return torq_hw::ALUOp1Mode::BAND;
+        return Alu::Mode::bitAnd;
     case torq_hl::ElementwiseOpEnum::BITWISE_OR:
-        return torq_hw::ALUOp1Mode::BOR;
+        return Alu::Mode::bitOr;
     case torq_hl::ElementwiseOpEnum::BITWISE_XOR:
-        return torq_hw::ALUOp1Mode::BXOR;
+        return Alu::Mode::bitXor;
     case torq_hl::ElementwiseOpEnum::MINIMUM:
-        return torq_hw::ALUOp1Mode::MIN;
+        return Alu::Mode::min;
     case torq_hl::ElementwiseOpEnum::MAXIMUM:
-        return torq_hw::ALUOp1Mode::MAX;
+        return Alu::Mode::max;
     case torq_hl::ElementwiseOpEnum::GREATER:
-        return torq_hw::ALUOp1Mode::GT;
+        return Alu::Mode::gt;
     case torq_hl::ElementwiseOpEnum::GREATER_EQUAL:
-        return torq_hw::ALUOp1Mode::GE;
+        return Alu::Mode::ge;
     case torq_hl::ElementwiseOpEnum::EQUAL:
-        return torq_hw::ALUOp1Mode::EQ;
+        return Alu::Mode::eq;
     case torq_hl::ElementwiseOpEnum::LOGICAL_AND:
-        return torq_hw::ALUOp1Mode::AND;
+        return Alu::Mode::logicalAnd;
     case torq_hl::ElementwiseOpEnum::LOGICAL_OR:
-        return torq_hw::ALUOp1Mode::OR;
+        return Alu::Mode::logicalOr;
     case torq_hl::ElementwiseOpEnum::LOGICAL_XOR:
-        return torq_hw::ALUOp1Mode::XOR;
+        return Alu::Mode::logicalXor;
     case torq_hl::ElementwiseOpEnum::BITWISE_NOT:
         break;
     case torq_hl::ElementwiseOpEnum::LOGICAL_NOT:

@@ -63,8 +63,7 @@ LogicalResult SelectPattern::transform(torq_hl::SelectOp op, PatternRewriter &re
             WData wdata = slice.wram.load(weights[ndd][iv]);
             For(auto it = slice.iterate(input.dim(In::InputTensors))) {
                 IData idata = slice.iram.load(input[it][ndd][iv]);
-                pdata =
-                    slice.alu.elementwiseProductAccumulate(idata, wdata, torq_hw::ALUOp1Mode::SEL);
+                pdata = slice.alu.elementwiseProductAccumulate(idata, wdata, Alu::Mode::select);
             }
             For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
                 QData res = slice.act.load(pdata[av]);

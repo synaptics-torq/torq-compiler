@@ -3719,8 +3719,50 @@ BData BRam::load(const LData &data) {
 // Arithmetic Logic Unit
 //
 
-PData Alu::accumulate(const IData &idata, torq_hw::ALUOp1Mode acc) {
-    return d->aluAccumulate(idata, acc, false);
+static ALUOp1Mode toHw(Alu::Mode mode) {
+    switch (mode) {
+    case Alu::Mode::acc:
+        return ALUOp1Mode::ACC;
+    case Alu::Mode::mul:
+        return ALUOp1Mode::MUL;
+    case Alu::Mode::max:
+        return ALUOp1Mode::MAX;
+    case Alu::Mode::min:
+        return ALUOp1Mode::MIN;
+    case Alu::Mode::argMax:
+        return ALUOp1Mode::AMAX;
+    case Alu::Mode::argMin:
+        return ALUOp1Mode::AMIN;
+    case Alu::Mode::gt:
+        return ALUOp1Mode::GT;
+    case Alu::Mode::ge:
+        return ALUOp1Mode::GE;
+    case Alu::Mode::eq:
+        return ALUOp1Mode::EQ;
+    case Alu::Mode::logicalOr:
+        return ALUOp1Mode::OR;
+    case Alu::Mode::logicalAnd:
+        return ALUOp1Mode::AND;
+    case Alu::Mode::logicalXor:
+        return ALUOp1Mode::XOR;
+    case Alu::Mode::logicalNot:
+        return ALUOp1Mode::NOT;
+    case Alu::Mode::bitOr:
+        return ALUOp1Mode::BOR;
+    case Alu::Mode::bitAnd:
+        return ALUOp1Mode::BAND;
+    case Alu::Mode::bitXor:
+        return ALUOp1Mode::BXOR;
+    case Alu::Mode::bitNot:
+        return ALUOp1Mode::BNOT;
+    case Alu::Mode::select:
+        return ALUOp1Mode::SEL;
+    }
+    llvm_unreachable("Unknown ALU mode");
+}
+
+PData Alu::accumulate(const IData &idata, Mode acc) {
+    return d->aluAccumulate(idata, toHw(acc), false);
 }
 
 PData Alu::load(const IData &idata) {
@@ -3790,7 +3832,7 @@ PData Alu::load(const WData &wdata) {
     return PData({pData.shape()[1]}, pData.elementType());
 }
 
-PData Alu::scalarProductAccumulate(const IData &idata, const WData &wdata, ALUOp1Mode acc) {
+PData Alu::scalarProductAccumulate(const IData &idata, const WData &wdata, Mode acc) {
     // Check wdata is a scalar or tensor with shape {1}
     auto iShape = idata.subShape();
     auto wShape = wdata.subShape();
@@ -3803,10 +3845,10 @@ PData Alu::scalarProductAccumulate(const IData &idata, const WData &wdata, ALUOp
         assert(false && "Invalid weight shape");
     }
 
-    return d->aluProductAccumulate(idata, wdata, acc, false, true);
+    return d->aluProductAccumulate(idata, wdata, toHw(acc), false, true);
 }
 
-PData Alu::multiScalarProductAccumulate(const IData &idata, const WData &wdata, ALUOp1Mode acc) {
+PData Alu::multiScalarProductAccumulate(const IData &idata, const WData &wdata, Mode acc) {
     // Check wdata is a scalar or tensor with shape {1}
     auto iShape = idata.subShape();
     auto wShape = wdata.subShape();
@@ -3820,15 +3862,15 @@ PData Alu::multiScalarProductAccumulate(const IData &idata, const WData &wdata, 
     }
 
     // Enable "outer" mode since we have multiple weights to apply them to different input vectors
-    return d->aluProductAccumulate(idata, wdata, acc, true, true);
+    return d->aluProductAccumulate(idata, wdata, toHw(acc), true, true);
 }
 
-PData Alu::outerProductAccumulate(const IData &idata, const WData &wdata, ALUOp1Mode acc) {
-    return d->aluProductAccumulate(idata, wdata, acc, true, true);
+PData Alu::outerProductAccumulate(const IData &idata, const WData &wdata, Mode acc) {
+    return d->aluProductAccumulate(idata, wdata, toHw(acc), true, true);
 }
 
-PData Alu::elementwiseProductAccumulate(const IData &idata, const WData &wdata, ALUOp1Mode acc) {
-    return d->aluProductAccumulate(idata, wdata, acc, false, false);
+PData Alu::elementwiseProductAccumulate(const IData &idata, const WData &wdata, Mode acc) {
+    return d->aluProductAccumulate(idata, wdata, toHw(acc), false, false);
 }
 
 int Alu::iWidth(DType iType, DType wType, int weightWidth) const {
@@ -3869,9 +3911,9 @@ int Alu::iWidth(DType iType, DType wType, int weightWidth) const {
     return 0;
 }
 
-int Alu::iWidthForAccumulateClamp(DType iType, torq_hw::ALUOp1Mode accMode) const {
+int Alu::iWidthForAccumulateClamp(DType iType, Mode accMode) const {
     int vectorSize = iWidth(iType, DType::none);
-    bool isMACMode = accMode == ALUOp1Mode::ACC || accMode == ALUOp1Mode::MUL;
+    bool isMACMode = accMode == Mode::acc || accMode == Mode::mul;
     if (!isMACMode && isFloat(iType) && !d->supportACPRs32()) {
         // Limit vector size due to HW limitation
         vectorSize = std::min(vectorSize, d->actWidth(iType, DType::none, false));
@@ -3896,16 +3938,62 @@ QData Act::load(const PData &pdata) {
     return d->actClamp(pdata, 0, 0, minVal(dataType), maxVal(dataType), ACTMode::ACT);
 }
 
-QData Act::clamp(const PData &pdata, int clipMin, int clipMax, ACTMode actMode) {
+static ACTMode toHw(Act::Mode mode) {
+    switch (mode) {
+    case Act::Mode::identity:
+        return ACTMode::ACT;
+    case Act::Mode::abs:
+        return ACTMode::ABS;
+    case Act::Mode::neg:
+        return ACTMode::NEG;
+    case Act::Mode::clz:
+        return ACTMode::CLZ;
+    case Act::Mode::ceil:
+        return ACTMode::CEL;
+    case Act::Mode::floor:
+        return ACTMode::FLR;
+    case Act::Mode::intToFloat:
+        return ACTMode::I2F;
+    case Act::Mode::floatToInt:
+        return ACTMode::F2I;
+    }
+    llvm_unreachable("Unknown ACT mode");
+}
+
+static ACTMode toHw(Act::ShiftMode mode) {
+    switch (mode) {
+    case Act::ShiftMode::lsl:
+        return ACTMode::LSL;
+    case Act::ShiftMode::lsr:
+        return ACTMode::LSR;
+    case Act::ShiftMode::asr:
+        return ACTMode::ASR;
+    }
+    llvm_unreachable("Unknown ACT shift mode");
+}
+
+static RoundingMode toHw(Act::Rounding mode) {
+    switch (mode) {
+    case Act::Rounding::off:
+        return RoundingMode::OFF;
+    case Act::Rounding::nearestEven:
+        return RoundingMode::NTE;
+    case Act::Rounding::nearestUp:
+        return RoundingMode::NTP;
+    }
+    llvm_unreachable("Unknown ACT rounding mode");
+}
+
+QData Act::clamp(const PData &pdata, int clipMin, int clipMax, Mode actMode) {
     assert(!isPacked(pdata.elementType()) && "Packed types not supported here");
-    return d->actClamp(pdata, 0, 0, clipMin, clipMax, actMode);
+    return d->actClamp(pdata, 0, 0, clipMin, clipMax, toHw(actMode));
 }
 
-QData Act::shift(const PData &pdata, DType elementType, ACTMode actMode) {
-    return d->actShift(pdata, elementType, actMode);
+QData Act::shift(const PData &pdata, DType elementType, ShiftMode shiftMode) {
+    return d->actShift(pdata, elementType, toHw(shiftMode));
 }
 
-void Act::setRoundingMode(RoundingMode mode) { d->_cfg.act_round_mode = mode; }
+void Act::setRoundingMode(Rounding mode) { d->_cfg.act_round_mode = toHw(mode); }
 
 QData Act::rescaleClamp(
     const PData &pdata, const BData &bdata, int shift, int zeroPoint, int clipMin, int clipMax

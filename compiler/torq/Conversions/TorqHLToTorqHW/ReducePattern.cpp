@@ -36,8 +36,8 @@ struct In : Vectorized {
 // value (a reduce init). The accumulated result is biased in the activation
 // stage, in fp32, matching a separate `reduce + bias` computed in fp32.
 void emitPerChannelBiasReduce(
-    Slice &slice, LData &input, LData &biasScale, LData &output, int axis,
-    torq_hw::ALUOp1Mode hwOp1Mode, torq_hl::ReduceOp op
+    Slice &slice, LData &input, LData &biasScale, LData &output, int axis, Alu::Mode aluMode,
+    torq_hl::ReduceOp op
 ) {
     // Per-channel bias is laid out along output channel dim 1 (NCHW), as
     // produced by the native conv1d generic lowering. Reshape the [C] bias to
@@ -68,7 +68,7 @@ void emitPerChannelBiasReduce(
                 PData pdata;
                 For(auto r = slice.iterate(input.dim(axis))) {
                     IData idata = slice.iram.load(input[b][r][i][rv]);
-                    pdata = slice.alu.accumulate(idata, hwOp1Mode);
+                    pdata = slice.alu.accumulate(idata, aluMode);
                 }
                 For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
                     // fp32 rescaleClamp: result = clamp(pdata + bias). shift must be 0.
@@ -84,17 +84,15 @@ void emitPerChannelBiasReduce(
 
 // Single-iteration kernel: makes compute negligible so DMA transfer time
 // dominates. Used for DMA throughput measurement.
-void emitFakeReduce(Slice &slice, LData &input, LData &output, torq_hw::ALUOp1Mode hwOp1Mode) {
+void emitFakeReduce(Slice &slice, LData &input, LData &output, Alu::Mode aluMode) {
     IData idata = slice.iram.load(input[Indexes(input.shape().size(), 0)]);
-    PData pdata = slice.alu.accumulate(idata, hwOp1Mode);
+    PData pdata = slice.alu.accumulate(idata, aluMode);
     QData res = slice.act.load(pdata);
     slice.append(output, res);
 }
 
 // Emit the default reduce loop nest (no per-channel bias).
-void emitDefaultReduce(
-    Slice &slice, LData &input, LData &output, int axis, torq_hw::ALUOp1Mode hwOp1Mode
-) {
+void emitDefaultReduce(Slice &slice, LData &input, LData &output, int axis, Alu::Mode aluMode) {
     For(auto b = slice.iterate(input.dims(In::Batch, axis))) {
         For(auto i = slice.iterate(input.dims(axis + 1, In::Vectors))) {
             For(auto rv = slice.iterate(input.dim(In::Vectors))) {
@@ -102,7 +100,7 @@ void emitDefaultReduce(
                 For(auto r = slice.iterate(input.dim(axis))) {
                     // Accumulate across the reduce dimension
                     IData idata = slice.iram.load(input[b][r][i][rv]);
-                    pdata = slice.alu.accumulate(idata, hwOp1Mode);
+                    pdata = slice.alu.accumulate(idata, aluMode);
                 }
 
                 // Store the accumulated result
@@ -124,27 +122,27 @@ LogicalResult ReducePattern::transform(torq_hl::ReduceOp op, PatternRewriter &re
     int axis = op.getAxis();
 
     // Determine ALU operation mode based on reduction type
-    torq_hw::ALUOp1Mode hwOp1Mode;
+    Alu::Mode aluMode;
     if (opName == "reduce_sum") {
-        hwOp1Mode = torq_hw::ALUOp1Mode::ACC;
+        aluMode = Alu::Mode::acc;
     }
     else if (opName == "reduce_max" || opName == "reduce_umax") {
-        hwOp1Mode = torq_hw::ALUOp1Mode::MAX;
+        aluMode = Alu::Mode::max;
     }
     else if (opName == "reduce_min" || opName == "reduce_umin") {
-        hwOp1Mode = torq_hw::ALUOp1Mode::MIN;
+        aluMode = Alu::Mode::min;
     }
     else if (opName == "reduce_and") {
-        hwOp1Mode = torq_hw::ALUOp1Mode::BAND;
+        aluMode = Alu::Mode::bitAnd;
     }
     else if (opName == "reduce_or") {
-        hwOp1Mode = torq_hw::ALUOp1Mode::BOR;
+        aluMode = Alu::Mode::bitOr;
     }
     else if (opName == "reduce_xor") {
-        hwOp1Mode = torq_hw::ALUOp1Mode::BXOR;
+        aluMode = Alu::Mode::bitXor;
     }
     else if (opName == "reduce_mul") {
-        hwOp1Mode = torq_hw::ALUOp1Mode::MUL;
+        aluMode = Alu::Mode::mul;
     }
     else {
         return op.emitError() << "Unsupported reduce operation: " << opName;
@@ -178,13 +176,13 @@ LogicalResult ReducePattern::transform(torq_hl::ReduceOp op, PatternRewriter &re
     input.fuse(denseDims).vectorize(vectorSize);
 
     if (hasPerChannelBias) {
-        emitPerChannelBiasReduce(slice, input, biasScale, output, axis, hwOp1Mode, op);
+        emitPerChannelBiasReduce(slice, input, biasScale, output, axis, aluMode, op);
     }
     else if (clTorqFakeReduce) {
-        emitFakeReduce(slice, input, output, hwOp1Mode);
+        emitFakeReduce(slice, input, output, aluMode);
     }
     else {
-        emitDefaultReduce(slice, input, output, axis, hwOp1Mode);
+        emitDefaultReduce(slice, input, output, axis, aluMode);
     }
 
     rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));

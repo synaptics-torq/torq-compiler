@@ -84,7 +84,7 @@ static Operation *lowerMaxPool1DToHw(
                     For(auto kh_idx = slice.iterate(kh)) {
                         IData idata =
                             slice.iram.load(input[batch][ch_block][op_row][kh_idx][ip_vec]);
-                        pdata = slice.alu.accumulate(idata, torq_hw::ALUOp1Mode::MAX);
+                        pdata = slice.alu.accumulate(idata, Alu::Mode::max);
                     }
                     For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
                         QData res = loadClamped(slice, pdata[av], op);
@@ -159,7 +159,7 @@ static Operation *lowerMaxPool1DHorizontalToHw(
                         IData idata =
                             slice.iram.load(input[batch][ch_block][op_row][op_col][kw_group]);
                         For(auto kw_idx = slice.iterate(tile)) {
-                            pdata = slice.alu.accumulate(idata[kw_idx], torq_hw::ALUOp1Mode::MAX);
+                            pdata = slice.alu.accumulate(idata[kw_idx], Alu::Mode::max);
                         }
                     }
                     QData res = loadClamped(slice, pdata, op);
@@ -243,8 +243,7 @@ static Operation *lowerMaxPool2DToHw(
                     For(auto kw_idx = slice.iterate(kw)) {
                         IData idata = slice.iram.load(input[n][cv][iv][kh_idx][kw_idx / alukw]);
                         idata.setShape({{alukw, Stride(1)}, vectStride});
-                        pdata =
-                            slice.alu.accumulate(idata[kw_idx % alukw], torq_hw::ALUOp1Mode::MAX);
+                        pdata = slice.alu.accumulate(idata[kw_idx % alukw], Alu::Mode::max);
                     }
                 }
 
@@ -377,8 +376,7 @@ static Operation *lowerMaxPool2DStride2ToHw(
                                     input[n][c][qr][qc][kh / 2][kw / (alukw * 2)][iv]
                                 );
                                 idata.setShape({{alukw, Stride(1)}, vectStride});
-                                pdata =
-                                    slice.alu.accumulate(idata[kw % 2], torq_hw::ALUOp1Mode::MAX);
+                                pdata = slice.alu.accumulate(idata[kw % 2], Alu::Mode::max);
                             }
                         }
                     }

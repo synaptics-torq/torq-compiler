@@ -42,7 +42,7 @@ LogicalResult validateFloatTypeConsistency(
 
 // Configure activation mode and clip ranges based on operation type
 struct ActConfig {
-    torq_hw::ACTMode mode;
+    Act::Mode mode;
     int32_t clipMin;
     int32_t clipMax;
 };
@@ -88,37 +88,37 @@ FailureOr<ActConfig> configureActivation(
 
     // Set activation mode and override clip ranges if needed
     if (opName == "abs") {
-        config.mode = torq_hw::ACTMode::ABS;
+        config.mode = Act::Mode::abs;
     }
     else if (opName == "negate") {
-        config.mode = torq_hw::ACTMode::NEG;
+        config.mode = Act::Mode::neg;
     }
     else if (opName == "clz") {
-        config.mode = torq_hw::ACTMode::CLZ;
+        config.mode = Act::Mode::clz;
     }
     else if (opName == "ceil") {
-        config.mode = torq_hw::ACTMode::CEL;
+        config.mode = Act::Mode::ceil;
     }
     else if (opName == "floor") {
-        config.mode = torq_hw::ACTMode::FLR;
+        config.mode = Act::Mode::floor;
     }
     else if (opName == "i2f") {
-        config.mode = torq_hw::ACTMode::I2F;
+        config.mode = Act::Mode::intToFloat;
     }
     else if (opName == "f2i") {
-        config.mode = torq_hw::ACTMode::F2I;
+        config.mode = Act::Mode::floatToInt;
     }
     else if (opName == "i2i") {
-        config.mode = torq_hw::ACTMode::ACT;
+        config.mode = Act::Mode::identity;
         // We use full range here as we want to truncate without clipping
         setClipRange(int32_t{});
     }
     else if (opName == "f2f") {
-        config.mode = torq_hw::ACTMode::ACT;
+        config.mode = Act::Mode::identity;
     }
 
     else if (opName == "clamp") {
-        config.mode = torq_hw::ACTMode::ACT;
+        config.mode = Act::Mode::identity;
         if (isInt(inputDType)) {
             config.clipMin = op.getMinInt();
             config.clipMax = op.getMaxInt();
@@ -131,7 +131,7 @@ FailureOr<ActConfig> configureActivation(
         }
     }
     else {
-        config.mode = torq_hw::ACTMode::ACT;
+        config.mode = Act::Mode::identity;
     }
 
     return config;

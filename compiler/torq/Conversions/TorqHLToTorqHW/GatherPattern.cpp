@@ -21,7 +21,7 @@ static void copyIndexedRows(
 ) {
     IData idata = slice.iram.loadIndexed(table, indices);
     // Same as alu.load(), which is limited to the ACT width
-    PData pdata = slice.alu.accumulate(idata, torq_hw::ALUOp1Mode::BOR);
+    PData pdata = slice.alu.accumulate(idata, Alu::Mode::bitOr);
     // The rows come one after the other in the partials, each one padded as in the IData
     pdata.setShape({{count, idata.dim(-1)}, {1, 1}});
     For(auto r = slice.iterate(count)) {

@@ -129,7 +129,7 @@ static LData slotView(Value value, DType dt, int slot, int count = 1) {
 // Emit one scalar clamp slice_task: out[outSlot] = clamp(mode(in[inSlot]), lo, hi).
 static void emitScalarClamp(
     PatternRewriter &rewriter, Location loc, StringRef name, Value src, int inSlot, DType inDt,
-    Value dst, int outSlot, DType outDt, int loClip, int hiClip, torq_hw::ACTMode mode
+    Value dst, int outSlot, DType outDt, int loClip, int hiClip, Act::Mode mode
 ) {
     Slice slice(name.str());
     IData idata = slice.iram.load(slotView(src, inDt, inSlot));
@@ -151,9 +151,9 @@ static void emitScalarSumClamp(
     PData pdata;
     For(auto r = slice.iterate(2)) {
         IData idata = slice.iram.load(inData[r]);
-        pdata = slice.alu.accumulate(idata, torq_hw::ALUOp1Mode::ACC);
+        pdata = slice.alu.accumulate(idata, Alu::Mode::acc);
     }
-    QData res = slice.act.clamp(pdata, loClip, hiClip, torq_hw::ACTMode::ACT);
+    QData res = slice.act.clamp(pdata, loClip, hiClip, Act::Mode::identity);
     slice.store(slotView(blob, dt, outSlot), res);
     slice.createSliceTaskOp(rewriter, loc);
 }
@@ -192,7 +192,7 @@ static void emitScalarMul(
     IData idata = slice.iram.load(slotView(dOperand, DType::bf16, dSlot));
     WData wdata = slice.wram.load(slotView(wOperand, DType::bf16, wSlot));
     PData pdata = slice.alu.elementwiseProductAccumulate(idata, wdata);
-    QData res = slice.act.clamp(pdata, loClip, hiClip, torq_hw::ACTMode::ACT);
+    QData res = slice.act.clamp(pdata, loClip, hiClip, Act::Mode::identity);
     slice.store(slotView(dst, DType::bf16, outSlot), res);
     slice.createSliceTaskOp(rewriter, loc);
 }
@@ -211,52 +211,50 @@ LogicalResult DeriveQuantParamsPattern::transform(
     const int32_t eps = f32Bits(kRangeEps);
     const int32_t iMin = minVal(DType::int32);
     const int32_t iMax = maxVal(DType::int32);
-    using M = torq_hw::ACTMode;
-    using D = DType;
 
     SmallVector<int32_t> recipLut = buildReciprocalPackedLut();
 
     // ---- scalar param math (bf16, off the x path) ----
     // [4] max_adj = clamp(max_x, 0, +inf)
     emitScalarClamp(
-        rewriter, loc, "dqp_max_adj", op.getMaxX(), 0, D::bf16, blob, MAX_ADJ, D::bf16, zero,
-        posInf, M::ACT
+        rewriter, loc, "dqp_max_adj", op.getMaxX(), 0, DType::bf16, blob, MAX_ADJ, DType::bf16,
+        zero, posInf, Act::Mode::identity
     );
     // [5] neg_min = -min_x  (full-range negate)
     emitScalarClamp(
-        rewriter, loc, "dqp_neg_min", op.getMinX(), 0, D::bf16, blob, NEG_MIN, D::bf16, negInf,
-        posInf, M::NEG
+        rewriter, loc, "dqp_neg_min", op.getMinX(), 0, DType::bf16, blob, NEG_MIN, DType::bf16,
+        negInf, posInf, Act::Mode::neg
     );
     // [3] neg_min_adj = clamp([5], 0, +inf)
     emitScalarClamp(
-        rewriter, loc, "dqp_neg_min_adj", blob, NEG_MIN, D::bf16, blob, NEG_MIN_ADJ, D::bf16, zero,
-        posInf, M::ACT
+        rewriter, loc, "dqp_neg_min_adj", blob, NEG_MIN, DType::bf16, blob, NEG_MIN_ADJ,
+        DType::bf16, zero, posInf, Act::Mode::identity
     );
     // [10] range_safe = clamp([3] + [4], eps, +inf)  (NEG_MIN_ADJ, MAX_ADJ are contiguous)
     emitScalarSumClamp(
-        rewriter, loc, "dqp_range_safe", blob, NEG_MIN_ADJ, D::bf16, RANGE_SAFE, eps, posInf
+        rewriter, loc, "dqp_range_safe", blob, NEG_MIN_ADJ, DType::bf16, RANGE_SAFE, eps, posInf
     );
 
     // ---- reciprocal: recip = 1/range_safe, full-range exponent+mantissa ----
     // [6] expo = 0x7E80 - x, with x = i16 bits of range_safe:
     //     (x + (-0x7E80)) * (-1) via the scalar-affine ACT path.
     emitScalarRescale(
-        rewriter, loc, "dqp_recip_expo", blob, RANGE_SAFE, D::int16, op.getSubScaleBias(), blob,
-        EXPO, D::int16, /*lut=*/{}
+        rewriter, loc, "dqp_recip_expo", blob, RANGE_SAFE, DType::int16, op.getSubScaleBias(), blob,
+        EXPO, DType::int16, /*lut=*/{}
     );
     // [8] lutVal8 = mantissaLUT[x & 0xFF]: the low byte of range_safe (i8 slot 2*RANGE_SAFE)
     //     indexes the 256-entry packed LUT; scale_bias {-128, 128} decodes the base<<8 word.
     emitScalarRescale(
-        rewriter, loc, "dqp_recip_lut", blob, 2 * RANGE_SAFE, D::int8, op.getTableScaleBias(), blob,
-        2 * LUTVAL8, D::int8, /*lut=*/recipLut
+        rewriter, loc, "dqp_recip_lut", blob, 2 * RANGE_SAFE, DType::int8, op.getTableScaleBias(),
+        blob, 2 * LUTVAL8, DType::int8, /*lut=*/recipLut
     );
     // [7] lutVal16 = zext(lutVal8): read the LUT byte unsigned, widen to i16.
     emitScalarClamp(
-        rewriter, loc, "dqp_recip_zext", blob, 2 * LUTVAL8, D::uint8, blob, LUTVAL16, D::int16,
-        iMin, iMax, M::ACT
+        rewriter, loc, "dqp_recip_zext", blob, 2 * LUTVAL8, DType::uint8, blob, LUTVAL16,
+        DType::int16, iMin, iMax, Act::Mode::identity
     );
     // [9] recip = bitcast<bf16>(expo + lutVal16)  (EXPO, LUTVAL16 are contiguous i16)
-    emitScalarSumClamp(rewriter, loc, "dqp_recip", blob, EXPO, D::int16, RECIP, iMin, iMax);
+    emitScalarSumClamp(rewriter, loc, "dqp_recip", blob, EXPO, DType::int16, RECIP, iMin, iMax);
 
     // ---- results ----
     // [0] inv_scale = recip * 255   (WRAM constant 255.0)

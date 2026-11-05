@@ -679,6 +679,33 @@ class Alu : SliceComponent {
     using SliceComponent::SliceComponent;
 
   public:
+    // How the accumulation loop combines each value x (the input, or the product with the weight)
+    // with the partial p computed by the previous iterations.
+    // Comparisons and logical operations give 0 (false) or 1 (true); logical operations treat any
+    // non-zero x as true.
+    enum class Mode {
+        acc,        // p + x
+        mul,        // p * x, bf16 data only
+        max,        // max(p, x)
+        min,        // min(p, x)
+        argMax,     // Index of the iteration with the largest x (see accumulate())
+        argMin,     // Index of the iteration with the smallest x (see accumulate())
+        gt,         // x0 > x1, over a loop of 2 iterations
+        ge,         // x0 >= x1, over a loop of 2 iterations
+        eq,         // x0 == x1, over a loop of 2 iterations
+        logicalOr,  // p || x
+        logicalAnd, // p && x
+        logicalXor, // p != x (as booleans)
+        logicalNot, // !x, over a loop of 1 iteration
+        bitOr,      // p | x
+        bitAnd,     // p & x
+        bitXor,     // p ^ x
+        bitNot,     // ~x, over a loop of 1 iteration
+        select,     // weight ? x0 : x1, over a loop of 2 iterations
+                    // (elementwiseProductAccumulate() only); weight must be 0 or 1, other
+                    // values give an undefined result
+    };
+
     // Load input data of shape {N} to PRam
     // N can be any value up to act.width(iType)
     // idata: input tensor data in iram
@@ -706,15 +733,15 @@ class Alu : SliceComponent {
     // Accumulate an input of shape {N}
     // N can be any value up to act.width(iType)
     // idata: input tensor data in iram
-    // acc: accumulate operation (accumulate with ALUOp1Mode::BOR is equivalent to load()
-    // With AMAX (AMIN), the result is the index of the iteration of the accumulation loop that
+    // acc: accumulate operation (accumulate with Mode::bitOr is equivalent to load())
+    // With argMax (argMin), the result is the index of the iteration of the accumulation loop that
     // gave the largest (smallest) value, the first one if several are equal. Up to 32768
     // iterations.
     // return: pram data of shape {ceil(N/act::width), act::width}:pType
-    // where pType is int32 for integer input or comparisons (GT, GE, EQ, AMAX, AMIN),
+    // where pType is int32 for integer input or comparisons (gt, ge, eq, argMax, argMin),
     // iType for float input
     // if N < act::width the result will be {1, N}:pType
-    PData accumulate(const IData &idata, torq_hw::ALUOp1Mode acc = torq_hw::ALUOp1Mode::ACC);
+    PData accumulate(const IData &idata, Mode acc = Mode::acc);
 
     // Multiply an input of shape {N} with a scalar weight (or vector of shape {1}) and accumulate
     // N can be any value up to iWidth(iType, wType)
@@ -724,16 +751,13 @@ class Alu : SliceComponent {
     // return: pram data of shape {ceil(N/act::width), act::width}:pType
     // where pType is int32 for integer input, fp32 for float input
     // if N < act::width the result will be {1, N}:pType
-    PData scalarProductAccumulate(
-        const IData &idata, const WData &wdata, torq_hw::ALUOp1Mode acc = torq_hw::ALUOp1Mode::ACC
-    );
+    PData scalarProductAccumulate(const IData &idata, const WData &wdata, Mode acc = Mode::acc);
 
     // Like scalarProductAccumulate but the input must be [M,N] and the weight a vector of shape [M]
     // the scalarProductAccumulate is performed for each of the M input rows producing an output
     // of shape [M, ceil(N/act::width), act::width]
-    PData multiScalarProductAccumulate(
-        const IData &idata, const WData &wdata, torq_hw::ALUOp1Mode acc = torq_hw::ALUOp1Mode::ACC
-    );
+    PData
+    multiScalarProductAccumulate(const IData &idata, const WData &wdata, Mode acc = Mode::acc);
 
     // Outer product of an input of shape {N} with a weight vector of shape {M} and accumulate
     // N can be up to iWidth(iType, wType, M) (A scalar is also accepted for both input and weight)
@@ -742,9 +766,7 @@ class Alu : SliceComponent {
     // acc: accumulate operation
     // return: pram data of shape {M, ceil(N/act::width), act::width}:pType
     // where pType is int32 for integer input, fp32 for float input
-    PData outerProductAccumulate(
-        const IData &idata, const WData &wdata, torq_hw::ALUOp1Mode acc = torq_hw::ALUOp1Mode::ACC
-    );
+    PData outerProductAccumulate(const IData &idata, const WData &wdata, Mode acc = Mode::acc);
 
     // Multiply an input of shape {N} with a weight vector of shape {N} and accumulate
     // N can be any value up to wWidth(wType) (A scalar is also accepted for both input and weight)
@@ -754,9 +776,8 @@ class Alu : SliceComponent {
     // return: pram data of shape {ceil(N/act::width), act::width}:pType
     // where pType is int32 for integer input, fp32 for float input
     // if N < act::width the result will be {1, N}:pType
-    PData elementwiseProductAccumulate(
-        const IData &idata, const WData &wdata, torq_hw::ALUOp1Mode acc = torq_hw::ALUOp1Mode::ACC
-    );
+    PData
+    elementwiseProductAccumulate(const IData &idata, const WData &wdata, Mode acc = Mode::acc);
 
     // Max number of input items that can be processed in parallel for the given in and weight type
     // weightWidth if specified indicates the number of weights that will be used in outerProduct
@@ -767,7 +788,7 @@ class Alu : SliceComponent {
     // Max number of input items that can be processed in parallel for the given in type
     // when performing accumulate() followed by clamp() or rescaleClamp().
     // Must be used only in this specific case, for all other cases use iWidth() or Act::width()
-    int iWidthForAccumulateClamp(DType iType, torq_hw::ALUOp1Mode accMode) const;
+    int iWidthForAccumulateClamp(DType iType, Mode accMode) const;
 
     // Max number of weight items that can be processed in parallel
     int wWidth(DType wType) const;
@@ -782,6 +803,33 @@ class Act : SliceComponent {
     using SliceComponent::SliceComponent;
 
   public:
+    // Operation that clamp() applies to each partial p before clamping it
+    enum class Mode {
+        identity,   // p
+        abs,        // abs(p)
+        neg,        // -p
+        clz,        // Number of leading zero bits of p (integer partials)
+        ceil,       // p rounded up to an integer value (float partials, float result)
+        floor,      // p rounded down to an integer value (float partials, float result)
+        intToFloat, // (float)p (integer partials)
+        floatToInt, // (int)p (float partials)
+    };
+
+    // Shift applied by shift() to each value v, by its amount s
+    enum class ShiftMode {
+        lsl, // v << s
+        lsr, // v >> s, filling with zeros
+        asr, // v >> s, filling with the sign bit, rounded as set with setRoundingMode()
+    };
+
+    // Rounding of the bits dropped by a right shift: the scaling shift of rescaleClamp() and
+    // ShiftMode::asr (see setRoundingMode())
+    enum class Rounding {
+        off,         // Drop the bits (rounds towards negative infinity)
+        nearestEven, // Round to nearest, ties to even
+        nearestUp,   // Round to nearest, ties towards positive infinity
+    };
+
     // Load partials of shape {N} to QData
     // N can be up to width(iType)
     QData load(const PData &pdata);
@@ -791,10 +839,7 @@ class Act : SliceComponent {
     // clamped return: result data of shape {M}
     // M can be less than M if multiple partials are combined to compute each result value
     // In case of floating point partials clipMax and clipMin are interpreted as float values.
-    QData clamp(
-        const PData &pdata, int clipMin, int clipMax,
-        torq_hw::ACTMode actMode = torq_hw::ACTMode::ACT
-    );
+    QData clamp(const PData &pdata, int clipMin, int clipMax, Mode actMode = Mode::identity);
 
     // Perform rescaling and clamp on partials of shape {N} or {1, N}
     // N can be up to width(iType)
@@ -820,7 +865,7 @@ class Act : SliceComponent {
     // float t1 = (t0<clipMin) ? clipMin : (t0>clipMax) ? clipMax : t0;
     // qdata = t1;
     //
-    // Non-default ACT modes bypass the BRAM bias/scale record; use clamp() for them.
+    // To apply an operation other than Mode::identity, use clamp().
     QData rescaleClamp(
         const PData &pdata, const BData &bdata, int shift, int zeroPoint, int clipMin, int clipMax
     );
@@ -829,14 +874,14 @@ class Act : SliceComponent {
     // pdata: int32 partials of shape {width(int32)}, each one holding packed values of
     // elementType (4 int8, 2 int16 or 1 int32), as loaded by the ALU from int32 data.
     // The first half of the partials holds the values, the second half the shift amounts.
-    // Only the 5 lower bits of an amount are used. ASR rounds as set with setRoundingMode().
-    // ActMode can only be: LSL, LSR or ASR
+    // Only the 5 lower bits of an amount are used.
     // return: result data
-    QData shift(const PData &pdata, DType elementType, torq_hw::ACTMode actMode);
+    QData shift(const PData &pdata, DType elementType, ShiftMode shiftMode);
 
-    // Set the rounding mode.
-    // If not set rounds to nearest, ties towards positive infinity (NTP).
-    void setRoundingMode(torq_hw::RoundingMode mode);
+    // Set the rounding mode for the whole slice task.
+    // If not set rounds to nearest, ties towards positive infinity (Rounding::nearestUp), as in
+    // the rescaleClamp() pseudocode.
+    void setRoundingMode(Rounding mode);
 
     // Max number of output items that can be computed in parallel for the given in and weight type
     // The flag biasScalePerItem indicates if a different bias/scale is required for each item

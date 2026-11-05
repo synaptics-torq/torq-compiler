@@ -23,14 +23,14 @@ LogicalResult ElementWiseUnaryPattern::transform(
     auto input_shape = input_type.getShape();
     assert(input_shape.size() > 0);
 
-    torq_hw::ALUOp1Mode hwOp1Mode = torq_hw::ALUOp1Mode::ACC;
+    Alu::Mode aluMode = Alu::Mode::acc;
     torq_hl::ElementwiseOpEnum opType = op.getOpType();
 
     if (opType == torq_hl::ElementwiseOpEnum::BITWISE_NOT) {
-        hwOp1Mode = torq_hw::ALUOp1Mode::BNOT;
+        aluMode = Alu::Mode::bitNot;
     }
     else if (opType == torq_hl::ElementwiseOpEnum::LOGICAL_NOT) {
-        hwOp1Mode = torq_hw::ALUOp1Mode::NOT;
+        aluMode = Alu::Mode::logicalNot;
     }
     else {
         llvm::errs() << "Unsupported elementwise unary  op: " << opType << "\n";
@@ -52,7 +52,7 @@ LogicalResult ElementWiseUnaryPattern::transform(
 
     For(auto b = slice.iterate(input.dim(0))) {
         IData idata = slice.iram.load(input[b]);
-        PData pdata = slice.alu.accumulate(idata, hwOp1Mode);
+        PData pdata = slice.alu.accumulate(idata, aluMode);
         QData res = slice.act.load(pdata);
         slice.store(output[b], res);
     }

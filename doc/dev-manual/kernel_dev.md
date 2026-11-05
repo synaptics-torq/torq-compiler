@@ -927,17 +927,17 @@ The stacked dimension must be the outermost one, so index the other dimensions a
 ```{code} C++
 // input1, input2: int32 words, vectorized by width(int32) / 2 words
 LData input = LData::stack(rewriter, input1, input2, 0);
-slice.act.setRoundingMode(torq_hw::RoundingMode::OFF);
+slice.act.setRoundingMode(Act::Rounding::off);
 For(auto iv = slice.iterate(input.dim(1))) {
     IData idata = slice.iram.load(input[":"][iv]);  // both rows in one IRAM segment
     PData pdata = slice.alu.load(idata);            // values then amounts
-    QData res = slice.act.shift(pdata, elementType, torq_hw::ACTMode::ASR);
+    QData res = slice.act.shift(pdata, elementType, Act::ShiftMode::asr);
     slice.append(output, res);
 }
 ```
 
 `act.shift()` rounds as set with `act.setRoundingMode()`. If no mode is set the *Act* rounds to
-nearest, so a plain shift must set `RoundingMode::OFF`. See `ElementWiseShiftPattern.cpp` for the
+nearest, so a plain shift must set `Act::Rounding::off`. See `ElementWiseShiftPattern.cpp` for the
 complete kernel, including non-dense tensors and how the inputs are rounded up to whole vectors.
 
 
@@ -961,8 +961,8 @@ row. The gather kernel reads them one by one from the partials:
 ```{code} C++
 // values: {tables..., rows, 1}, indices: {groups, groupSize}
 IData idata = slice.iram.loadIndexed(values[t], indices[g]);
-PData pdata = slice.alu.accumulate(idata, torq_hw::ALUOp1Mode::BOR); // all the partials
-pdata.setShape({{groupSize, idata.dim(-1)}, {1, 1}});                // one row per index
+PData pdata = slice.alu.accumulate(idata, Alu::Mode::bitOr); // all the partials
+pdata.setShape({{groupSize, idata.dim(-1)}, {1, 1}});        // one row per index
 For(auto r = slice.iterate(groupSize)) {
     QData res = slice.act.clamp(pdata[r], minVal(DType::int32), maxVal(DType::int32));
     slice.store(output[t][g][r], res);

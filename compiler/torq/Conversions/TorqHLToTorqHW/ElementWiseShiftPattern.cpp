@@ -14,14 +14,14 @@
 
 namespace mlir::syna::torq {
 
-static FailureOr<torq_hw::ACTMode> shiftModeToActMode(torq_hl::ShiftModeEnum opType) {
+static FailureOr<Act::ShiftMode> toShiftMode(torq_hl::ShiftModeEnum opType) {
     switch (opType) {
     case torq_hl::ShiftModeEnum::LSR:
-        return torq_hw::ACTMode::LSR;
+        return Act::ShiftMode::lsr;
     case torq_hl::ShiftModeEnum::LSL:
-        return torq_hw::ACTMode::LSL;
+        return Act::ShiftMode::lsl;
     case torq_hl::ShiftModeEnum::ASR:
-        return torq_hw::ACTMode::ASR;
+        return Act::ShiftMode::asr;
     case torq_hl::ShiftModeEnum::ASL:
         break;
     }
@@ -36,7 +36,7 @@ template <>
 LogicalResult ElementWiseShiftPattern::transform(
     torq_hl::ElementWiseShiftOp op, PatternRewriter &rewriter
 ) const {
-    FailureOr<torq_hw::ACTMode> actMode = shiftModeToActMode(op.getOpType());
+    FailureOr<Act::ShiftMode> actMode = toShiftMode(op.getOpType());
     if (failed(actMode))
         return op.emitError() << "Unsupported elementwise shift op: " << op.getOpType();
 
@@ -95,9 +95,7 @@ LogicalResult ElementWiseShiftPattern::transform(
     LData input = LData::stack(rewriter, input1, input2, In::InputTensors);
     output.fuse(denseDims);
 
-    slice.act.setRoundingMode(
-        op.getRound() ? torq_hw::RoundingMode::NTP : torq_hw::RoundingMode::OFF
-    );
+    slice.act.setRoundingMode(op.getRound() ? Act::Rounding::nearestUp : Act::Rounding::off);
     For(auto ndd = slice.iterate(input.dims(In::NonDenseDims, In::Vectors))) {
         For(auto iv = slice.iterate(input.dim(In::Vectors))) {
             IData idata = slice.iram.load(input[":"][ndd][iv]);

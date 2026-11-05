@@ -321,9 +321,9 @@ FailureOr<torq_hw::SliceTaskOp> buildNonScalarTaskOp(BinaryOpParams<torq_hl::Add
 
     // Vectorize the input tensors and stack them
     Slice slice("add");
-    int vectorSize =
-        isFp32 ? slice.alu.iWidthForAccumulateClamp(input1.elementType(), torq_hw::ALUOp1Mode::ACC)
-               : slice.alu.iWidth(input1.elementType(), weights.elementType());
+    int vectorSize = isFp32
+                         ? slice.alu.iWidthForAccumulateClamp(input1.elementType(), Alu::Mode::acc)
+                         : slice.alu.iWidth(input1.elementType(), weights.elementType());
     input1.fuse(denseDims).vectorize(vectorSize);
     input2.fuse(denseDims).vectorize(vectorSize);
     auto input = stack(params.rewriter, input1, input2);

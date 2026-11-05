@@ -34,7 +34,7 @@ LogicalResult ArgMaxPattern::transform(torq_hl::ArgMaxOp op, PatternRewriter &re
     input.fuse(denseDims).vectorize(slice.alu.iWidth(input.elementType()));
     output.fuse(denseDims);
     // The index is in the upper bits of the partials: don't round it up
-    slice.act.setRoundingMode(torq_hw::RoundingMode::OFF);
+    slice.act.setRoundingMode(Act::Rounding::off);
 
     For(auto t = slice.iterate(input.dims(0, axis))) {
         For(auto i = slice.iterate(input.dims(axis + 1, Vectorized::Vectors))) {
@@ -42,7 +42,7 @@ LogicalResult ArgMaxPattern::transform(torq_hl::ArgMaxOp op, PatternRewriter &re
                 PData pdata;
                 For(auto r = slice.iterate(input.dim(axis))) {
                     IData idata = slice.iram.load(input[t][r][i][v]);
-                    pdata = slice.alu.accumulate(idata, torq_hw::ALUOp1Mode::AMAX);
+                    pdata = slice.alu.accumulate(idata, Alu::Mode::argMax);
                 }
                 For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
                     QData res = slice.act.load(pdata[av]);
