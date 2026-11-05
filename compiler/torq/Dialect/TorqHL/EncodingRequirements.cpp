@@ -304,44 +304,6 @@ static KernelEncoding getDefault1InputEncoding(Operation *op) {
     auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
     return {{}, defaultEncoding(resultType)};
 }
-template <typename OpT> static KernelEncoding getResizeLikeEncoding(OpT op) {
-    RankedTensorType resultType = cast<RankedTensorType>(op->getResult(0).getType());
-
-    int resultRank = resultType.getShape().size();
-
-    assert(resultRank == 4);
-
-    int inIndex = op.getInputMutable().getOperandNumber();
-
-    auto inputType = cast<RankedTensorType>(op->getOperand(inIndex).getType());
-
-    auto outShape = resultType.getShape();
-
-    int shapeAlign =
-        outShape[2] *
-        (torq::align_ceil(outShape[3], 32)
-        ); // Currently resize processes each row with 32-byte alignment for the last
-           // dimension to ensure proper memory alignment and vectorization efficiency.
-           // TODO: Can later optimize alignment size if hardware supports different values
-
-    LLVM_DEBUG({
-        llvm::dbgs() << "encodeResize: outShape " << outShape[1] << "x" << outShape[2] << "x"
-                     << outShape[3] << ", shapeAlign " << shapeAlign << "\n";
-    });
-
-    if ((outShape[1] == 512 && outShape[2] == 20 && outShape[3] == 20) ||
-        (outShape[1] == 128 && outShape[2] == 40 && outShape[3] == 40)) {
-        // FIXME: above alignment configuration causes memory usage explosion
-        // We use 128 as a workaround for YoloV8-bodypose and yolov8 od model compilation
-        shapeAlign = 128;
-        llvm::dbgs() << "Using workaround shapeAlign " << shapeAlign << "\n";
-    }
-
-    auto inEnc = defaultEncoding(inputType);
-    KernelTensorEncoding outEnc{{0, shapeAlign, 0, 0}, 0};
-
-    return {{{op.getInputMutable().getOperandNumber(), inEnc}}, outEnc};
-}
 
 KernelEncoding AddOp::getKernelEncoding() { return getNoEncoding(); }
 
@@ -463,7 +425,7 @@ KernelEncoding BroadcastOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding ResizeNearestNeighborOp::getKernelEncoding() { return getNoEncoding(); }
 
-KernelEncoding DepthToSpaceOp::getKernelEncoding() { return getResizeLikeEncoding(*this); }
+KernelEncoding DepthToSpaceOp::getKernelEncoding() { return getNoEncoding(); }
 
 KernelEncoding InterleavedInsertOp::getKernelEncoding() { return getNoEncoding(); }
 
