@@ -556,8 +556,8 @@ DType toUnsigned(DType type) {
     case DType::int32:
         return DType::uint32;
     default:
-        assert(isInt(type) && "toUnsigned expects integer types");
-        return DType::none;
+        assert(isUnsigned(type) && "toUnsigned expects integer types");
+        return type;
     }
 }
 
