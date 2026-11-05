@@ -19,6 +19,9 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/Support/Debug.h"
 
+#include <climits>
+#include <cstring>
+
 #define DEBUG_TYPE "torq-split-constants"
 
 static llvm::cl::opt<bool> clEnableSplitConstantsOptimization(
@@ -114,57 +117,131 @@ FailureOr<syna::torq_hl::ConstOp> reshapeConstant(
         return failure();
 
     auto denseAttr = cast<DenseElementsAttr>(constOp.getValue());
-    if (denseAttr.getNumElements() != resultType.getNumElements())
+    if (denseAttr.getNumElements() != resultType.getNumElements() ||
+        denseAttr.getElementType() != resultType.getElementType())
         return failure();
 
-    auto reshapedAttr = DenseElementsAttr::get(
-        RankedTensorType::get(resultType.getShape(), resultType.getElementType()),
-        llvm::to_vector(denseAttr.getValues<Attribute>())
-    );
+    auto tensorType = RankedTensorType::get(resultType.getShape(), resultType.getElementType());
+    auto reshapedAttr = denseAttr.reshape(tensorType);
     return syna::torq_hl::ConstOp::create(rewriter, loc, resultType, reshapedAttr);
 }
 
-// Slices a constant memref based on the subview parameters and returns a new flat ConstOp.
+// Slice integer and float data without materializing per-element attributes.
+// This helper constructs attributes only and leaves IR unchanged on failure.
+FailureOr<DenseElementsAttr> trySliceRawAttribute(
+    DenseElementsAttr denseAttr, RankedTensorType resultType, memref::SubViewOp subviewOp,
+    ArrayRef<int64_t> sourceStrides
+) {
+    Type elementType = resultType.getElementType();
+    auto integerType = dyn_cast<IntegerType>(elementType);
+    auto floatType = dyn_cast<FloatType>(elementType);
+    unsigned elementBitWidth = integerType ? integerType.getWidth()
+                               : floatType ? floatType.getWidth()
+                                           : 0;
+    int64_t numElements = resultType.getNumElements();
+    if (!elementBitWidth || numElements == 0)
+        return failure();
+
+    if (denseAttr.isSplat())
+        return denseAttr.resizeSplat(resultType);
+
+    // DenseElementsAttr stores each element in whole bytes, so sub-byte types
+    // such as i1 and i4 take one byte each.
+    size_t elementBytes = llvm::divideCeil(elementBitWidth, CHAR_BIT);
+    ArrayRef<char> rawData = denseAttr.getRawData();
+
+    auto offsets = subviewOp.getStaticOffsets();
+    auto sizes = subviewOp.getStaticSizes();
+    auto strides = subviewOp.getStaticStrides();
+    if (!sizes.empty() && sizes.back() != 1 && strides.back() != 1)
+        return failure();
+
+    // Sizes retain the source rank, including size-one dimensions dropped from
+    // the result. This keeps scalar and rank-reduced slices in source coordinates.
+    // The subview verifier guarantees that the slice is inside the source.
+    int64_t baseIndex = linearize(offsets, sourceStrides);
+
+    // Coalesce the largest contiguous suffix. Size-one dimensions do not
+    // constrain contiguity, even when their source stride differs.
+    size_t prefixRank = sizes.size();
+    int64_t blockElements = 1;
+    while (prefixRank > 0) {
+        size_t dim = prefixRank - 1;
+        if (sizes[dim] != 1) {
+            if (strides[dim] != 1 || sourceStrides[dim] != blockElements)
+                break;
+            blockElements *= sizes[dim];
+        }
+        --prefixRank;
+    }
+
+    size_t resultBytes = static_cast<size_t>(numElements) * elementBytes;
+    if (prefixRank == 0) {
+        return DenseElementsAttr::getFromRawBuffer(
+            resultType, rawData.slice(baseIndex * elementBytes, resultBytes)
+        );
+    }
+
+    auto prefixStrides = mlir::computeStrides(ArrayRef<int64_t>(sizes).take_front(prefixRank));
+    size_t blockBytes = static_cast<size_t>(blockElements) * elementBytes;
+    int64_t blockCount = numElements / blockElements;
+    SmallVector<char> slicedRawData;
+    slicedRawData.resize_for_overwrite(resultBytes);
+    for (int64_t block = 0; block < blockCount; ++block) {
+        auto indices = delinearize(block, prefixStrides);
+        int64_t sourceIndex = baseIndex;
+        for (size_t dim = 0; dim < prefixRank; ++dim)
+            sourceIndex += indices[dim] * strides[dim] * sourceStrides[dim];
+        std::memcpy(
+            slicedRawData.data() + static_cast<size_t>(block) * blockBytes,
+            rawData.data() + sourceIndex * elementBytes, blockBytes
+        );
+    }
+    return DenseElementsAttr::getFromRawBuffer(resultType, slicedRawData);
+}
+
+// Slice a constant in source coordinates and create one dense replacement.
 FailureOr<syna::torq_hl::ConstOp> sliceConstant(
     PatternRewriter &rewriter, Location loc, syna::torq_hl::ConstOp constOp,
     memref::SubViewOp subviewOp
 ) {
     auto denseAttr = cast<DenseElementsAttr>(constOp.getValue());
-
-    auto offsets = subviewOp.getStaticOffsets();
-    auto strides = subviewOp.getStaticStrides();
     auto srcType = cast<MemRefType>(constOp.getType());
     auto resultType = cast<MemRefType>(subviewOp.getType());
+    assert(
+        srcType.hasStaticShape() && resultType.hasStaticShape() &&
+        denseAttr.getNumElements() == srcType.getNumElements() &&
+        denseAttr.getElementType() == resultType.getElementType() &&
+        "a static subview of a constant has the constant's element type"
+    );
 
-    auto srcStrides = mlir::computeStrides(srcType.getShape());
-    auto resultStrides = mlir::computeStrides(resultType.getShape());
-    int64_t numElems = resultType.getNumElements();
-
-    // TODO(perf): This lazy range avoids copying the entire source constant for every slice,
-    // which is the current minimal fix for very large constants. A faster follow-up is to add a
-    // guarded raw-buffer path for byte-aligned numeric DenseElementsAttr values: use getRawData(),
-    // copy contiguous innermost-dimension slice rows with memcpy, then rebuild with
-    // DenseElementsAttr::getFromRawBuffer(). That avoids materializing one MLIR Attribute per
-    // sliced element. The same follow-up should use DenseElementsAttr::reshape() for folded
-    // collapse_shape and erase dead original torq_hl.const ops after their slices replace them, so
-    // serialization does not keep unused huge constants.
-    auto allValues = denseAttr.getValues<Attribute>();
-    SmallVector<Attribute> slicedValues;
-    slicedValues.reserve(numElems);
-
-    for (int64_t linear = 0; linear < numElems; ++linear) {
-        auto dimIndices = delinearize(linear, resultStrides);
-        for (auto [idx, off, stride] : llvm::zip(dimIndices, offsets, strides))
-            idx = off + idx * stride;
-        slicedValues.push_back(allValues[linearize(dimIndices, srcStrides)]);
+    auto tensorType = RankedTensorType::get(resultType.getShape(), resultType.getElementType());
+    auto sourceStrides = mlir::computeStrides(srcType.getShape());
+    DenseElementsAttr slicedAttr;
+    if (auto rawAttr = trySliceRawAttribute(denseAttr, tensorType, subviewOp, sourceStrides);
+        succeeded(rawAttr)) {
+        slicedAttr = *rawAttr;
+    }
+    else {
+        auto offsets = subviewOp.getStaticOffsets();
+        auto strides = subviewOp.getStaticStrides();
+        // Subview sizes retain the source rank, including dimensions reduced to
+        // size one in the result. Use them to map result linear indices back to
+        // source coordinates for both rank-reduced and scalar results.
+        auto sliceStrides = mlir::computeStrides(subviewOp.getStaticSizes());
+        auto allValues = denseAttr.getValues<Attribute>();
+        SmallVector<Attribute> slicedValues;
+        slicedValues.reserve(tensorType.getNumElements());
+        for (int64_t linear = 0; linear < tensorType.getNumElements(); ++linear) {
+            auto indices = delinearize(linear, sliceStrides);
+            for (auto [index, offset, stride] : llvm::zip(indices, offsets, strides))
+                index = offset + index * stride;
+            slicedValues.push_back(allValues[linearize(indices, sourceStrides)]);
+        }
+        slicedAttr = DenseElementsAttr::get(tensorType, slicedValues);
     }
 
     auto flatResultType = MemRefType::get(resultType.getShape(), resultType.getElementType());
-
-    auto slicedAttr = DenseElementsAttr::get(
-        RankedTensorType::get(flatResultType.getShape(), flatResultType.getElementType()),
-        slicedValues
-    );
     return syna::torq_hl::ConstOp::create(rewriter, loc, flatResultType, slicedAttr);
 }
 
