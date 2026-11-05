@@ -586,7 +586,7 @@ static Value transformGenericOp(
 
     // Rebuild generic with permuted shapes and permuted maps
     return rebuildGenericWithNewLayout(
-        rewriter, genericOp, newInputs, newInit.getResult(), newMaps
+        rewriter, genericOp, newInputs, newInit.getResult(), newMaps, perm
     );
 }
 

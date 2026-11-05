@@ -243,6 +243,22 @@ Value convertGenericOpToNchw(
     // broadcast (H=1 bias / weight-zp correction is 1x1xC over W), not HWC.
     const bool isHwcDomain = genericOp.getNumLoops() == 3;
 
+    static constexpr int64_t hwcToChwAxes[] = {2, 0, 1};
+    SmallVector<int64_t> oldLoopToNewLoop;
+    if (genericOp.getNumLoops() == 4) {
+        oldLoopToNewLoop = {0, 2, 3, 1};
+    }
+    else if (isHwcDomain && origMaps[numInps].isPermutation()) {
+        // The output becomes CHW with an identity map. Derive the loop
+        // permutation from its original map: HWC loops give {1, 2, 0},
+        // whereas loops already ordered CHW must keep their index queries.
+        oldLoopToNewLoop.resize(3);
+        for (auto [newDim, oldAxis] : llvm::enumerate(hwcToChwAxes)) {
+            auto oldDim = cast<AffineDimExpr>(origMaps[numInps].getResult(oldAxis));
+            oldLoopToNewLoop[oldDim.getPosition()] = newDim;
+        }
+    }
+
     for (auto [i, inp] : llvm::enumerate(genericOp.getInputs())) {
         auto it = valMap.find(inp);
         Value newInp;
@@ -278,6 +294,26 @@ Value convertGenericOpToNchw(
         newInputs.push_back(newInp);
 
         AffineMap origMap = origMaps[i];
+
+        if (isHwcDomain && !oldLoopToNewLoop.empty()) {
+            // Change both tensor axes and loop references together. In
+            // particular, an already-transposed filter must not retain maps
+            // expressed in the original loop domain.
+            SmallVector<AffineExpr> loopReplacements;
+            for (int64_t dim : oldLoopToNewLoop)
+                loopReplacements.push_back(getAffineDimExpr(dim, ctx));
+            SmallVector<AffineExpr> results;
+            if (origMap.getNumResults() == 3) {
+                for (int64_t axis : hwcToChwAxes)
+                    results.push_back(origMap.getResult(axis).replaceDims(loopReplacements));
+            }
+            else {
+                for (AffineExpr expr : origMap.getResults())
+                    results.push_back(expr.replaceDims(loopReplacements));
+            }
+            newMaps.push_back(AffineMap::get(3, origMap.getNumSymbols(), results, ctx));
+            continue;
+        }
 
         // Special case: 3D input that was replaced by a transposed value
         // (e.g. depthwise filter HWC→CHW with perm=[2,0,1]).
@@ -334,7 +370,10 @@ Value convertGenericOpToNchw(
         newOutInit = transposeValue(origOutInit, outPerm, genericOp.getLoc(), builder);
     }
 
-    return rebuildGenericWithNewLayout(builder, genericOp, newInputs, newOutInit, newMaps);
+    // Keep index queries consistent with the loop domain used by the new maps.
+    return rebuildGenericWithNewLayout(
+        builder, genericOp, newInputs, newOutInit, newMaps, oldLoopToNewLoop
+    );
 }
 
 //===----------------------------------------------------------------------===//

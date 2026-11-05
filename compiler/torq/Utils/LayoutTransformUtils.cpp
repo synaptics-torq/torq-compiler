@@ -84,10 +84,20 @@ Value createMinFilledTensor(
 
 Value rebuildGenericWithNewLayout(
     OpBuilder &rewriter, linalg::GenericOp origOp, ValueRange newInputs, Value newOutputInit,
-    ArrayRef<AffineMap> newMaps
+    ArrayRef<AffineMap> newMaps, ArrayRef<int64_t> oldLoopToNewLoop
 ) {
     Location loc = origOp.getLoc();
     Type newOutType = cast<RankedTensorType>(newOutputInit.getType());
+    assert(
+        (oldLoopToNewLoop.empty() || oldLoopToNewLoop.size() == origOp.getNumLoops()) &&
+        "loop permutation must cover the generic's iteration domain"
+    );
+    assert(
+        llvm::all_of(
+            oldLoopToNewLoop, [&](int64_t dim) { return dim >= 0 && dim < origOp.getNumLoops(); }
+        ) &&
+        "loop permutation contains an invalid dimension"
+    );
 
     auto newOp = linalg::GenericOp::create(
         rewriter, loc, TypeRange{newOutType}, newInputs, ValueRange{newOutputInit}, newMaps,
@@ -98,8 +108,20 @@ Value rebuildGenericWithNewLayout(
             Block *origBlock = origOp.getBody();
             for (auto [oldArg, newArg] : llvm::zip(origBlock->getArguments(), bbArgs))
                 mapping.map(oldArg, newArg);
-            for (auto &bodyOp : origBlock->without_terminator())
-                b.clone(bodyOp, mapping);
+            for (auto &bodyOp : origBlock->without_terminator()) {
+                if (auto index = dyn_cast<linalg::IndexOp>(bodyOp);
+                    index && !oldLoopToNewLoop.empty()) {
+                    // Index queries name loops, not tensor axes. Rewriting
+                    // indexing maps alone does not update their meaning.
+                    auto remapped = linalg::IndexOp::create(
+                        b, index.getLoc(), oldLoopToNewLoop[index.getDim()]
+                    );
+                    mapping.map(index.getResult(), remapped.getResult());
+                }
+                else {
+                    b.clone(bodyOp, mapping);
+                }
+            }
             auto *yield = origBlock->getTerminator();
             SmallVector<Value> yieldVals;
             for (auto v : cast<linalg::YieldOp>(yield).getValues())

@@ -96,10 +96,11 @@ Value createMinFilledTensor(
 );
 
 /// Rebuild a linalg.generic with new inputs, output init, and indexing maps.
-/// The body region is cloned verbatim (element types must be unchanged).
+/// Element types must be unchanged. If the loop domain is permuted, supply
+/// oldLoopToNewLoop so linalg.index still refers to the same physical axis.
 Value rebuildGenericWithNewLayout(
     OpBuilder &rewriter, linalg::GenericOp origOp, ValueRange newInputs, Value newOutputInit,
-    ArrayRef<AffineMap> newMaps
+    ArrayRef<AffineMap> newMaps, ArrayRef<int64_t> oldLoopToNewLoop = {}
 );
 
 } // namespace mlir::syna::torq
