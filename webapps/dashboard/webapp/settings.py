@@ -156,7 +156,8 @@ STORAGES = {
             "bucket_name": os.environ.get("S3_DATA_BUCKET"),
             "endpoint_url": os.environ.get("S3_ENDPOINT_URL"),
             "region_name": os.environ.get("AWS_REGION"),
-            "file_overwrite": False
+            "file_overwrite": False,
+            "max_memory_size": 8 * 1024 * 1024,
         }
     },
     "staticfiles": {

@@ -127,34 +127,37 @@ def _dump_pg_to_file(command, env, file_path):
 def _restore_database_from_upload(command, env, uploaded_file):
     # lower priority so this doesn't starve the web workers sharing the same CPU
     os.nice(15)
-    process = subprocess.Popen(
-        command,
-        env=env,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        preexec_fn=lambda: os.nice(15),
-    )
+    with TemporaryFile(mode='w+b') as stderr_file:
+        process = subprocess.Popen(
+            command,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_file,
+            preexec_fn=lambda: os.nice(15),
+        )
 
-    stderr = b''
-    try:
-        process.stdin.write(RESET_SQL)
-        for chunk in _iter_uploaded_sql_chunks(uploaded_file):
-            process.stdin.write(chunk)
-        process.stdin.close()
-    except Exception:
-        if process.stdin is not None and not process.stdin.closed:
+        try:
+            process.stdin.write(RESET_SQL)
+            for chunk in _iter_uploaded_sql_chunks(uploaded_file):
+                process.stdin.write(chunk)
             process.stdin.close()
-        process.kill()
-        stderr = process.stderr.read() if process.stderr is not None else b''
-        process.wait()
-        raise
+        except Exception:
+            process.kill()
+            process.wait()
+            if not process.stdin.closed:
+                try:
+                    process.stdin.close()
+                except BrokenPipeError:
+                    pass
+            raise
 
-    if process.stderr is not None:
-        stderr = process.stderr.read()
-    return_code = process.wait()
-    if return_code != 0:
-        raise subprocess.CalledProcessError(return_code, command, stderr=stderr)
+        return_code = process.wait()
+        if return_code != 0:
+            stderr_size = stderr_file.seek(0, os.SEEK_END)
+            stderr_file.seek(max(0, stderr_size - CHUNK_SIZE))
+            stderr = stderr_file.read(CHUNK_SIZE)
+            raise subprocess.CalledProcessError(return_code, command, stderr=stderr)
 
 
 def _format_restore_error(exc):
@@ -278,6 +281,7 @@ def restore_database_backup(args):
         # the check if the restore was already running and the spooler was killed
         if record.restore_status == backup_store.Status.RUNNING:
             record.restore_status = backup_store.Status.FAILED
+            record.restore_error_message = 'Restore was interrupted before completion; the worker may have crashed.'
             record.restore_finished_at = backup_store.timestamp()
             backup_store.save_backup(record)
 
