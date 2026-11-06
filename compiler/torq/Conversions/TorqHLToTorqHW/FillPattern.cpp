@@ -65,7 +65,7 @@ LogicalResult FillPattern::transform(torq_hl::FillOp op, PatternRewriter &rewrit
     }
 #endif
 
-    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
+    rewriter.replaceOp(op, slice.createOp(rewriter, op.getLoc()));
     return success();
 }
 

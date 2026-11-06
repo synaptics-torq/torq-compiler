@@ -12,13 +12,7 @@
 #include "mlir/IR/Region.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-#include "torq/Dialect/TorqHW/TorqHWAttrs.h"
-
 namespace mlir::syna {
-
-namespace torq_hw {
-class SliceTaskOp;
-};
 
 namespace torq {
 
@@ -998,15 +992,8 @@ class Slice {
     // stride_offset=1: the first output pixel aligns with an odd-indexed input pixel.
     void setStrideOffset(int stride_offset);
 
-    // Get the slice configuration
-    torq_hw::SliceCFGAttr getCfgAttr(MLIRContext *ctx) const;
-
-    // Get the NDLs
-    const torq_hw::Ndls &getNdls() const;
-
-    // Create a SliceTaskOp for this slice
-    torq_hw::SliceTaskOp
-    createSliceTaskOp(::mlir::OpBuilder &builder, Location loc, ValueRange symbols = {}) const;
+    // Create the slice task that runs this kernel
+    Operation *createOp(::mlir::OpBuilder &builder, Location loc, ValueRange symbols = {}) const;
 
     // Subunits, each has its own instruction set
     IRam iram;

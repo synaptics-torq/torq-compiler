@@ -11,7 +11,7 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/Pass.h"
-#include "torq/Dialect/TorqHW/TorqHWInfo.h"
+#include "torq/Utils/HwInfo.h"
 #include "torq/Utils/MemoryUtils.h"
 #include "llvm/Support/Debug.h"
 

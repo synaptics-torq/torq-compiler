@@ -6,7 +6,6 @@
 #include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "torq/Dialect/TorqHL/TorqHLAttrs.h"
-#include "torq/Dialect/TorqHW/TorqHWOps.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 

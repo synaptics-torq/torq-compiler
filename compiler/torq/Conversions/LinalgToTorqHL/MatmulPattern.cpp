@@ -7,7 +7,7 @@
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Conversions/LinalgToTorqHL/Patterns.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
-#include "torq/Dialect/TorqHW/TorqHWInfo.h"
+#include "torq/Utils/HwInfo.h"
 #include "torq/Utils/TorqHw.h"
 
 #include "mlir/IR/DialectResourceBlobManager.h"

@@ -14,7 +14,7 @@
 #include "torq/Codegen/css_bootstrap/css_kernel_riscv.h"
 
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
-#include "torq/Dialect/TorqHW/TorqHWInfo.h"
+#include "torq/Utils/HwInfo.h"
 
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"

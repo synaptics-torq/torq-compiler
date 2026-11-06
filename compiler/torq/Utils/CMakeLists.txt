@@ -33,6 +33,7 @@ iree_cc_library(
     InvocationUtils.h
     LayoutTransformUtils.h
     TorqHw.h
+    HwInfo.h
     ExecutorAssignment.h
     EncodingUtils.h
     ShapeUtils.h

@@ -52,7 +52,7 @@ LogicalResult ArgMaxPattern::transform(torq_hl::ArgMaxOp op, PatternRewriter &re
         }
     }
 
-    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
+    rewriter.replaceOp(op, slice.createOp(rewriter, op.getLoc()));
     return success();
 }
 

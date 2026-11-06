@@ -58,7 +58,7 @@ static Operation *createBlockExpandWithoutBias(
         }
     }
 
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 // Expand kernel for block-wise expand_weights with bias.
@@ -123,7 +123,7 @@ createBlockExpandWithBias(torq_hl::ExpandWeightsOp op, PatternRewriter &rewriter
         }
     }
 
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 template <>

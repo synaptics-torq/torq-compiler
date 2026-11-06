@@ -203,7 +203,7 @@ LogicalResult ActPattern::transform(torq_hl::ActOp op, PatternRewriter &rewriter
     }
 
     // Replace with hardware operation
-    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
+    rewriter.replaceOp(op, slice.createOp(rewriter, op.getLoc()));
 
     LLVM_DEBUG(llvm::dbgs() << "Successfully lowered " << opName << " to ActHwPattern\n");
     return success();

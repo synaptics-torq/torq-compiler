@@ -244,7 +244,7 @@ lowerConvStride2ToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter, int chOffs
         }
     }
 
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 // Lower torq_hl op to a slice task
@@ -370,7 +370,7 @@ lowerToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter, int chOffset, int chC
         }
     }
 
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 static LogicalResult convertToHw(torq_hl::Conv2DOp op, PatternRewriter &rewriter) {

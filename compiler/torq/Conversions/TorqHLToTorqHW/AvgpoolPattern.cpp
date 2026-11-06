@@ -100,7 +100,7 @@ static void emitSlidingAvgPoolRegion(
             }
         }
     }
-    slice.createSliceTaskOp(rewriter, op.getLoc());
+    slice.createOp(rewriter, op.getLoc());
 }
 
 static LogicalResult lowerSlidingAvgPool(torq_hl::AvgPool2DOp op, PatternRewriter &rewriter) {
@@ -207,7 +207,7 @@ Avgpool2DPattern::transform(torq_hl::AvgPool2DOp op, PatternRewriter &rewriter) 
         }
     }
 
-    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
+    rewriter.replaceOp(op, slice.createOp(rewriter, op.getLoc()));
 
     return success();
 }

@@ -63,7 +63,7 @@ LogicalResult ScatterPattern::transform(torq_hl::ScatterOp op, PatternRewriter &
         }
     }
 
-    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
+    rewriter.replaceOp(op, slice.createOp(rewriter, op.getLoc()));
     return success();
 }
 

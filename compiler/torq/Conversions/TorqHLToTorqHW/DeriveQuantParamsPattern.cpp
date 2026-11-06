@@ -136,7 +136,7 @@ static void emitScalarClamp(
     PData pdata = slice.alu.load(idata);
     QData res = slice.act.clamp(pdata, loClip, hiClip, mode);
     slice.store(slotView(dst, outDt, outSlot), res);
-    slice.createSliceTaskOp(rewriter, loc);
+    slice.createOp(rewriter, loc);
 }
 
 // Emit out[outSlot] = clamp(sum(in[aSlot], in[aSlot+1]), lo, hi) as a 2-element
@@ -155,7 +155,7 @@ static void emitScalarSumClamp(
     }
     QData res = slice.act.clamp(pdata, loClip, hiClip, Act::Mode::identity);
     slice.store(slotView(blob, dt, outSlot), res);
-    slice.createSliceTaskOp(rewriter, loc);
+    slice.createOp(rewriter, loc);
 }
 
 // Emit out[outSlot] = (in[inSlot] + bias) * scale, with bias/scale from a {2}:i32
@@ -177,7 +177,7 @@ static void emitScalarRescale(
     QData res =
         slice.act.rescaleClamp(pdata, bdata, 0, 0, minVal(DType::int32), maxVal(DType::int32));
     slice.store(slotView(dst, outDt, outSlot), res);
-    slice.createSliceTaskOp(rewriter, loc);
+    slice.createOp(rewriter, loc);
 }
 
 // Emit out[outSlot] = clamp(d[dSlot] * w[wSlot], lo, hi) as a bf16 scalar product
@@ -194,7 +194,7 @@ static void emitScalarMul(
     PData pdata = slice.alu.elementwiseProductAccumulate(idata, wdata);
     QData res = slice.act.clamp(pdata, loClip, hiClip, Act::Mode::identity);
     slice.store(slotView(dst, DType::bf16, outSlot), res);
-    slice.createSliceTaskOp(rewriter, loc);
+    slice.createOp(rewriter, loc);
 }
 
 } // namespace

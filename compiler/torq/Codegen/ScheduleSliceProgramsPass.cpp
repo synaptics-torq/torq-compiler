@@ -7,7 +7,7 @@
 #include "PassesDetail.h"
 
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
-#include "torq/Dialect/TorqHW/TorqHWInfo.h"
+#include "torq/Utils/HwInfo.h"
 
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "llvm/Support/Debug.h"

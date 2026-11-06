@@ -126,7 +126,7 @@ LogicalResult GatherPattern::transform(torq_hl::GatherOp op, PatternRewriter &re
         }
     }
 
-    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
+    rewriter.replaceOp(op, slice.createOp(rewriter, op.getLoc()));
     return success();
 }
 

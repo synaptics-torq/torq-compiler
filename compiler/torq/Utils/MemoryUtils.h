@@ -5,7 +5,6 @@
 
 #include "torq/Dialect/TorqHL/TorqHLAttrs.h"
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
-#include "torq/Dialect/TorqHW/TorqHWOps.h"
 
 #include <optional>
 

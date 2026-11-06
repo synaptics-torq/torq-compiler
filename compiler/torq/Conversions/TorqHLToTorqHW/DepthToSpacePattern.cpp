@@ -106,7 +106,7 @@ DepthToSpacePattern::transform(torq_hl::DepthToSpaceOp op, PatternRewriter &rewr
         }
     }
 
-    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
+    rewriter.replaceOp(op, slice.createOp(rewriter, op.getLoc()));
     return success();
 }
 

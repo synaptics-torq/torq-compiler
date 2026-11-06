@@ -7,8 +7,8 @@
 #include "PassesDetail.h"
 #include "Patterns.h"
 
-#include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Utils/ConversionUtils.h"
+#include "torq/Utils/HwInfo.h"
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"

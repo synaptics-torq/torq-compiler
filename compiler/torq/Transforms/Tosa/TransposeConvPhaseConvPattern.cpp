@@ -6,7 +6,7 @@
 
 #include "Patterns.h"
 
-#include "torq/Dialect/TorqHW/TorqHWInfo.h"
+#include "torq/Utils/HwInfo.h"
 #include "torq/Utils/TorqHw.h"
 
 #include "mlir/Dialect/Tosa/IR/TosaOps.h"

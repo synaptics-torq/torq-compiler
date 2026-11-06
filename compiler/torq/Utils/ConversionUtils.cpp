@@ -5,7 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "torq/Utils/ConversionUtils.h"
-#include "torq/Dialect/TorqHW/TorqHWInfo.h"
+#include "torq/Utils/HwInfo.h"
 #include "torq/Utils/Kernel.h"
 #include "torq/Utils/TorqUtils.h"
 

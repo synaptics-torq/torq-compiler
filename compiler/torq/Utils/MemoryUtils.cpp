@@ -1,9 +1,8 @@
 #include "MemoryUtils.h"
 #include "torq/Dialect/TorqHL/TorqHLAttrs.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
-#include "torq/Dialect/TorqHW/TorqHWInfo.h"
-#include "torq/Dialect/TorqHW/TorqHWOps.h"
 #include "torq/Utils/EncodingUtils.h"
+#include "torq/Utils/HwInfo.h"
 #include "torq/Utils/TorqUtils.h"
 
 #include "mlir/Dialect/MemRef/IR/MemRef.h"

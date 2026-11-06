@@ -20,7 +20,6 @@ set(deps
     ::TorqHLOpsGen
     ::TorqHLAttrDefGen
     LLVMSupport
-    iree::target::torq::Dialect::TorqHW::Dialect
     iree::compiler::Dialect::HAL::IR::HALDialect
     MLIRControlFlowInterfaces
     MLIRIR

@@ -14,7 +14,7 @@
 #include "torq/Utils/Kernel.h"
 #include "torq/Utils/TorqUtils.h"
 
-#include "torq/Dialect/TorqHW/TorqHWInfo.h"
+#include "torq/Utils/HwInfo.h"
 
 #include "llvm/Support/Debug.h"
 
@@ -58,7 +58,7 @@ void buildMacPartialsTask(
             }
         }
     }
-    slice.createSliceTaskOp(rewriter, loc);
+    slice.createOp(rewriter, loc);
 }
 
 // The zp correction, in two tasks: xsum[g] = sum_k x[g*B+k] (product against
@@ -92,7 +92,7 @@ void buildXsumCorrectionTasks(
             xsumSlice.append(stage8[g], res);
         }
     }
-    xsumSlice.createSliceTaskOp(rewriter, loc);
+    xsumSlice.createOp(rewriter, loc);
 
     Slice bcastSlice("mqmm_bcast");
     WData bcastOnes = bcastSlice.wram.load(onesV);
@@ -110,7 +110,7 @@ void buildXsumCorrectionTasks(
             }
         }
     }
-    bcastSlice.createSliceTaskOp(rewriter, loc);
+    bcastSlice.createOp(rewriter, loc);
 }
 
 // Y[j] = sum_g D[g,j]*W[g,j] over nR rows (2*nB in zp mode: partf|xsum against
@@ -142,7 +142,7 @@ void buildFinalAccumulateTask(
             slice.append(yD, res);
         }
     }
-    auto taskOp = slice.createSliceTaskOp(rewriter, loc);
+    auto taskOp = slice.createOp(rewriter, loc);
     rewriter.replaceOp(op, taskOp);
 }
 

@@ -351,7 +351,7 @@ TransposePattern::transform(torq_hl::TransposeOp op, PatternRewriter &rewriter) 
     }
 
     for (Slice &slice : slices) {
-        slice.createSliceTaskOp(rewriter, op.getLoc());
+        slice.createOp(rewriter, op.getLoc());
     }
     rewriter.eraseOp(op);
     return success();

@@ -161,7 +161,7 @@ FailureOr<Operation *> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &pa
         }
     }
 
-    return slice.createSliceTaskOp(params.rewriter, params.loc).getOperation();
+    return slice.createOp(params.rewriter, params.loc);
 }
 
 // The largest block size not above `maxBlock` that divides `size`.
@@ -213,7 +213,7 @@ FailureOr<Operation *> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> 
         }
     }
 
-    return slice.createSliceTaskOp(params.rewriter, params.loc).getOperation();
+    return slice.createOp(params.rewriter, params.loc);
 }
 
 FailureOr<Operation *> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
@@ -313,7 +313,7 @@ FailureOr<Operation *> buildNonScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &para
         }
     }
 
-    return slice.createSliceTaskOp(params.rewriter, params.loc).getOperation();
+    return slice.createOp(params.rewriter, params.loc);
 }
 
 } // namespace mlir::syna::torq

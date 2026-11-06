@@ -75,7 +75,7 @@ LogicalResult FMAPattern::transform(torq_hl::FMAOp op, PatternRewriter &rewriter
             }
         }
 
-        rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
+        rewriter.replaceOp(op, slice.createOp(rewriter, op.getLoc()));
 
         return success();
     }
@@ -95,7 +95,7 @@ LogicalResult FMAPattern::transform(torq_hl::FMAOp op, PatternRewriter &rewriter
         }
     }
 
-    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
+    rewriter.replaceOp(op, slice.createOp(rewriter, op.getLoc()));
 
     return success();
 }

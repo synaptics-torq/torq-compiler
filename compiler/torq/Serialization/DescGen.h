@@ -3,7 +3,7 @@
 #include "torq_bitstream.h"
 
 #include "torq/Dialect/TorqHW/TorqHWAttrs.h"
-#include "torq/Dialect/TorqHW/TorqHWInfo.h"
+#include "torq/Utils/HwInfo.h"
 
 #include <cassert>
 #include <memory>

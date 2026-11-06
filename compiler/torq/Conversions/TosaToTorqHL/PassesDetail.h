@@ -9,7 +9,6 @@
 #include "Passes.h"
 
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
-#include "torq/Dialect/TorqHW/TorqHWDialect.h"
 
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"

@@ -8,8 +8,8 @@
 #include "TilingUtils.h"
 
 #include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
-#include "torq/Dialect/TorqHW/TorqHWInfo.h"
 #include "torq/Utils/ExecutorAssignment.h"
+#include "torq/Utils/HwInfo.h"
 #include "torq/Utils/SlicingThresholds.h"
 #include "torq/Utils/TorqHw.h"
 

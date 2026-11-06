@@ -97,7 +97,7 @@ ReduceMeanPattern::transform(torq_hl::ReduceMeanOp op, PatternRewriter &rewriter
         }
     }
 
-    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
+    rewriter.replaceOp(op, slice.createOp(rewriter, op.getLoc()));
 
     return success();
 }

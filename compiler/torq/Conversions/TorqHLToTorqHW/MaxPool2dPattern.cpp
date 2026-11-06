@@ -95,7 +95,7 @@ static Operation *lowerMaxPool1DToHw(
         }
     }
 
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 // Pool along W only (kh==1, kw>1) by splitting the dense W dimension into [outputWidth, kw].
@@ -169,7 +169,7 @@ static Operation *lowerMaxPool1DHorizontalToHw(
         }
     }
 
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 static Operation *lowerMaxPool2DToHw(
@@ -255,7 +255,7 @@ static Operation *lowerMaxPool2DToHw(
         }
     }
 
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 // Same structure as the depthwise stride-2 kernel (lowerDwStride2ToHw in DWToHw.cpp) with a MAX
@@ -389,7 +389,7 @@ static Operation *lowerMaxPool2DStride2ToHw(
         }
     }
 
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 // 1x1 stride-2 maxpool: a subsampling of the input. The input of a stride-2 maxpool is segmented in
@@ -430,7 +430,7 @@ static Operation *lowerMaxPool1x1Stride2ToHw(
         }
     }
 
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 template <>

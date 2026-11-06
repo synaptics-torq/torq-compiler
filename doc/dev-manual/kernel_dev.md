@@ -239,8 +239,9 @@ For(auto i = slice.iterate(input1.dim(0))) {
 }
 ```
 
-We can now ask the `Slice` object to provide the corresponding HW settings and NDLs configuration using
-the ``getCfgAttr()`` and ``getNdls()`` methods.
+We can now ask the `Slice` object to create the slice task with the corresponding HW settings and
+NDLs, and replace the operation with it:
+``rewriter.replaceOp(op, slice.createOp(rewriter, op.getLoc()))``.
 
 Using the Slice as a scalar processor is not very different from writing the same operation in C
 for a standard CPU. Of course this is not using the full computational power of the Slice, 

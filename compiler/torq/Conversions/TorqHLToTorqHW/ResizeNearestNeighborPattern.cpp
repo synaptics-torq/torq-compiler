@@ -109,7 +109,7 @@ LogicalResult ResizeNearestNeighborPattern::transform(
         resizeNearestNeighborNCHW(input, output, slice, scaleH, scaleW);
     }
 
-    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
+    rewriter.replaceOp(op, slice.createOp(rewriter, op.getLoc()));
 
     return success();
 }

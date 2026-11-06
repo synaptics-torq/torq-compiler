@@ -130,7 +130,7 @@ static Operation *lowerDw1dStride1ToHw(
         }
     }
 
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 // A global depthwise has a kernel as large as the input frame, so it computes one output
@@ -204,7 +204,7 @@ static Operation *lowerDwGlobalNhwcToHw(
         }
     }
 
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 static LogicalResult
@@ -427,7 +427,7 @@ static Operation *lowerDwStride2ToHw(
         }
     }
 
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 // Lower torq_hl op to a slice task
@@ -543,7 +543,7 @@ lowerToHw(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter, int chOffset
         }
     }
 
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 static LogicalResult convertToHw(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter) {

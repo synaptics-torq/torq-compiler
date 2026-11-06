@@ -185,7 +185,7 @@ LogicalResult ReducePattern::transform(torq_hl::ReduceOp op, PatternRewriter &re
         emitDefaultReduce(slice, input, output, axis, aluMode);
     }
 
-    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
+    rewriter.replaceOp(op, slice.createOp(rewriter, op.getLoc()));
 
     LLVM_DEBUG(llvm::dbgs() << "Successfully lowered " << opName << " to ReducePattern\n");
     return success();

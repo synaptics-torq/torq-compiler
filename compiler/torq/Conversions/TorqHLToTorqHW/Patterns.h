@@ -8,7 +8,6 @@
 
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
-#include "torq/Dialect/TorqHW/TorqHWOps.h"
 
 namespace mlir::syna::torq {
 

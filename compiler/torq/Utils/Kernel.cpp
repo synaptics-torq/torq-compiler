@@ -6,8 +6,9 @@
 
 #include "Kernel.h"
 #include "torq/Dialect/TorqHW/TorqHWAttrs.h"
-#include "torq/Dialect/TorqHW/TorqHWInfo.h"
+#include "torq/Dialect/TorqHW/TorqHWOps.h"
 #include "torq/Utils/EncodingUtils.h"
+#include "torq/Utils/HwInfo.h"
 #include "torq/Utils/MemoryUtils.h"
 #include "torq/Utils/TorqUtils.h"
 
@@ -3245,13 +3246,6 @@ void Slice::setOutputChannelShape(int height, int width) {
     d->setOutputChannelShape(height, width);
 }
 
-torq_hw::SliceCFGAttr Slice::getCfgAttr(MLIRContext *ctx) const {
-    bool usingSet1 = d->usingDedr1Data();
-    SliceCFGAttr cfgAttr = d->_cfg.toSliceCFGAttr(ctx, usingSet1);
-    LLVM_DEBUG(llvm::dbgs() << cfgAttr);
-    return cfgAttr;
-}
-
 // Get top-level count from the specified Reg- or Mem- based NDL
 // Return -1 if the specified NDL type not found
 static int getTopCount(NdlType type, const torq_hw::Ndls &ndls, int setId = 0) {
@@ -3311,27 +3305,23 @@ static bool checkNdlTopConsistency(NdlType type1, NdlType type2, const torq_hw::
     return true;
 }
 
-const torq_hw::Ndls &Slice::getNdls() const {
-    LLVM_DEBUG(llvm::dbgs() << d->_ndls);
-
+// Check that the iteration counts of the NDLs that work together match
+static void checkNdls(const torq_hw::Ndls &ndls) {
     // Check ACT consistency
     bool ok = true;
-    ok &= checkNdlConsistency(NdlType::ACPR, NdlType::ACBR, d->_ndls);
-    ok &= checkNdlConsistency(NdlType::ACPR, NdlType::DEQW, d->_ndls);
+    ok &= checkNdlConsistency(NdlType::ACPR, NdlType::ACBR, ndls);
+    ok &= checkNdlConsistency(NdlType::ACPR, NdlType::DEQW, ndls);
 
     // Check ALU consistency (CEPR:25, CEDR:27 is ok)
-    ok &= checkNdlConsistency(NdlType::CEPR, NdlType::CEDR, d->_ndls, true);
-    ok &= checkNdlConsistency(NdlType::CEPR, NdlType::CEWR, d->_ndls, true);
-    ok &= checkNdlTopConsistency(NdlType::ACPR, NdlType::CEPR, d->_ndls);
+    ok &= checkNdlConsistency(NdlType::CEPR, NdlType::CEDR, ndls, true);
+    ok &= checkNdlConsistency(NdlType::CEPR, NdlType::CEWR, ndls, true);
+    ok &= checkNdlTopConsistency(NdlType::ACPR, NdlType::CEPR, ndls);
 
     // Check consistency between Mem- and Reg- based NDLs
-    ok &= checkNdlConsistency(NdlType::DEDR, NdlType::CEDW, d->_ndls);
-    ok &= checkNdlConsistency(NdlType::DEWR, NdlType::CEWW, d->_ndls);
-    ok &= checkNdlConsistency(NdlType::DEBR, NdlType::ACBW, d->_ndls);
+    ok &= checkNdlConsistency(NdlType::DEDR, NdlType::CEDW, ndls);
+    ok &= checkNdlConsistency(NdlType::DEWR, NdlType::CEWW, ndls);
+    ok &= checkNdlConsistency(NdlType::DEBR, NdlType::ACBW, ndls);
     assert(ok && "NDL consistency check failed");
-
-    // Just return the NDLs
-    return d->_ndls;
 }
 
 // Verify that all the Values in the range are non-null
@@ -3344,13 +3334,15 @@ static const ValueRange &checkNonNull(const ValueRange &range) {
     return range;
 }
 
-torq_hw::SliceTaskOp
-Slice::createSliceTaskOp(::mlir::OpBuilder &builder, Location loc, ValueRange symbols) const {
+Operation *Slice::createOp(::mlir::OpBuilder &builder, Location loc, ValueRange symbols) const {
     SmallVector<Value> allSymbols(symbols);
     for (const auto &syms :
          {d->_iram.symbols, d->_wram.symbols, d->_bram.symbols, d->_pram.symbols}) {
         allSymbols.append(syms.begin(), syms.end());
     }
+    SliceCFGAttr cfgAttr = d->_cfg.toSliceCFGAttr(builder.getContext(), d->usingDedr1Data());
+    LLVM_DEBUG(llvm::dbgs() << cfgAttr << d->_ndls);
+    checkNdls(d->_ndls);
     auto sliceTaskOp = SliceTaskOp::create(
         builder,
         loc,                               // Operation to replace
@@ -3362,10 +3354,10 @@ Slice::createSliceTaskOp(::mlir::OpBuilder &builder, Location loc, ValueRange sy
         checkNonNull(d->_iram.valuesSet1), // Dx
         checkNonNull(d->_bram.valuesSet1), // Bx
         allSymbols,                        // Symbols used to compute the NDLs
-        getCfgAttr(builder.getContext()),  // Slice configuration
-        getNdls()
+        cfgAttr,                           // Slice configuration
+        d->_ndls
     );
-    return sliceTaskOp;
+    return sliceTaskOp.getOperation();
 }
 
 //

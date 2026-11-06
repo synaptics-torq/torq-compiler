@@ -94,7 +94,7 @@ static Operation *lowerToMatmul(
     }
 
     LLVM_DEBUG(llvm::dbgs() << "Lowered to matmul kernel: " << "\n");
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 // True if the rows of matA are contiguous in memory, so reading past the end of a row
@@ -205,7 +205,7 @@ static Operation *lowerToFastMatmul(
     }
 
     LLVM_DEBUG(llvm::dbgs() << "Lowered to fast matmul kernel: " << "\n");
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 // This kernel supports matmul, dot product and matrix-vector multiplication

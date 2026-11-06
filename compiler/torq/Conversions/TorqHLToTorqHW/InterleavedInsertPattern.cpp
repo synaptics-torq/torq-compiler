@@ -121,7 +121,7 @@ lowerToHw(torq_hl::InterleavedInsertOp op, PatternRewriter &rewriter, Value task
         }
     }
 
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 template <>

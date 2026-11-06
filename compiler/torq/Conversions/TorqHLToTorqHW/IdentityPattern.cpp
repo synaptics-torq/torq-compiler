@@ -227,7 +227,7 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
         }
     }
 
-    rewriter.replaceOp(op, slice.createSliceTaskOp(rewriter, op.getLoc()));
+    rewriter.replaceOp(op, slice.createOp(rewriter, op.getLoc()));
     return success();
 }
 

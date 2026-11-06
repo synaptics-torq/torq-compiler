@@ -87,7 +87,7 @@ static Operation *lowerToHwPerChannel(
         }
     }
 
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 // Batch-scaled bias/scale kernel.
@@ -135,7 +135,7 @@ lowerToHwBatchScaled(torq_hl::FullyConnectedOp op, PatternRewriter &rewriter, bo
         }
     }
 
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 // Row-blocked variant of the kernel above: groups up to wram.transposeHeight() input rows
@@ -214,7 +214,7 @@ static Operation *lowerToHwPerChannelFast(
     }
 
     LLVM_DEBUG(llvm::dbgs() << "Lowered to fast fully_connected kernel\n");
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 // Rows per WRAM transpose block: a fixed HW property, but only reachable through a

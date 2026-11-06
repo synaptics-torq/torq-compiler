@@ -69,7 +69,7 @@ static Operation *segmentToQuadrants(torq_hl::SegmentationOp op, PatternRewriter
         }
     }
 
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 // Segment H dimension to the specified number of segments
@@ -109,7 +109,7 @@ segmentHDim(torq_hl::SegmentationOp op, PatternRewriter &rewriter, int hSegments
         }
     }
 
-    return slice.createSliceTaskOp(rewriter, op.getLoc());
+    return slice.createOp(rewriter, op.getLoc());
 }
 
 template <>
