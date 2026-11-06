@@ -24,6 +24,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
+#include "mlir/Interfaces/LoopLikeInterface.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/LoopInvariantCodeMotionUtils.h"
 #include "llvm/Support/CommandLine.h"
@@ -956,8 +957,7 @@ class KeepConcatInLram : public OpRewritePattern<tensor::InsertSliceOp> {
             return failure();
         }
 
-        // do not match if the result is used by another insert slice, we will
-        // only the last insert_slice in a chain of insert_slices
+        // Only match the last insert_slice of a chain.
         for (auto &use : rootOp.getResult().getUses()) {
             if (isa<tensor::InsertSliceOp>(use.getOwner())) {
                 return failure();
@@ -1000,12 +1000,26 @@ class KeepConcatInLram : public OpRewritePattern<tensor::InsertSliceOp> {
 
             currentInsert = currentInsert.getDest().getDefiningOp<tensor::InsertSliceOp>();
 
+            // Every insert before rootOp must only feed the next insert. When a partial result is
+            // also read, e.g. for the init of the next tile, the XRAM chain stays live for that
+            // user. The LRAM concat then only loads the parts again and stores the whole tensor.
+            if (currentInsert && !currentInsert->hasOneUse()) {
+                return failure();
+            }
+
         } while (currentInsert);
 
         // check that we start from an empty op
         auto emptyOp = insertOps.back().getDest().getDefiningOp<tensor::EmptyOp>();
 
         if (!emptyOp) {
+            return failure();
+        }
+
+        // When a user writes the other parts, e.g. the tile loop after a peeled first tile, the
+        // LRAM concat only loads this part and stores the whole tensor, with rows that no part
+        // wrote yet.
+        if (!writesWholeDest(insertOps, destType) && isWrittenByUser(rootOp.getResult())) {
             return failure();
         }
 
@@ -1044,6 +1058,34 @@ class KeepConcatInLram : public OpRewritePattern<tensor::InsertSliceOp> {
     }
 
   private:
+    // Return true if the sources of `insertOps` have as many elements as `destType`. The parts of
+    // a concat or of a tile chain do not overlap, so then the chain writes the whole destination.
+    static bool
+    writesWholeDest(ArrayRef<tensor::InsertSliceOp> insertOps, RankedTensorType destType) {
+        int64_t written = 0;
+        for (auto insertOp : insertOps) {
+            auto sourceType = insertOp.getSourceType();
+            if (!sourceType.hasStaticShape())
+                return false;
+            written += sourceType.getNumElements();
+        }
+        return destType.hasStaticShape() && written == destType.getNumElements();
+    }
+
+    // Return true if a user of `value` can write into it: a loop that takes it as an init (scf.for,
+    // scf.forall, scf.while), or a destination-style op that takes it as an init.
+    static bool isWrittenByUser(Value value) {
+        for (OpOperand &use : value.getUses()) {
+            Operation *owner = use.getOwner();
+            if (isa<LoopLikeOpInterface>(owner))
+                return true;
+            auto dstOp = dyn_cast<DestinationStyleOpInterface>(owner);
+            if (dstOp && dstOp.isDpsInit(&use))
+                return true;
+        }
+        return false;
+    }
+
     int64_t lramSize_;
 };
 

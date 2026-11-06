@@ -114,3 +114,4 @@ model188_mean_11x1x1_zp_52_scale_em7_int8
 model189_mean_1x173x1_zp_minus71_scale19_int16
 model472_mult16x8_neg_s2v_int16
 model473_mult16x8_pos_v2s_int16
+mbv2_blocks_1_2_112x112x16
