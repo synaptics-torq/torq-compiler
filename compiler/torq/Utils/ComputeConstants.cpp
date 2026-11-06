@@ -777,33 +777,51 @@ FailureOr<SmallVector<Attribute>> computeAllConstAttr(
     SmallVector<SmallVector<Operation *>, 4> opsSets;
     opsSets.reserve(values.size());
 
+    // Values that are already constants are read directly: only the others need a module to be
+    // JIT-compiled. knownAttrs is null for the values to compute.
     SmallVector<Value> constValues;
+    SmallVector<Attribute> knownAttrs;
+    SmallVector<Value> valuesToCompute;
     constValues.reserve(values.size());
+    knownAttrs.reserve(values.size());
     for (auto value : values) {
+        DenseElementsAttr attr;
+        if (isa<RankedTensorType>(value.getType()) && !llvm::is_contained(assumeZero, value) &&
+            matchPattern(value, m_Constant(&attr))) {
+            constValues.push_back(value);
+            knownAttrs.push_back(attr);
+            continue;
+        }
         auto maybeConst = outlineAndReturnOps(value, recursive, assumeZero);
         if (failed(maybeConst)) {
             LLVM_DEBUG({ llvm::errs() << "Failed to outline ops to compute value\n"; });
             continue;
         }
         constValues.push_back(value);
+        knownAttrs.push_back(nullptr);
+        valuesToCompute.push_back(value);
         opsSets.push_back(std::move(*maybeConst));
     }
     if (constValues.empty()) {
         return failure();
     }
 
-    auto output = computeValueFromOps(
-        values.front().getDefiningOp()->getLoc(), constValues, opsSets, assumeZero
-    );
-
-    if (failed(output) || output->size() != constValues.size()) {
-        return failure();
+    SmallVector<DenseElementsAttr> computed;
+    if (!valuesToCompute.empty()) {
+        auto output = computeValueFromOps(
+            valuesToCompute.front().getDefiningOp()->getLoc(), valuesToCompute, opsSets, assumeZero
+        );
+        if (failed(output) || output->size() != valuesToCompute.size()) {
+            return failure();
+        }
+        computed = std::move(*output);
     }
 
     SmallVector<Attribute> attrs;
-    attrs.reserve(output->size());
-    for (auto attr : *output) {
-        attrs.push_back(attr);
+    attrs.reserve(constValues.size());
+    auto nextComputed = computed.begin();
+    for (auto attr : knownAttrs) {
+        attrs.push_back(attr ? attr : *nextComputed++);
     }
     values = constValues;
     return attrs;

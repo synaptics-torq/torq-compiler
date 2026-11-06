@@ -5071,6 +5071,8 @@ mlir::FailureOr<Value> modifyShiftValue(
     Value commonShiftV;
     Value origShiftV = peelExtractSlices(shift);
     auto shiftTy = origShiftV.getType();
+    // The shift factor, when it is known without computing the IR below.
+    std::optional<int8_t> knownShift = commonShift;
 
     OpBuilder::InsertionGuard g(builder);
     builder.setInsertionPointAfter(origShiftV.getDefiningOp());
@@ -5094,9 +5096,15 @@ mlir::FailureOr<Value> modifyShiftValue(
         commonShiftV =
             tensor::ExtractOp::create(builder, lastOp->getLoc(), rOp.getResult(0), ValueRange{})
                 .getResult();
+        if (origShiftV.getDefiningOp<arith::ConstantOp>()) {
+            auto shifts = attrValuesAsVec<int8_t>(origShiftV);
+            knownShift = *std::min_element(shifts.begin(), shifts.end());
+        }
     }
     else if (auto intTy = mlir::dyn_cast<IntegerType>(shiftTy)) {
         commonShiftV = shift;
+        if (APInt value; matchPattern(shift, m_ConstantInt(&value)))
+            knownShift = value.getSExtValue();
     }
     else {
         // Unsupported shift type
@@ -5109,6 +5117,10 @@ mlir::FailureOr<Value> modifyShiftValue(
     )
                          .getResult();
     auto fillOp = linalg::FillOp::create(builder, lastOp->getLoc(), commonShiftV, modShiftV);
+    if (knownShift) {
+        scInfo.scaleShift = *knownShift;
+        return fillOp.getResult(0);
+    }
     // ComputeArithConst works only on tensor so getting the shift value from ReduceOp
     // result
     auto maybeShiftFactor = computeArithConst(fillOp.getResult(0), true, {});
