@@ -72,4 +72,6 @@ jobs:
               build-args: |
                 GIT_COMMIT=${{ github.sha }}
                 BASE_IMAGE=public.ecr.aws/ubuntu/ubuntu:24.04
-              tags: ${{ vars.DASHBOARD_DOCKER_REPOSITORY }}:latest
+              tags: |
+                ${{ vars.DASHBOARD_DOCKER_REPOSITORY }}:latest
+                ${{ vars.DASHBOARD_DOCKER_REPOSITORY }}:${{ github.sha }}
