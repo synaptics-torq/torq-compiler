@@ -88,13 +88,18 @@ size_t ndlCycle(torq_hw::RegNdlAttr attr) {
 
 size_t ndlCycle(torq_hw::MemNdlAttr attr) {
     size_t cycle = 1;
+    size_t aCycle = 1;
     uint32_t lWriteSize = 1;
     uint32_t xLineSize = 1;
+    size_t yLines = 1;
     bool usingSdims = false;
     for (auto dim : attr.getDims()) {
         switch (dim.getType()) {
         case torq_hw::DimType::H:
             cycle *= dim.getCount();
+            if (dim.getTag() == torq_hw::MemDimTag::A) {
+                aCycle *= dim.getCount();
+            }
             break;
         case torq_hw::DimType::L:
             lWriteSize *= dim.getCount();
@@ -103,6 +108,9 @@ size_t ndlCycle(torq_hw::MemNdlAttr attr) {
             if (dim.getTag() == torq_hw::MemDimTag::B || dim.getTag() == torq_hw::MemDimTag::X) {
                 xLineSize *= dim.getCount();
                 usingSdims = true;
+            }
+            if (dim.getTag() == torq_hw::MemDimTag::Y) {
+                yLines *= dim.getCount();
             }
             break;
         }
@@ -114,14 +122,16 @@ size_t ndlCycle(torq_hw::MemNdlAttr attr) {
     if (usingSdims) {
         if (xLineSize < lWriteSize) {
             // Each low-level write is split into multiple cycles
-            cycle = cycle * div_ceil(lWriteSize, xLineSize);
+            cycle *= div_ceil(lWriteSize, xLineSize);
         }
         else {
-            // Determine the number of writes crossing X-boundary (will require one extra cycle)
+            // Line ends inside the view, except those where a write ends, add one extra cycle each.
+            // Note: the last line end is the end of the view, bytes after that point are dropped
+            // so any partial write there doesn't add any extra cycle
             size_t g = std::gcd(lWriteSize, xLineSize);
-            size_t misalignmentPeriod = (lWriteSize - 1) / g;
-            size_t crossingWrites = (cycle * g / xLineSize) * misalignmentPeriod;
-            cycle += crossingWrites;
+            size_t innerLineEnds = std::min(yLines - 1, (aCycle * lWriteSize - 1) / xLineSize);
+            size_t crossingWrites = innerLineEnds - innerLineEnds / (lWriteSize / g);
+            cycle += crossingWrites * (cycle / aCycle);
         }
     }
 
