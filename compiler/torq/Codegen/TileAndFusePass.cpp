@@ -1043,6 +1043,11 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
     bool probeRejectsRelocation_ = false;
     // Set while fitTileToMemory probes a group whose spills count, see clProbeAvoidSpills.
     bool probeCountsSpills_ = false;
+    // Memory probe answers within one search, keyed by tile sizes only: the relocated bytes
+    // of the LRAM plan, nullopt when the tile does not fit. Nothing else the probe reads,
+    // `offsets` included, changes during a search. A search starts and returns with an
+    // empty cache, so no probe of another kind reads its answers.
+    std::map<SmallVector<int64_t>, std::optional<int64_t>> probeCache_;
 
     // Full validation and its retry must retain position-dependent producer shapes.
     bool probeAllTilePositions_ = false;
@@ -1088,6 +1093,12 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
     llvm::FailureOr<bool> checkModuleFitsInMemory(ModuleOp moduleOp, bool optimizeForTileAndFuse);
 
     llvm::FailureOr<bool> checkTileFitsInMemory(
+        ModuleOp moduleOp, const TilingInfo &tilingInfo, ArrayRef<OpFoldResult> offsets,
+        ArrayRef<OpFoldResult> sizes
+    );
+
+    // checkTileFitsInMemory through probeCache_
+    llvm::FailureOr<bool> probeTileFits(
         ModuleOp moduleOp, const TilingInfo &tilingInfo, ArrayRef<OpFoldResult> offsets,
         ArrayRef<OpFoldResult> sizes
     );
@@ -1638,6 +1649,29 @@ llvm::FailureOr<bool> TileAndFusePass::checkTileFitsInMemory(
     return checkModuleFitsInMemory(*fixedModuleOp, true);
 }
 
+llvm::FailureOr<bool> TileAndFusePass::probeTileFits(
+    ModuleOp moduleOp, const TilingInfo &tilingInfo, ArrayRef<OpFoldResult> offsets,
+    ArrayRef<OpFoldResult> sizes
+) {
+    auto constSizes = getConstantIntValues(sizes);
+    assert(constSizes && "sizes are not constant");
+    SmallVector<int64_t> key = *constSizes;
+    auto [cached, isNew] = probeCache_.try_emplace(key);
+    if (!isNew) {
+        if (cached->second)
+            lastFitRelocatedBytes_ = *cached->second;
+        return cached->second.has_value();
+    }
+    llvm::FailureOr<bool> fits = checkTileFitsInMemory(moduleOp, tilingInfo, offsets, sizes);
+    if (failed(fits)) {
+        probeCache_.erase(cached);
+        return llvm::failure();
+    }
+    if (*fits)
+        cached->second = lastFitRelocatedBytes_;
+    return *fits;
+}
+
 // Binary-search for the largest tile size along a single iteration domain that fits in memory.
 // Precondition: the tile fits when sizes[domain] = div_ceil(iterDomainSize, maxFactor),
 //               and does not fit when sizes[domain] = div_ceil(iterDomainSize, minFactor).
@@ -1669,8 +1703,7 @@ LogicalResult TileAndFusePass::searchTileSizeForDim(
 
         sizes[domain] = rewriter.getIndexAttr(tileSize);
 
-        llvm::FailureOr<bool> tileFits =
-            checkTileFitsInMemory(moduleOp, tilingInfo, offsets, sizes);
+        llvm::FailureOr<bool> tileFits = probeTileFits(moduleOp, tilingInfo, offsets, sizes);
         if (failed(tileFits))
             return LogicalResult::failure();
 
@@ -2075,6 +2108,8 @@ TileFit TileAndFusePass::fitTileToMemory(
 
     probeAllTilePositions_ = true;
     llvm::scope_exit restoreSampling([&] { probeAllTilePositions_ = false; });
+    probeCache_.clear();
+    llvm::scope_exit clearValidationProbes([&] { probeCache_.clear(); });
     FailureOr<bool> allPositionsFit =
         checkTileFitsInMemory(*validation, tilingInfo, offsets, sizes);
     if (failed(allPositionsFit)) {
@@ -2137,6 +2172,8 @@ TileFit TileAndFusePass::fitTileToMemoryAnyPlan(
     ArrayRef<int64_t> iterDomainSizes, MutableArrayRef<OpFoldResult> offsets,
     MutableArrayRef<OpFoldResult> sizes
 ) {
+    probeCache_.clear();
+    llvm::scope_exit clearSearchProbes([&] { probeCache_.clear(); });
     std::optional<SmallVector<int64_t>> channelFirstOrder =
         computeChannelFirstShrinkOrder(consumerOp, producerOps, tilingInfo, iterDomainSizes);
     if (!channelFirstOrder)
@@ -2208,7 +2245,7 @@ TileFit TileAndFusePass::fitTileToMemoryWithOrder(
         return TileFit::ProbeFail;
 
     // First establish that the original tile is not big enough.
-    llvm::FailureOr<bool> tileFits = checkTileFitsInMemory(*moduleOp, tilingInfo, offsets, sizes);
+    llvm::FailureOr<bool> tileFits = probeTileFits(*moduleOp, tilingInfo, offsets, sizes);
     if (failed(tileFits))
         return TileFit::ProbeFail;
     if (*tileFits) {
@@ -2271,7 +2308,7 @@ TileFit TileAndFusePass::fitTileToMemoryWithOrder(
                 growBackEnd, size_t(std::distance(tilingInfo.tilingOrder.begin(), position)) + 1
             );
             sizes[domain] = rewriter.getIndexAttr(minTileSize);
-            tileFits = checkTileFitsInMemory(*moduleOp, tilingInfo, offsets, sizes);
+            tileFits = probeTileFits(*moduleOp, tilingInfo, offsets, sizes);
             if (failed(tileFits)) {
                 fitCheckFailed = true;
                 return LogicalResult::failure();
@@ -2325,7 +2362,7 @@ TileFit TileAndFusePass::fitTileToMemoryWithOrder(
         int64_t fittingSize = *getConstantIntValue(sizes[domain]);
         int64_t maxFactor = div_ceil(iterDomainSizes[domain], fittingSize);
         sizes[domain] = rewriter.getIndexAttr(iterDomainSizes[domain]);
-        tileFits = checkTileFitsInMemory(*moduleOp, tilingInfo, offsets, sizes);
+        tileFits = probeTileFits(*moduleOp, tilingInfo, offsets, sizes);
         if (failed(tileFits))
             return TileFit::ProbeFail;
         if (*tileFits)
