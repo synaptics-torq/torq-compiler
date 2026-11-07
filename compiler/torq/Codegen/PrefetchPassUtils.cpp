@@ -91,9 +91,8 @@ SmallVector<Program> collectPrograms(ArrayRef<Operation *> order) {
 /// (create_invocation just wires a program to an executor; program is
 /// IsolatedFromAbove).
 bool isPureProducer(Operation *op) {
-    return isa<
-        memref::SubViewOp, memref::CollapseShapeOp, memref::ExpandShapeOp, torq_hl::ConstOp,
-        torq_hl::MapBindingOp, torq_hl::CreateInvocationOp, torq_hl::ProgramOp>(op);
+    return isDerivedMemRefOperation(op) || isa<torq_hl::ConstOp, torq_hl::MapBindingOp,
+                                               torq_hl::CreateInvocationOp, torq_hl::ProgramOp>(op);
 }
 
 /// Cheap whole-order probe: clone, run AddDeallocation, then ask the global LRAM planner
