@@ -72,6 +72,15 @@ isValidDequantShape(linalg::GenericOp op, RankedTensorType &inTy, RankedTensorTy
     return true;
 }
 
+// The value a dequant body computes, before it is narrowed to the output type: torch-mlir
+// computes it in the scale's type (f32) and ends with a truncf to a bf16 output.
+static Value getDequantResult(linalg::YieldOp yieldOp) {
+    Value value = yieldOp.getOperand(0);
+    if (auto truncf = value.getDefiningOp<arith::TruncFOp>())
+        return truncf.getIn();
+    return value;
+}
+
 // Signed integer dequant:
 // linalg.generic body (zp = 0):
 //   [arith.extsi(%in)] -> arith.sitofp -> arith.mulf(%scale)
@@ -85,7 +94,7 @@ std::optional<DequantInfo> matchDequantSigned(linalg::GenericOp op) {
     auto yieldOp = dyn_cast<linalg::YieldOp>(op.getBody()->getTerminator());
     if (!yieldOp || yieldOp.getNumOperands() != 1)
         return std::nullopt;
-    auto mulf = yieldOp.getOperand(0).getDefiningOp<arith::MulFOp>();
+    auto mulf = getDequantResult(yieldOp).getDefiningOp<arith::MulFOp>();
     if (!mulf)
         return std::nullopt;
 
@@ -157,7 +166,7 @@ std::optional<DequantInfo> matchDequantScaleOne(linalg::GenericOp op) {
     auto yieldOp = dyn_cast<linalg::YieldOp>(op.getBody()->getTerminator());
     if (!yieldOp || yieldOp.getNumOperands() != 1)
         return std::nullopt;
-    auto sitofp = yieldOp.getOperand(0).getDefiningOp<arith::SIToFPOp>();
+    auto sitofp = getDequantResult(yieldOp).getDefiningOp<arith::SIToFPOp>();
     if (!sitofp)
         return std::nullopt;
 
@@ -214,7 +223,7 @@ std::optional<DequantInfo> matchDequantUnsigned(linalg::GenericOp op) {
     auto yieldOp = dyn_cast<linalg::YieldOp>(op.getBody()->getTerminator());
     if (!yieldOp || yieldOp.getNumOperands() != 1)
         return std::nullopt;
-    auto mulf = yieldOp.getOperand(0).getDefiningOp<arith::MulFOp>();
+    auto mulf = getDequantResult(yieldOp).getDefiningOp<arith::MulFOp>();
     if (!mulf)
         return std::nullopt;
 

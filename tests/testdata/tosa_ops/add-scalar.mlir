@@ -12,11 +12,11 @@ module {
     %cst_8 = arith.constant dense<0> : tensor<1xi32>
     %cst_9 = arith.constant dense<0> : tensor<1xi32>
     %cst_10 = arith.constant dense<-2> : tensor<1xi8>
-    %0 = tosa.rescale %arg0, %cst, %cst_2, %cst_6, %cst_9 {input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<i8>, tensor<1xi32>, tensor<1xi8>, tensor<1xi8>, tensor<1xi32>) -> tensor<i32>
-    %1 = tosa.rescale %0, %cst_0, %cst_4, %cst_8, %cst_9 {input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<i32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi32>) -> tensor<i32>
-    %2 = tosa.rescale %arg0, %cst, %cst_3, %cst_7, %cst_9 {input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<i8>, tensor<1xi32>, tensor<1xi8>, tensor<1xi8>, tensor<1xi32>) -> tensor<i32>
+    %0 = tosa.rescale %arg0, %cst, %cst_2, %cst_6, %cst_9 scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(false) input_unsigned(false) output_unsigned(false) : (tensor<i8>, tensor<1xi32>, tensor<1xi8>, tensor<1xi8>, tensor<1xi32>) -> tensor<i32>
+    %1 = tosa.rescale %0, %cst_0, %cst_4, %cst_8, %cst_9 scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(false) input_unsigned(false) output_unsigned(false) : (tensor<i32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi32>) -> tensor<i32>
+    %2 = tosa.rescale %arg0, %cst, %cst_3, %cst_7, %cst_9 scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(false) input_unsigned(false) output_unsigned(false) : (tensor<i8>, tensor<1xi32>, tensor<1xi8>, tensor<1xi8>, tensor<1xi32>) -> tensor<i32>
     %3 = tosa.add %1, %2 : (tensor<i32>, tensor<i32>) -> tensor<i32>
-    %4 = tosa.rescale %3, %cst_1, %cst_5, %cst_8, %cst_10 {input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<i32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<i8>
+    %4 = tosa.rescale %3, %cst_1, %cst_5, %cst_8, %cst_10 scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(false) input_unsigned(false) output_unsigned(false) : (tensor<i32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<i8>
     return %4 : tensor<i8>
   }
 }

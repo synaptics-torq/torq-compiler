@@ -8,10 +8,10 @@ module {
     %4 = tosa.cast %arg0 : (tensor<1x1000xi8>) -> tensor<1x1000xf32>
     %5 = tosa.sub %4, %3 : (tensor<1x1000xf32>, tensor<1x1xf32>) -> tensor<1x1000xf32>
     %6 = tosa.mul %5, %2, %cst : (tensor<1x1000xf32>, tensor<1x1xf32>, tensor<1xi8>) -> tensor<1x1000xf32>
-    %7 = tosa.reduce_max %6 {axis = 1 : i32} : (tensor<1x1000xf32>) -> tensor<1x1xf32>
+    %7 = tosa.reduce_max %6 axis(1) : (tensor<1x1000xf32>) -> tensor<1x1xf32>
     %8 = tosa.sub %6, %7 : (tensor<1x1000xf32>, tensor<1x1xf32>) -> tensor<1x1000xf32>
     %9 = tosa.exp %8 : (tensor<1x1000xf32>) -> tensor<1x1000xf32>
-    %10 = tosa.reduce_sum %9 {axis = 1 : i32} : (tensor<1x1000xf32>) -> tensor<1x1xf32>
+    %10 = tosa.reduce_sum %9 axis(1) : (tensor<1x1000xf32>) -> tensor<1x1xf32>
     %11 = tosa.reciprocal %10 : (tensor<1x1xf32>) -> tensor<1x1xf32>
     %12 = tosa.mul %9, %11, %cst : (tensor<1x1000xf32>, tensor<1x1xf32>, tensor<1xi8>) -> tensor<1x1000xf32>
     %13 = tosa.mul %12, %1, %cst : (tensor<1x1000xf32>, tensor<1x1xf32>, tensor<1xi8>) -> tensor<1x1000xf32>

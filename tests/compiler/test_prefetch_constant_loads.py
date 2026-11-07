@@ -29,10 +29,10 @@ module {
     %m = "tosa.const"() <{values = dense<1073741824> : tensor<1xi32>}> : () -> tensor<1xi32>
     %s = "tosa.const"() <{values = dense<38> : tensor<1xi8>}> : () -> tensor<1xi8>
     %z32 = "tosa.const"() <{values = dense<0> : tensor<1xi32>}> : () -> tensor<1xi32>
-    %c1 = tosa.conv2d %x, %w1, %b, %zp, %zp {acc_type = i32, dilation = array<i64: 1, 1>, pad = array<i64: 0, 0, 0, 0>, stride = array<i64: 1, 1>} : (tensor<1x28x28x64xi8>, tensor<64x1x1x64xi8>, tensor<64xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x28x28x64xi32>
-    %r1 = tosa.rescale %c1, %m, %s, %z32, %zp {input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<1x28x28x64xi32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x28x28x64xi8>
-    %c2 = tosa.conv2d %r1, %w2, %b, %zp, %zp {acc_type = i32, dilation = array<i64: 1, 1>, pad = array<i64: 0, 0, 0, 0>, stride = array<i64: 1, 1>} : (tensor<1x28x28x64xi8>, tensor<64x1x1x64xi8>, tensor<64xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x28x28x64xi32>
-    %r2 = tosa.rescale %c2, %m, %s, %z32, %zp {input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<1x28x28x64xi32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x28x28x64xi8>
+    %c1 = tosa.conv2d %x, %w1, %b, %zp, %zp pad([0, 0, 0, 0]) stride([1, 1]) dilation([1, 1]) acc_type(i32) : (tensor<1x28x28x64xi8>, tensor<64x1x1x64xi8>, tensor<64xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x28x28x64xi32>
+    %r1 = tosa.rescale %c1, %m, %s, %z32, %zp scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(false) input_unsigned(false) output_unsigned(false) : (tensor<1x28x28x64xi32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x28x28x64xi8>
+    %c2 = tosa.conv2d %r1, %w2, %b, %zp, %zp pad([0, 0, 0, 0]) stride([1, 1]) dilation([1, 1]) acc_type(i32) : (tensor<1x28x28x64xi8>, tensor<64x1x1x64xi8>, tensor<64xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x28x28x64xi32>
+    %r2 = tosa.rescale %c2, %m, %s, %z32, %zp scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(false) input_unsigned(false) output_unsigned(false) : (tensor<1x28x28x64xi32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x28x28x64xi8>
     return %r2 : tensor<1x28x28x64xi8>
   }
 }

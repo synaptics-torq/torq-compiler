@@ -15,11 +15,13 @@ import subprocess
 from pathlib import Path
 
 from torq.lab.logging import is_verbose
+from torq.utils.tflite_to_tosa import run_tflite_to_tosa
 
 def convert_tflite_to_mlir(model_path, output_path, timeout=300):
     """Convert a TFLite model file to MLIR via ``tosa-converter-for-tflite``.
 
-    Runs the converter in a subprocess with ``--text``. Raises ``RuntimeError``
+    Runs the converter in a subprocess and prints its bytecode as text with the
+    compiler's MLIR (see ``torq.utils.tflite_to_tosa``). Raises ``RuntimeError``
     with full diagnostics on failure.
     """
     model_path = Path(model_path)
@@ -32,8 +34,8 @@ def convert_tflite_to_mlir(model_path, output_path, timeout=300):
         )
 
     try:
-        result = subprocess.run(
-            [tool, str(model_path), "--text", "-o", str(output_path)],
+        result = run_tflite_to_tosa(
+            model_path, output_path, tool=tool,
             capture_output=True, text=True, timeout=timeout
         )
 

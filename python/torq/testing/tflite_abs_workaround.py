@@ -173,8 +173,8 @@ def _emit_abs_i32_legalization(indent: str, lhs: str, arg: str, shape: str, site
             (
                 f"{p}_centered = tosa.rescale {arg}, %{tag}_mult0, %{tag}_shift0, "
                 f"%{tag}_in_zp, %{tag}_zero_i32 "
-                f"{{input_unsigned = false, output_unsigned = false, per_channel = false, "
-                f"rounding_mode = DOUBLE_ROUND, scale32 = true}} : "
+                f"scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(false) "
+                f"input_unsigned(false) output_unsigned(false) : "
                 f"(tensor<{shape}xi8>, tensor<1xi32>, tensor<1xi8>, tensor<1xi8>, tensor<1xi32>) "
                 f"-> tensor<{shape}xi32>"
             ),
@@ -182,8 +182,8 @@ def _emit_abs_i32_legalization(indent: str, lhs: str, arg: str, shape: str, site
             (
                 f"{indent}{lhs} = tosa.rescale %{tag}_absv, %{tag}_mult1, %{tag}_shift1, "
                 f"%{tag}_zero_i32, %{tag}_out_zp "
-                f"{{input_unsigned = false, output_unsigned = false, per_channel = false, "
-                f"rounding_mode = DOUBLE_ROUND, scale32 = true}} : "
+                f"scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(false) "
+                f"input_unsigned(false) output_unsigned(false) : "
                 f"(tensor<{shape}xi32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi8>) "
                 f"-> tensor<{shape}xi8>"
             ),
@@ -241,16 +241,14 @@ def convert_tflite_to_tosa_mlir_with_abs_workaround(
     output_mlir_path: PathLike,
 ) -> None:
     """Run tosa-converter-for-tflite, applying the Abs workaround when needed."""
-    import subprocess
+    from torq.utils.tflite_to_tosa import run_tflite_to_tosa
 
     tflite_model_path = Path(tflite_model_path)
     output_mlir_path = Path(output_mlir_path)
     sites = collect_quantized_abs_sites(tflite_model_path)
 
     if not sites:
-        subprocess.check_call(
-            ["tosa-converter-for-tflite", "--text", str(tflite_model_path), "-o", str(output_mlir_path)]
-        )
+        run_tflite_to_tosa(tflite_model_path, output_mlir_path, check=True)
         return
 
     logger.info(
@@ -261,9 +259,7 @@ def convert_tflite_to_tosa_mlir_with_abs_workaround(
     with tempfile.TemporaryDirectory(prefix="torq_abs_workaround_") as tmp:
         patched = Path(tmp) / "abs_quant_matched.tflite"
         _force_abs_output_quant_to_match_input(tflite_model_path, patched)
-        subprocess.check_call(
-            ["tosa-converter-for-tflite", "--text", str(patched), "-o", str(output_mlir_path)]
-        )
+        run_tflite_to_tosa(patched, output_mlir_path, check=True)
 
     mlir_text = output_mlir_path.read_text()
     output_mlir_path.write_text(replace_i8_abs_with_rescale_legalization(mlir_text, sites))

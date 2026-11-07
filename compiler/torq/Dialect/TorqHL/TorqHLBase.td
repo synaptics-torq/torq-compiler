@@ -23,6 +23,9 @@ def TorqHL_Dialect : Dialect {
   }];
   let useDefaultAttributePrinterParser = 1;
   let useDefaultTypePrinterParser = 1;
+  // Since IREE 3.13, LLVM requires assembly formats to bind all properties
+  // unless the dialect opts out. Keep the existing syntax for now.
+  let useStrictPropertiesInAssemblyFormat = 0;
 }
 
 class TorqHL_Op<string mnemonic, list<Trait> traits = []> :

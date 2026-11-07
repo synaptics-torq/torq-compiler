@@ -34,7 +34,7 @@ module {
         ins(%add, %mult, %shift : tensor<1x1x1x2048xi32>, tensor<2048xi32>, tensor<2048xi8>)
         outs(%init2 : tensor<1x1x1x2048xi8>) {
         ^bb0(%a: i32, %m: i32, %s: i8, %o: i8):
-          %sc = tosa.apply_scale %a, %m, %s {rounding_mode = DOUBLE_ROUND} : (i32, i32, i8) -> i32
+          %sc = tosa.apply_scale %a, %m, %s rounding_mode<DOUBLE_ROUND> : (i32, i32, i8) -> i32
           %add2 = arith.addi %sc, %cozp : i32
           %mx = arith.maxsi %add2, %cmin : i32
           %mn = arith.minsi %mx, %cmax : i32

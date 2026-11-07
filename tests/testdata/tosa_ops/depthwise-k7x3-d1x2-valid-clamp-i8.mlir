@@ -6,7 +6,7 @@
 // inputs must be dense: read with two DEDR sets, the second one overwrote the result of the first
 // (synaptics-torq/torq-compiler-dev#2853). Random weights.
 func.func @main(%92: tensor<1x7x16x64xi8>) -> tensor<1x1x12x64xi8> {
-    %0 = tosa.const_shape  {values = dense<[7, 3, 64, 1]> : tensor<4xindex>} : () -> !tosa.shape<4>
+    %0 = tosa.const_shape values(dense<[7, 3, 64, 1]> : tensor<4xindex>) : () -> !tosa.shape<4>
     %10 = "tosa.const"() <{values = dense<-16> : tensor<1xi8>}> : () -> tensor<1xi8>
     %11 = "tosa.const"() <{values = dense<26> : tensor<64xi8>}> : () -> tensor<64xi8>
     %12 = "tosa.const"() <{values = dense<[21558, 25192, 21175, 23930, 21464, 22283, 21554, 22342, 24264, 24649, 25914, 22018, 23007, 22053, 25953, 23505, 26141, 25163, 23018, 22935, 23005, 24615, 25334, 23938, 22295, 26443, 25188, 24155, 25808, 23363, 23294, 22196, 21006, 22797, 21260, 25366, 24918, 24131, 25787, 22557, 22019, 24578, 23532, 25464, 22918, 26179, 21595, 21223, 26317, 26358, 24848, 22574, 26320, 23609, 26032, 22736, 26235, 21563, 23882, 25132, 24858, 21521, 24849, 23083]> : tensor<64xi16>}> : () -> tensor<64xi16>
@@ -19,12 +19,12 @@ func.func @main(%92: tensor<1x7x16x64xi8>) -> tensor<1x1x12x64xi8> {
     %50 = "tosa.const"() <{values = dense<-128> : tensor<1xi8>}> : () -> tensor<1xi8>
     %51 = "tosa.const"() <{values = dense<0> : tensor<1xi32>}> : () -> tensor<1xi32>
     %57 = "tosa.const"() <{values = dense<0> : tensor<1xi8>}> : () -> tensor<1xi8>
-    %93 = tosa.conv2d %92, %18, %17, %50, %57 {acc_type = i32, dilation = array<i64: 1, 1>, pad = array<i64: 0, 0, 0, 0>, stride = array<i64: 1, 1>} : (tensor<1x7x16x64xi8>, tensor<64x1x1x64xi8>, tensor<64xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x7x16x64xi32>
-    %94 = tosa.rescale %93, %16, %15, %51, %50 {input_unsigned = false, output_unsigned = false, per_channel = true, rounding_mode = SINGLE_ROUND, scale32 = false} : (tensor<1x7x16x64xi32>, tensor<64xi16>, tensor<64xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x7x16x64xi8>
-    %95 = tosa.clamp %94 {max_val = 127 : i8, min_val = -128 : i8} : (tensor<1x7x16x64xi8>) -> tensor<1x7x16x64xi8>
+    %93 = tosa.conv2d %92, %18, %17, %50, %57 pad([0, 0, 0, 0]) stride([1, 1]) dilation([1, 1]) acc_type(i32) : (tensor<1x7x16x64xi8>, tensor<64x1x1x64xi8>, tensor<64xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x7x16x64xi32>
+    %94 = tosa.rescale %93, %16, %15, %51, %50 scale32(false) rounding_mode<SINGLE_ROUND> per_channel(true) input_unsigned(false) output_unsigned(false) : (tensor<1x7x16x64xi32>, tensor<64xi16>, tensor<64xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x7x16x64xi8>
+    %95 = tosa.clamp %94 min_val(-128 : i8) max_val(127 : i8) : (tensor<1x7x16x64xi8>) -> tensor<1x7x16x64xi8>
     %96 = tosa.reshape %14, %0 : (tensor<1x7x3x64xi8>, !tosa.shape<4>) -> tensor<7x3x64x1xi8>
-    %97 = tosa.depthwise_conv2d %95, %96, %13, %50, %57 {acc_type = i32, dilation = array<i64: 1, 2>, pad = array<i64: 0, 0, 0, 0>, stride = array<i64: 1, 1>} : (tensor<1x7x16x64xi8>, tensor<7x3x64x1xi8>, tensor<64xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x1x12x64xi32>
-    %98 = tosa.rescale %97, %12, %11, %51, %10 {input_unsigned = false, output_unsigned = false, per_channel = true, rounding_mode = SINGLE_ROUND, scale32 = false} : (tensor<1x1x12x64xi32>, tensor<64xi16>, tensor<64xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x1x12x64xi8>
-    %99 = tosa.clamp %98 {max_val = 127 : i8, min_val = -16 : i8} : (tensor<1x1x12x64xi8>) -> tensor<1x1x12x64xi8>
+    %97 = tosa.depthwise_conv2d %95, %96, %13, %50, %57 pad([0, 0, 0, 0]) stride([1, 1]) dilation([1, 2]) acc_type(i32) : (tensor<1x7x16x64xi8>, tensor<7x3x64x1xi8>, tensor<64xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x1x12x64xi32>
+    %98 = tosa.rescale %97, %12, %11, %51, %10 scale32(false) rounding_mode<SINGLE_ROUND> per_channel(true) input_unsigned(false) output_unsigned(false) : (tensor<1x1x12x64xi32>, tensor<64xi16>, tensor<64xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x1x12x64xi8>
+    %99 = tosa.clamp %98 min_val(-16 : i8) max_val(127 : i8) : (tensor<1x1x12x64xi8>) -> tensor<1x1x12x64xi8>
     return %99 : tensor<1x1x12x64xi8>
 }

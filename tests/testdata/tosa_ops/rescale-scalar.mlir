@@ -5,7 +5,7 @@ module {
     %cst_0 = arith.constant dense<30> : tensor<1xi8>
     %cst_1 = arith.constant dense<-128> : tensor<1xi8>
     %cst_2 = arith.constant dense<0> : tensor<1xi32>
-    %1 = tosa.rescale %0, %cst, %cst_0, %cst_1, %cst_2 {input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<i8>, tensor<1xi32>, tensor<1xi8>, tensor<1xi8>, tensor<1xi32>) -> tensor<i32>
+    %1 = tosa.rescale %0, %cst, %cst_0, %cst_1, %cst_2 scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(false) input_unsigned(false) output_unsigned(false) : (tensor<i8>, tensor<1xi32>, tensor<1xi8>, tensor<1xi8>, tensor<1xi32>) -> tensor<i32>
     return %1 : tensor<i32>
   }
 }

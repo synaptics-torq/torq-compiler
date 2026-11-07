@@ -6,7 +6,7 @@
 
 // ReciprocalOpPattern
 // -------------------
-// Lower a bf16 linalg.reciprocal directly to the torq_hl LUT pipeline:
+// Lower a bf16 reciprocal linalg.elementwise directly to the torq_hl LUT pipeline:
 //
 //   recip bits = (0x7E80 - x) + mantissaLUT[x & 0xFF]        (i16 wrap-around)
 //
@@ -45,17 +45,20 @@ namespace mlir::syna::torq {
 
 namespace {
 
-class ReciprocalOpPattern : public OpRewritePattern<linalg::ReciprocalOp> {
+class ReciprocalOpPattern : public OpRewritePattern<linalg::ElementwiseOp> {
   public:
     ReciprocalOpPattern(MLIRContext *context)
-        : OpRewritePattern<linalg::ReciprocalOp>(context, /*benefit=*/10) {
+        : OpRewritePattern<linalg::ElementwiseOp>(context, /*benefit=*/10) {
         setDebugName("ReciprocalOpPattern");
     }
 
     LogicalResult
-    matchAndRewrite(linalg::ReciprocalOp op, PatternRewriter &rewriter) const override {
+    matchAndRewrite(linalg::ElementwiseOp op, PatternRewriter &rewriter) const override {
 
         // checks
+        if (op.getKind() != linalg::ElementwiseKind::reciprocal) {
+            return rewriter.notifyMatchFailure(op, "Expected a reciprocal");
+        }
         if (op.getInputs().size() != 1) {
             return rewriter.notifyMatchFailure(op, "Expected exactly one input");
         }

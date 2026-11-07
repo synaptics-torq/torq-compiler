@@ -6,9 +6,9 @@ module attributes {tf_saved_model.semantics, tfl.description = "MLIR Converted."
     %3 = "tosa.const"() <{values = dense<0> : tensor<1xi48>}> : () -> tensor<1xi48>
     %4 = "tosa.const"() <{values = dense<0> : tensor<1xi16>}> : () -> tensor<1xi16>
     %5 = "tosa.const"() <{values = dense<0> : tensor<1xi8>}> : () -> tensor<1xi8>
-    %6 = tosa.conv2d %arg0, %2, %3, %4, %5 {acc_type = i48, dilation = array<i64: 1, 1>, pad = array<i64: 0, 1, 0, 1>, stride = array<i64: 2, 2>} : (tensor<1x64x64x1xi16>, tensor<1x3x3x1xi8>, tensor<1xi48>, tensor<1xi16>, tensor<1xi8>) -> tensor<1x32x32x1xi48>
-    %7 = tosa.rescale %6, %1, %0, %3, %4 {input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = "SINGLE_ROUND", scale32 = false} : (tensor<1x32x32x1xi48>, tensor<1xi16>, tensor<1xi8>, tensor<1xi48>, tensor<1xi16>) -> tensor<1x32x32x1xi16>
-    %8 = tosa.clamp %7 {max_val = 32767 : i16, min_val = 0 : i16} : (tensor<1x32x32x1xi16>) -> tensor<1x32x32x1xi16>
+    %6 = tosa.conv2d %arg0, %2, %3, %4, %5 pad([0, 1, 0, 1]) stride([2, 2]) dilation([1, 1]) acc_type(i48) : (tensor<1x64x64x1xi16>, tensor<1x3x3x1xi8>, tensor<1xi48>, tensor<1xi16>, tensor<1xi8>) -> tensor<1x32x32x1xi48>
+    %7 = tosa.rescale %6, %1, %0, %3, %4 scale32(false) rounding_mode<"SINGLE_ROUND"> per_channel(false) input_unsigned(false) output_unsigned(false) : (tensor<1x32x32x1xi48>, tensor<1xi16>, tensor<1xi8>, tensor<1xi48>, tensor<1xi16>) -> tensor<1x32x32x1xi16>
+    %8 = tosa.clamp %7 min_val(0 : i16) max_val(32767 : i16) : (tensor<1x32x32x1xi16>) -> tensor<1x32x32x1xi16>
     return %8 : tensor<1x32x32x1xi16>
   }
 }

@@ -379,9 +379,11 @@ class BfloatDivfPattern : public OpRewritePattern<linalg::GenericOp> {
                 cast<RankedTensorType>(output.getType()).getRank(), rewriter.getContext()
             )
         );
-        auto recip =
-            linalg::ReciprocalOp::create(rewriter, srcOp.getLoc(), denominator, srcOp.getOutputs())
-                .getResult(0);
+        auto recip = linalg::ElementwiseOp::create(
+                         rewriter, srcOp.getLoc(), ValueRange{denominator}, srcOp.getOutputs(),
+                         linalg::ElementwiseKind::reciprocal
+        )
+                         .getResult(0);
 
         rewriter.replaceOp(
             srcOp,
@@ -406,16 +408,19 @@ static llvm::cl::opt<bool> clEnableTorqReciprocalInf(
     llvm::cl::init(false)
 );
 
-struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
+struct BfloatReciprocalPattern : public OpRewritePattern<linalg::ElementwiseOp> {
     BfloatReciprocalPattern(MLIRContext *context)
-        : OpRewritePattern<linalg::ReciprocalOp>(context, /*benefit=*/0) {
+        : OpRewritePattern<linalg::ElementwiseOp>(context, /*benefit=*/0) {
         setDebugName("BfloatReciprocalPattern");
     }
     LogicalResult
-    matchAndRewrite(linalg::ReciprocalOp op, PatternRewriter &rewriter) const override {
+    matchAndRewrite(linalg::ElementwiseOp op, PatternRewriter &rewriter) const override {
+        if (op.getKind() != linalg::ElementwiseKind::reciprocal) {
+            return rewriter.notifyMatchFailure(op, "Expected a reciprocal");
+        }
 
         // The default (non-inf) bf16 reciprocal is lowered directly from
-        // linalg.reciprocal by ReciprocalOpPattern in LinalgToTorqHL; this
+        // the reciprocal linalg.elementwise by ReciprocalOpPattern in LinalgToTorqHL; this
         // decomposition only handles the --torq-enable-reciprocal-inf variant.
         if (!clEnableTorqReciprocalInf) {
             return rewriter.notifyMatchFailure(

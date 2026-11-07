@@ -614,7 +614,9 @@ std::optional<int64_t> getElementwiseSlicingDim(Operation *op, StringRef *reason
         return std::nullopt;
     };
 
-    if (!isa<linalg::GenericOp, linalg::ReciprocalOp>(op))
+    auto elementwiseOp = dyn_cast<linalg::ElementwiseOp>(op);
+    if (!isa<linalg::GenericOp>(op) &&
+        !(elementwiseOp && elementwiseOp.getKind() == linalg::ElementwiseKind::reciprocal))
         return skip("not an elementwise generic or a reciprocal");
 
     // peelAndSlice skips these ops too (for elementwise ops, Host ones are compile-time
@@ -711,18 +713,20 @@ struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
     }
 }; // class ElementwisePattern
 
-// Reciprocal pattern. LinalgToTorqHL lowers linalg.reciprocal directly to a table
-// lookup, so it reaches slicing as a named op that ElementwisePattern (which only sees
+// Reciprocal pattern. LinalgToTorqHL lowers the reciprocal linalg.elementwise directly to
+// a table lookup, so it reaches slicing as a named op that ElementwisePattern (which only sees
 // linalg.generic) would leave on one slice. Slice it the same way: on the leftmost
 // non-unit dimension.
-struct ReciprocalPattern : public OpRewritePattern<linalg::ReciprocalOp> {
+struct ReciprocalPattern : public OpRewritePattern<linalg::ElementwiseOp> {
     int64_t sliceCount_;
 
     ReciprocalPattern(MLIRContext *context, int64_t sliceCount)
-        : OpRewritePattern<linalg::ReciprocalOp>(context), sliceCount_(sliceCount) {}
+        : OpRewritePattern<linalg::ElementwiseOp>(context), sliceCount_(sliceCount) {}
 
     LogicalResult
-    matchAndRewrite(linalg::ReciprocalOp reciprocalOp, PatternRewriter &rewriter) const override {
+    matchAndRewrite(linalg::ElementwiseOp reciprocalOp, PatternRewriter &rewriter) const override {
+        if (reciprocalOp.getKind() != linalg::ElementwiseKind::reciprocal)
+            return rewriter.notifyMatchFailure(reciprocalOp, "not a reciprocal");
         StringRef reason;
         std::optional<int64_t> slicingIter = getElementwiseSlicingDim(reciprocalOp, &reason);
         if (!slicingIter)

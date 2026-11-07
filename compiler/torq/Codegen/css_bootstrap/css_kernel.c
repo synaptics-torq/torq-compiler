@@ -180,10 +180,13 @@ void main(
     iree_hal_executable_workgroup_state_v0_t *workgroup_state
 );
 
-static inline void memset(void *ptr, int value, size_t num) {
+// Not static: clang can turn byte loops and struct clears into memset calls even with
+// -fno-builtin, and the hard-float CSS configs link no libc that would provide it.
+void *memset(void *ptr, int value, size_t num) {
     for (size_t i = 0; i < num; i++) {
         ((char *)ptr)[i] = (char)value;
     }
+    return ptr;
 }
 
 void trap_handler(void) {

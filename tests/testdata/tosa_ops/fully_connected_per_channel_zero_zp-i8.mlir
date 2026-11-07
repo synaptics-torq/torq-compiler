@@ -10,13 +10,13 @@ module {
     %output_zp = "tosa.const"() <{values = dense<3> : tensor<1xi8>}> : () -> tensor<1xi8>
     %multiplier = "tosa.const"() <{values = dense<[1947060140, 1743422415, 1520028602, 2123660442, 1861005555, 1235609193, 1807019266, 1091827547]> : tensor<8xi32>}> : () -> tensor<8xi32>
     %shift = "tosa.const"() <{values = dense<[40, 42, 40, 40, 42, 42, 40, 41]> : tensor<8xi8>}> : () -> tensor<8xi8>
-    %in_shape = tosa.const_shape {values = dense<[4, 1, 1, 16]> : tensor<4xindex>} : () -> !tosa.shape<4>
-    %w_shape = tosa.const_shape {values = dense<[8, 1, 1, 16]> : tensor<4xindex>} : () -> !tosa.shape<4>
-    %out_shape = tosa.const_shape {values = dense<[4, 8]> : tensor<2xindex>} : () -> !tosa.shape<2>
+    %in_shape = tosa.const_shape values(dense<[4, 1, 1, 16]> : tensor<4xindex>) : () -> !tosa.shape<4>
+    %w_shape = tosa.const_shape values(dense<[8, 1, 1, 16]> : tensor<4xindex>) : () -> !tosa.shape<4>
+    %out_shape = tosa.const_shape values(dense<[4, 8]> : tensor<2xindex>) : () -> !tosa.shape<2>
     %input = tosa.reshape %arg0, %in_shape : (tensor<4x16xi8>, !tosa.shape<4>) -> tensor<4x1x1x16xi8>
     %filter = tosa.reshape %weights, %w_shape : (tensor<8x16xi8>, !tosa.shape<4>) -> tensor<8x1x1x16xi8>
-    %conv = tosa.conv2d %input, %filter, %bias, %input_zp, %weight_zp {acc_type = i32, dilation = array<i64: 1, 1>, pad = array<i64: 0, 0, 0, 0>, stride = array<i64: 1, 1>} : (tensor<4x1x1x16xi8>, tensor<8x1x1x16xi8>, tensor<8xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<4x1x1x8xi32>
-    %rescaled = tosa.rescale %conv, %multiplier, %shift, %acc_zp, %output_zp {input_unsigned = false, output_unsigned = false, per_channel = true, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<4x1x1x8xi32>, tensor<8xi32>, tensor<8xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<4x1x1x8xi8>
+    %conv = tosa.conv2d %input, %filter, %bias, %input_zp, %weight_zp pad([0, 0, 0, 0]) stride([1, 1]) dilation([1, 1]) acc_type(i32) : (tensor<4x1x1x16xi8>, tensor<8x1x1x16xi8>, tensor<8xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<4x1x1x8xi32>
+    %rescaled = tosa.rescale %conv, %multiplier, %shift, %acc_zp, %output_zp scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(true) input_unsigned(false) output_unsigned(false) : (tensor<4x1x1x8xi32>, tensor<8xi32>, tensor<8xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<4x1x1x8xi8>
     %out = tosa.reshape %rescaled, %out_shape : (tensor<4x1x1x8xi8>, !tosa.shape<2>) -> tensor<4x8xi8>
     return %out : tensor<4x8xi8>
   }

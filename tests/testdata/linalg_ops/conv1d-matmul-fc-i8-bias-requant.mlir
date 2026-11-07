@@ -68,7 +68,7 @@ module {
         ins(%biased, %multiplier, %shift : tensor<1x2x4xi32>, tensor<2xi32>, tensor<2xi8>)
         outs(%req_empty : tensor<1x2x4xi8>) {
       ^bb0(%in: i32, %mul: i32, %sh: i8, %out: i8):
-        %scaled = tosa.apply_scale %in, %mul, %sh {rounding_mode = DOUBLE_ROUND} : (i32, i32, i8) -> i32
+        %scaled = tosa.apply_scale %in, %mul, %sh rounding_mode<DOUBLE_ROUND> : (i32, i32, i8) -> i32
         %with_zp = arith.addi %scaled, %c3_i32 : i32
         %clamp_min = arith.maxsi %with_zp, %c_min : i32
         %clamp_max = arith.minsi %clamp_min, %c_max : i32

@@ -17,8 +17,8 @@ module attributes {tf_saved_model.semantics} {
     %dw_w = "tosa.const"() <{values = dense<-3.125000e-02> : tensor<3x3x48x1xbf16>}> : () -> tensor<3x3x48x1xbf16>
     %dw_b = "tosa.const"() <{values = dense<9.375000e-02> : tensor<48xbf16>}> : () -> tensor<48xbf16>
     %zp = arith.constant dense<0.000000e+00> : tensor<1xbf16>
-    %conv = tosa.conv2d %arg0, %conv_w, %conv_b, %zp, %zp {acc_type = f32, dilation = array<i64: 1, 1>, pad = array<i64: 0, 1, 0, 1>, stride = array<i64: 2, 2>} : (tensor<1x12x1280x24xbf16>, tensor<48x3x3x24xbf16>, tensor<48xbf16>, tensor<1xbf16>, tensor<1xbf16>) -> tensor<1x6x640x48xbf16>
-    %dw = tosa.depthwise_conv2d %conv, %dw_w, %dw_b, %zp, %zp {acc_type = f32, dilation = array<i64: 1, 1>, pad = array<i64: 1, 1, 1, 1>, stride = array<i64: 1, 1>} : (tensor<1x6x640x48xbf16>, tensor<3x3x48x1xbf16>, tensor<48xbf16>, tensor<1xbf16>, tensor<1xbf16>) -> tensor<1x6x640x48xbf16>
+    %conv = tosa.conv2d %arg0, %conv_w, %conv_b, %zp, %zp pad([0, 1, 0, 1]) stride([2, 2]) dilation([1, 1]) acc_type(f32) : (tensor<1x12x1280x24xbf16>, tensor<48x3x3x24xbf16>, tensor<48xbf16>, tensor<1xbf16>, tensor<1xbf16>) -> tensor<1x6x640x48xbf16>
+    %dw = tosa.depthwise_conv2d %conv, %dw_w, %dw_b, %zp, %zp pad([1, 1, 1, 1]) stride([1, 1]) dilation([1, 1]) acc_type(f32) : (tensor<1x6x640x48xbf16>, tensor<3x3x48x1xbf16>, tensor<48xbf16>, tensor<1xbf16>, tensor<1xbf16>) -> tensor<1x6x640x48xbf16>
     return %dw : tensor<1x6x640x48xbf16>
   }
 }

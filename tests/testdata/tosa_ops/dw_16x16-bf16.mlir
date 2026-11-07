@@ -4,7 +4,7 @@ module attributes {tf_saved_model.semantics} {
     %0 = "tosa.const"() <{values = dense<[1.100000e+01, 2.200000e+01]> : tensor<2xbf16>}> : () -> tensor<2xbf16>
     %1 = "tosa.const"() <{values = dense<[[[[1.500000e+01], [7.000000e+00]], [[1.800000e+01], [8.000000e+00]], [[1.200000e+01], [8.500000e+00]]], [[[1.400000e+01], [4.000000e+00]], [[9.000000e+00], [9.000000e+00]], [[8.000000e+00], [6.000000e+00]]], [[[1.600000e+01], [9.500000e+00]], [[1.100000e+01], [6.000000e+00]], [[1.925000e+01], [7.000000e+00]]]]> : tensor<3x3x2x1xbf16>}> : () -> tensor<3x3x2x1xbf16>
     %cst = arith.constant dense<0.000000e+00> : tensor<1xbf16>
-    %2 = tosa.depthwise_conv2d %arg0, %1, %0, %cst, %cst {acc_type = f32, dilation = array<i64: 1, 1>, pad = array<i64: 1, 1, 1, 1>, stride = array<i64: 1, 1>} : (tensor<1x16x16x2xbf16>, tensor<3x3x2x1xbf16>, tensor<2xbf16>, tensor<1xbf16>, tensor<1xbf16>) -> tensor<1x16x16x2xbf16>
+    %2 = tosa.depthwise_conv2d %arg0, %1, %0, %cst, %cst pad([1, 1, 1, 1]) stride([1, 1]) dilation([1, 1]) acc_type(f32) : (tensor<1x16x16x2xbf16>, tensor<3x3x2x1xbf16>, tensor<2xbf16>, tensor<1xbf16>, tensor<1xbf16>) -> tensor<1x16x16x2xbf16>
     return %2 : tensor<1x16x16x2xbf16>
   }
 }

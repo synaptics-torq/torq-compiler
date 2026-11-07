@@ -10,10 +10,10 @@ module {
     %mult_out = "tosa.const"() <{values = dense<1227697152> : tensor<1xi32>}> : () -> tensor<1xi32>
     %shift_out = "tosa.const"() <{values = dense<38> : tensor<1xi8>}> : () -> tensor<1xi8>
     %zp_out = "tosa.const"() <{values = dense<-27> : tensor<1xi8>}> : () -> tensor<1xi8>
-    %a = tosa.rescale %arg0, %mult_up, %shift_up, %zp_a, %zp_i32 {input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<2x5x70xi8>, tensor<1xi32>, tensor<1xi8>, tensor<1xi8>, tensor<1xi32>) -> tensor<2x5x70xi32>
-    %b = tosa.rescale %arg1, %mult_up, %shift_up, %zp_b, %zp_i32 {input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<2x5x70xi8>, tensor<1xi32>, tensor<1xi8>, tensor<1xi8>, tensor<1xi32>) -> tensor<2x5x70xi32>
+    %a = tosa.rescale %arg0, %mult_up, %shift_up, %zp_a, %zp_i32 scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(false) input_unsigned(false) output_unsigned(false) : (tensor<2x5x70xi8>, tensor<1xi32>, tensor<1xi8>, tensor<1xi8>, tensor<1xi32>) -> tensor<2x5x70xi32>
+    %b = tosa.rescale %arg1, %mult_up, %shift_up, %zp_b, %zp_i32 scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(false) input_unsigned(false) output_unsigned(false) : (tensor<2x5x70xi8>, tensor<1xi32>, tensor<1xi8>, tensor<1xi8>, tensor<1xi32>) -> tensor<2x5x70xi32>
     %m = tosa.mul %a, %b, %mul_shift : (tensor<2x5x70xi32>, tensor<2x5x70xi32>, tensor<1xi8>) -> tensor<2x5x70xi32>
-    %r = tosa.rescale %m, %mult_out, %shift_out, %zp_i32, %zp_out {input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<2x5x70xi32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<2x5x70xi8>
+    %r = tosa.rescale %m, %mult_out, %shift_out, %zp_i32, %zp_out scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(false) input_unsigned(false) output_unsigned(false) : (tensor<2x5x70xi32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<2x5x70xi8>
     return %r : tensor<2x5x70xi8>
   }
 }

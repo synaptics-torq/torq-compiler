@@ -96,6 +96,10 @@ struct TORQSession : public PluginSession<
                 passManager.addNestedPass<func::FuncOp>(
                     mlir::torch::onnx_c::createTorchOnnxToTorchPass(onnxOptions)
                 );
+                // Give FuseQuantizedOps the Q/DQ form it fuses into integer ops.
+                passManager.addNestedPass<func::FuncOp>(
+                    mlir::syna::torq_hl::createLegacyOnnxQuantizationPass()
+                );
             }
             buildTorchToTorqHLOpsInputConversionPassPipeline(passManager);
             return true;

@@ -145,8 +145,15 @@ def tflite_model_file(request, case_config):
     return request.getfixturevalue(case_config.get('tflite_model_file', 'quantized_tflite_model_file'))    
 
 
+@versioned_hashable_object_fixture
+def tflite_to_tosa_conversion():
+    # Part of the version of the converted MLIR: change it when the way the TOSA text is
+    # produced changes, so that cached files are regenerated.
+    return {"text": "bytecode printed with the compiler's MLIR"}
+
+
 @versioned_generated_file_fixture("mlir")
-def tflite_mlir_model_file(request, versioned_file, tflite_model_file):
+def tflite_mlir_model_file(request, versioned_file, tflite_model_file, tflite_to_tosa_conversion):
     # Workaround until tosa-converter-for-tflite ships MR 95 (quantized Abs with
     # mismatched scales). See torq.testing.tflite_abs_workaround.
     from .tflite_abs_workaround import convert_tflite_to_tosa_mlir_with_abs_workaround

@@ -110,4 +110,22 @@ def InlineDenseResources :
 
 }
 
+def LegacyOnnxQuantization :
+    InterfacePass<"torq-legacy-onnx-quantization", "mlir::FunctionOpInterface"> {
+
+  let summary = "Rewrite quantized_decomposed Q/DQ ops to the quantized tensor form";
+
+  let description = [{
+    Since IREE 3.13, the ONNX importer emits QuantizeLinear and DequantizeLinear as
+    quantized_decomposed ops. torch-mlir's FuseQuantizedOps only fuses the quantized tensor
+    form that the importer emitted before (aten.quantize_per_tensor, aten.dequantize.self,
+    ...) into integer convolutions and matmuls. This pass rewrites the integer Q/DQ ops back
+    to that form; ops it can't represent there are left unchanged.
+  }];
+
+  let constructor =
+      "mlir::syna::torq_hl::createLegacyOnnxQuantizationPass()";
+
+}
+
 #endif // IREE_COMPILER_DIALECT_TORQHL_TRANSFORMS_PASSES_TD_

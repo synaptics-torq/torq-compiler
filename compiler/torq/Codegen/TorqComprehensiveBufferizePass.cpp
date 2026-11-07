@@ -262,11 +262,8 @@ void IREEComprehensiveBufferizePass::runOnOperation() {
     if (memSpaceFn)
         options.defaultMemorySpaceFn = memSpaceFn.value();
 
-    // Turning off checkParallelRegions assumes that we are not relying too much
-    // on bufferization being conservative. If we are, then this could cause race
-    // conditions. Turning this option off could be a good step in diagnosing
-    // data races on GPU.
-    options.checkParallelRegions = false;
+    // Disable parallel-region conflict checks to avoid conservative copies.
+    options.mayHaveParallelRegions = false;
 
     bufferization::BufferizationState bufferizationState;
     if (failed(runIREEOneShotBufferize(funcOp, options, bufferizationState))) {

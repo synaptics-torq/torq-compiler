@@ -14,7 +14,7 @@
 //
 // This raise runs before reduction tiling  and rewrites the whole thing into an efficient,
 // tileable form: cast x to bf16, take min and max in a single combined 2-output reduce
-// (one streaming pass over x), derive inv_scale via one linalg.reciprocal, and
+// (one streaming pass over x), derive inv_scale via one reciprocal, and
 // emit the reused runtime-scale quantize (mul + round + clamp -> uint8). We
 // recompute scale/zp ourselves. The bf16 zero-point
 //   zp = -min(0, min(x)) * inv_scale   (provably in [0,255], no clip needed)

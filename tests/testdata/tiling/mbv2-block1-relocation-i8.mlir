@@ -3,8 +3,8 @@
 // relocates the expand conv output to XRAM in every tile. One more row tile needs no relocation.
 module {
   func.func @main(%arg0: tensor<1x224x224x3xi8>) -> tensor<1x56x56x24xi8> {
-    %5 = tosa.const_shape  {values = dense<[3, 3, 96, 1]> : tensor<4xindex>} : () -> !tosa.shape<4>
-    %6 = tosa.const_shape  {values = dense<[3, 3, 32, 1]> : tensor<4xindex>} : () -> !tosa.shape<4>
+    %5 = tosa.const_shape values(dense<[3, 3, 96, 1]> : tensor<4xindex>) : () -> !tosa.shape<4>
+    %6 = tosa.const_shape values(dense<[3, 3, 32, 1]> : tensor<4xindex>) : () -> !tosa.shape<4>
     %254 = "tosa.const"() <{values = dense<[40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 39, 40, 40, 39, 39, 40, 40, 40, 40, 39, 39, 40, 40, 40]> : tensor<24xi8>}> : () -> tensor<24xi8>
     %255 = "tosa.const"() <{values = dense<[1402366423, 1707561571, 1989712400, 1619572343, 1244745310, 1138758892, 1561654018, 1486385474, 1706173398, 1453966453, 1426860732, 1779054405, 1659062122, 1152750617, 1899354783, 1385263604, 2103024486, 1961274194, 1694295780, 1263914057, 1398186888, 2063398431, 1184757428, 1705276898]> : tensor<24xi32>}> : () -> tensor<24xi32>
     %256 = "tosa.const"() <{values = dense<-1> : tensor<1xi8>}> : () -> tensor<1xi8>
@@ -33,24 +33,24 @@ module {
     %279 = "tosa.const"() <{values = dense<[61864, 27202, -16089, -1073741824, 251829, 176436, -101581, -1073741824, 29093, 57940, -30923, -1073741824, -1073741824, -1073741824, 161629, 92143, 182558, 71015, -141033, -1073741824, 215811, 261792, 40106, -7928, 242049, 74676, 264321, 25056, 1073741760, 236781, -24217, 761411]> : tensor<32xi32>}> : () -> tensor<32xi32>
     %280 = "tosa.const"() <{values = dense<-128> : tensor<1xi8>}> : () -> tensor<1xi8>
     %281 = "tosa.const"() <{values = dense<0> : tensor<1xi8>}> : () -> tensor<1xi8>
-    %282 = tosa.conv2d %arg0, %278, %279, %280, %281 {acc_type = i32, dilation = array<i64: 1, 1>, pad = array<i64: 0, 1, 0, 1>, stride = array<i64: 2, 2>} : (tensor<1x224x224x3xi8>, tensor<32x3x3x3xi8>, tensor<32xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x112x112x32xi32>
-    %283 = tosa.rescale %282, %276, %275, %277, %280 {input_unsigned = false, output_unsigned = false, per_channel = true, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<1x112x112x32xi32>, tensor<32xi32>, tensor<32xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x112x112x32xi8>
-    %284 = tosa.clamp %283 {max_val = 127 : i8, min_val = -128 : i8} : (tensor<1x112x112x32xi8>) -> tensor<1x112x112x32xi8>
+    %282 = tosa.conv2d %arg0, %278, %279, %280, %281 pad([0, 1, 0, 1]) stride([2, 2]) dilation([1, 1]) acc_type(i32) : (tensor<1x224x224x3xi8>, tensor<32x3x3x3xi8>, tensor<32xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x112x112x32xi32>
+    %283 = tosa.rescale %282, %276, %275, %277, %280 scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(true) input_unsigned(false) output_unsigned(false) : (tensor<1x112x112x32xi32>, tensor<32xi32>, tensor<32xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x112x112x32xi8>
+    %284 = tosa.clamp %283 min_val(-128 : i8) max_val(127 : i8) : (tensor<1x112x112x32xi8>) -> tensor<1x112x112x32xi8>
     %285 = tosa.reshape %274, %6 : (tensor<1x3x3x32xi8>, !tosa.shape<4>) -> tensor<3x3x32x1xi8>
-    %286 = tosa.depthwise_conv2d %284, %285, %273, %280, %281 {acc_type = i32, dilation = array<i64: 1, 1>, pad = array<i64: 1, 1, 1, 1>, stride = array<i64: 1, 1>} : (tensor<1x112x112x32xi8>, tensor<3x3x32x1xi8>, tensor<32xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x112x112x32xi32>
-    %287 = tosa.rescale %286, %272, %271, %277, %280 {input_unsigned = false, output_unsigned = false, per_channel = true, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<1x112x112x32xi32>, tensor<32xi32>, tensor<32xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x112x112x32xi8>
-    %288 = tosa.clamp %287 {max_val = 127 : i8, min_val = -128 : i8} : (tensor<1x112x112x32xi8>) -> tensor<1x112x112x32xi8>
-    %289 = tosa.conv2d %288, %270, %269, %280, %281 {acc_type = i32, dilation = array<i64: 1, 1>, pad = array<i64: 0, 0, 0, 0>, stride = array<i64: 1, 1>} : (tensor<1x112x112x32xi8>, tensor<16x1x1x32xi8>, tensor<16xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x112x112x16xi32>
-    %290 = tosa.rescale %289, %268, %267, %277, %281 {input_unsigned = false, output_unsigned = false, per_channel = true, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<1x112x112x16xi32>, tensor<16xi32>, tensor<16xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x112x112x16xi8>
-    %291 = tosa.conv2d %290, %266, %265, %281, %281 {acc_type = i32, dilation = array<i64: 1, 1>, pad = array<i64: 0, 0, 0, 0>, stride = array<i64: 1, 1>} : (tensor<1x112x112x16xi8>, tensor<96x1x1x16xi8>, tensor<96xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x112x112x96xi32>
-    %292 = tosa.rescale %291, %264, %263, %277, %280 {input_unsigned = false, output_unsigned = false, per_channel = true, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<1x112x112x96xi32>, tensor<96xi32>, tensor<96xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x112x112x96xi8>
-    %293 = tosa.clamp %292 {max_val = 127 : i8, min_val = -128 : i8} : (tensor<1x112x112x96xi8>) -> tensor<1x112x112x96xi8>
+    %286 = tosa.depthwise_conv2d %284, %285, %273, %280, %281 pad([1, 1, 1, 1]) stride([1, 1]) dilation([1, 1]) acc_type(i32) : (tensor<1x112x112x32xi8>, tensor<3x3x32x1xi8>, tensor<32xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x112x112x32xi32>
+    %287 = tosa.rescale %286, %272, %271, %277, %280 scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(true) input_unsigned(false) output_unsigned(false) : (tensor<1x112x112x32xi32>, tensor<32xi32>, tensor<32xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x112x112x32xi8>
+    %288 = tosa.clamp %287 min_val(-128 : i8) max_val(127 : i8) : (tensor<1x112x112x32xi8>) -> tensor<1x112x112x32xi8>
+    %289 = tosa.conv2d %288, %270, %269, %280, %281 pad([0, 0, 0, 0]) stride([1, 1]) dilation([1, 1]) acc_type(i32) : (tensor<1x112x112x32xi8>, tensor<16x1x1x32xi8>, tensor<16xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x112x112x16xi32>
+    %290 = tosa.rescale %289, %268, %267, %277, %281 scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(true) input_unsigned(false) output_unsigned(false) : (tensor<1x112x112x16xi32>, tensor<16xi32>, tensor<16xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x112x112x16xi8>
+    %291 = tosa.conv2d %290, %266, %265, %281, %281 pad([0, 0, 0, 0]) stride([1, 1]) dilation([1, 1]) acc_type(i32) : (tensor<1x112x112x16xi8>, tensor<96x1x1x16xi8>, tensor<96xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x112x112x96xi32>
+    %292 = tosa.rescale %291, %264, %263, %277, %280 scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(true) input_unsigned(false) output_unsigned(false) : (tensor<1x112x112x96xi32>, tensor<96xi32>, tensor<96xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x112x112x96xi8>
+    %293 = tosa.clamp %292 min_val(-128 : i8) max_val(127 : i8) : (tensor<1x112x112x96xi8>) -> tensor<1x112x112x96xi8>
     %294 = tosa.reshape %262, %5 : (tensor<1x3x3x96xi8>, !tosa.shape<4>) -> tensor<3x3x96x1xi8>
-    %295 = tosa.depthwise_conv2d %293, %294, %261, %280, %281 {acc_type = i32, dilation = array<i64: 1, 1>, pad = array<i64: 0, 1, 0, 1>, stride = array<i64: 2, 2>} : (tensor<1x112x112x96xi8>, tensor<3x3x96x1xi8>, tensor<96xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x56x56x96xi32>
-    %296 = tosa.rescale %295, %260, %259, %277, %280 {input_unsigned = false, output_unsigned = false, per_channel = true, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<1x56x56x96xi32>, tensor<96xi32>, tensor<96xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x56x56x96xi8>
-    %297 = tosa.clamp %296 {max_val = 127 : i8, min_val = -128 : i8} : (tensor<1x56x56x96xi8>) -> tensor<1x56x56x96xi8>
-    %298 = tosa.conv2d %297, %258, %257, %280, %281 {acc_type = i32, dilation = array<i64: 1, 1>, pad = array<i64: 0, 0, 0, 0>, stride = array<i64: 1, 1>} : (tensor<1x56x56x96xi8>, tensor<24x1x1x96xi8>, tensor<24xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x56x56x24xi32>
-    %299 = tosa.rescale %298, %255, %254, %277, %256 {input_unsigned = false, output_unsigned = false, per_channel = true, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<1x56x56x24xi32>, tensor<24xi32>, tensor<24xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x56x56x24xi8>
+    %295 = tosa.depthwise_conv2d %293, %294, %261, %280, %281 pad([0, 1, 0, 1]) stride([2, 2]) dilation([1, 1]) acc_type(i32) : (tensor<1x112x112x96xi8>, tensor<3x3x96x1xi8>, tensor<96xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x56x56x96xi32>
+    %296 = tosa.rescale %295, %260, %259, %277, %280 scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(true) input_unsigned(false) output_unsigned(false) : (tensor<1x56x56x96xi32>, tensor<96xi32>, tensor<96xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x56x56x96xi8>
+    %297 = tosa.clamp %296 min_val(-128 : i8) max_val(127 : i8) : (tensor<1x56x56x96xi8>) -> tensor<1x56x56x96xi8>
+    %298 = tosa.conv2d %297, %258, %257, %280, %281 pad([0, 0, 0, 0]) stride([1, 1]) dilation([1, 1]) acc_type(i32) : (tensor<1x56x56x96xi8>, tensor<24x1x1x96xi8>, tensor<24xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x56x56x24xi32>
+    %299 = tosa.rescale %298, %255, %254, %277, %256 scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(true) input_unsigned(false) output_unsigned(false) : (tensor<1x56x56x24xi32>, tensor<24xi32>, tensor<24xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x56x56x24xi8>
     return %299 : tensor<1x56x56x24xi8>
   }
 }

@@ -12,8 +12,8 @@ module {
     %izp = "tosa.const"() <{values = dense<0> : tensor<1xi16>}> : () -> tensor<1xi16>
     %wzp = "tosa.const"() <{values = dense<0> : tensor<1xi8>}> : () -> tensor<1xi8>
     %azp = "tosa.const"() <{values = dense<0> : tensor<1xi48>}> : () -> tensor<1xi48>
-    %dw = tosa.depthwise_conv2d %arg0, %w, %b, %izp, %wzp {acc_type = i48, dilation = array<i64: 1, 1>, pad = array<i64: 0, 0, 0, 0>, stride = array<i64: 1, 1>} : (tensor<1x4x4x45xi16>, tensor<4x4x45x1xi8>, tensor<45xi48>, tensor<1xi16>, tensor<1xi8>) -> tensor<1x1x1x45xi48>
-    %r = tosa.rescale %dw, %m, %s, %azp, %izp {input_unsigned = false, output_unsigned = false, per_channel = true, rounding_mode = SINGLE_ROUND, scale32 = false} : (tensor<1x1x1x45xi48>, tensor<45xi16>, tensor<45xi8>, tensor<1xi48>, tensor<1xi16>) -> tensor<1x1x1x45xi16>
+    %dw = tosa.depthwise_conv2d %arg0, %w, %b, %izp, %wzp pad([0, 0, 0, 0]) stride([1, 1]) dilation([1, 1]) acc_type(i48) : (tensor<1x4x4x45xi16>, tensor<4x4x45x1xi8>, tensor<45xi48>, tensor<1xi16>, tensor<1xi8>) -> tensor<1x1x1x45xi48>
+    %r = tosa.rescale %dw, %m, %s, %azp, %izp scale32(false) rounding_mode<SINGLE_ROUND> per_channel(true) input_unsigned(false) output_unsigned(false) : (tensor<1x1x1x45xi48>, tensor<45xi16>, tensor<45xi8>, tensor<1xi48>, tensor<1xi16>) -> tensor<1x1x1x45xi16>
     return %r : tensor<1x1x1x45xi16>
   }
 }

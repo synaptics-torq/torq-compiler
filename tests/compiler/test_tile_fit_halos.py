@@ -24,13 +24,12 @@ def fused_halo_model():
         lines += [
             f'    %w{i} = "tosa.const"() <{{values = dense<1> : {weight}}}> : () -> {weight}',
             f"    %c{i} = tosa.conv2d {value}, %w{i}, %bias, %zp, %zp "
-            f"{{acc_type = i32, dilation = array<i64: 1, 1>, "
-            f"pad = array<i64: {kh // 2}, {kh // 2}, {kw // 2}, {kw // 2}>, "
-            f"stride = array<i64: 1, 1>}} : ({src}, {weight}, tensor<160xi32>, "
+            f"pad([{kh // 2}, {kh // 2}, {kw // 2}, {kw // 2}]) stride([1, 1]) "
+            f"dilation([1, 1]) acc_type(i32) : ({src}, {weight}, tensor<160xi32>, "
             f"tensor<1xi8>, tensor<1xi8>) -> {acc}",
             f"    %r{i} = tosa.rescale %c{i}, %m, %s, %z32, %zp "
-            "{input_unsigned = false, output_unsigned = false, per_channel = false, "
-            "rounding_mode = DOUBLE_ROUND, scale32 = true} : "
+            "scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(false) "
+            "input_unsigned(false) output_unsigned(false) : "
             f"({acc}, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi8>) -> {dst}",
         ]
         value = f"%r{i}"

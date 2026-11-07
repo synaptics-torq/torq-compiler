@@ -2,6 +2,7 @@ set(sources
     ConvertUtilGlobalsToTorchLiteralsPass.cpp
     FormDispatchRegionsPass.cpp
     InlineDenseResourcesPass.cpp
+    LegacyOnnxQuantizationPass.cpp
     Passes.cpp
     TorqHLOptimizeSegmentationPass.cpp
 )
@@ -36,6 +37,7 @@ set(deps
     iree::compiler::Utils
     iree::compiler::plugins::input::Torch::torch-mlir::TorchConversionDialectIR
     iree::compiler::plugins::input::Torch::torch-mlir::TorchDialectIR
+    iree::compiler::plugins::input::Torch::torch-mlir::TorchOnnxToTorchPasses
     iree::target::torq::Conversions::LinalgToTorqHL::LinalgToTorqHL
     iree::target::torq::Conversions::TorqHLToTorqHW
 )

@@ -53,7 +53,7 @@ func.func @pool(%input: tensor<1x4x58x11xi8>) -> tensor<1x2x56x11xi8> {
     %multiplier = arith.trunci %quotient : i64 to i32
     %log8 = arith.trunci %log : i32 to i8
     %shift = arith.addi %log8, %c30_i8 : i8
-    %scaled = tosa.apply_scale %in, %multiplier, %shift {rounding_mode = SINGLE_ROUND} : (i32, i32, i8) -> i32
+    %scaled = tosa.apply_scale %in, %multiplier, %shift rounding_mode<SINGLE_ROUND> : (i32, i32, i8) -> i32
     %clamp_lo = arith.maxsi %scaled, %lo : i32
     %clamp_hi = arith.minsi %clamp_lo, %hi : i32
     %value = arith.trunci %clamp_hi : i32 to i8

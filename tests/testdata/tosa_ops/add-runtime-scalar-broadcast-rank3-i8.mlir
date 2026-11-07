@@ -15,11 +15,11 @@ module {
     %8 = "tosa.const"() <{values = dense<1090068368> : tensor<1xi32>}> : () -> tensor<1xi32>
     %9 = "tosa.const"() <{values = dense<49> : tensor<1xi8>}> : () -> tensor<1xi8>
     %10 = "tosa.const"() <{values = dense<-15> : tensor<1xi8>}> : () -> tensor<1xi8>
-    %13 = tosa.rescale %arg0, %0, %1, %2, %3 {input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<2x4x64xi8>, tensor<1xi32>, tensor<1xi8>, tensor<1xi8>, tensor<1xi32>) -> tensor<2x4x64xi32>
-    %14 = tosa.rescale %arg1, %0, %4, %5, %3 {input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<1x1x1xi8>, tensor<1xi32>, tensor<1xi8>, tensor<1xi8>, tensor<1xi32>) -> tensor<1x1x1xi32>
-    %15 = tosa.rescale %14, %6, %7, %3, %3 {input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<1x1x1xi32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi32>) -> tensor<1x1x1xi32>
+    %13 = tosa.rescale %arg0, %0, %1, %2, %3 scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(false) input_unsigned(false) output_unsigned(false) : (tensor<2x4x64xi8>, tensor<1xi32>, tensor<1xi8>, tensor<1xi8>, tensor<1xi32>) -> tensor<2x4x64xi32>
+    %14 = tosa.rescale %arg1, %0, %4, %5, %3 scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(false) input_unsigned(false) output_unsigned(false) : (tensor<1x1x1xi8>, tensor<1xi32>, tensor<1xi8>, tensor<1xi8>, tensor<1xi32>) -> tensor<1x1x1xi32>
+    %15 = tosa.rescale %14, %6, %7, %3, %3 scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(false) input_unsigned(false) output_unsigned(false) : (tensor<1x1x1xi32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi32>) -> tensor<1x1x1xi32>
     %16 = tosa.add %13, %15 : (tensor<2x4x64xi32>, tensor<1x1x1xi32>) -> tensor<2x4x64xi32>
-    %17 = tosa.rescale %16, %8, %9, %3, %10 {input_unsigned = false, output_unsigned = false, per_channel = false, rounding_mode = DOUBLE_ROUND, scale32 = true} : (tensor<2x4x64xi32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<2x4x64xi8>
+    %17 = tosa.rescale %16, %8, %9, %3, %10 scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(false) input_unsigned(false) output_unsigned(false) : (tensor<2x4x64xi32>, tensor<1xi32>, tensor<1xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<2x4x64xi8>
     return %17 : tensor<2x4x64xi8>
   }
 }

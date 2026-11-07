@@ -425,9 +425,9 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
                 *bcastDims
             );
             auto gOp = linalg::generalizeNamedOp(rewriter, op);
-            rewriter.replaceOp(bcastOp, gOp->getResults()[0]);
+            rewriter.replaceOp(bcastOp, (*gOp)->getResults()[0]);
 
-            input = gOp->getResults()[0];
+            input = (*gOp)->getResults()[0];
         }
 
         return true;
@@ -564,7 +564,7 @@ struct EltwiseBinaryConvert : public OpRewritePattern<linalg::GenericOp> {
         auto bcastOp =
             linalg::BroadcastOp::create(rewriter, input.getLoc(), src, init, broadcastDims);
         auto generalized = linalg::generalizeNamedOp(rewriter, bcastOp);
-        input = succeeded(generalized) ? generalized->getResults()[0] : bcastOp.getResults()[0];
+        input = succeeded(generalized) ? (*generalized)->getResults()[0] : bcastOp.getResults()[0];
         return true;
     }
 

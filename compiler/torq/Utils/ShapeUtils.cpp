@@ -64,7 +64,7 @@ static Value broadcastValueToShape(
         return broadcastOp.getResults()[0];
     }
 
-    return generalizedOp->getResults()[0];
+    return (*generalizedOp)->getResults()[0];
 }
 
 // Rebuilds scalar constants directly at the broadcasted shape to avoid creating
