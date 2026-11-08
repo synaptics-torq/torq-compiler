@@ -310,6 +310,12 @@ recomputed or reused. The version of the compiler and of the runtime is the hash
 they run and of the libraries it loads, so a rebuild to the same bytes, or a fresh install in CI,
 keeps the cache.
 
+Every version also includes a salt for what the results depend on beyond the fixtures' inputs:
+the installed Python packages (but the ``torq-*`` wheels), the iree and iree-turbine commits,
+the code of ``python/torq``, and the code of the test module (its file, the other modules of
+its folder that aren't tests, and the ``conftest.py`` files above it). A change in any of them
+recomputes the results of the tests it can affect.
+
 ## Cases from models
 
 The model test plans don't list their cases: they make them from models at collection time.

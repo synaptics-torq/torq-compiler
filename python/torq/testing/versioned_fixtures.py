@@ -11,7 +11,10 @@ import pickle
 from functools import wraps
 import inspect
 import hashlib
+import importlib.metadata
 import logging
+import subprocess
+import sys
 
 """
 This module provides decorators that allow to create fixtures that cache their results.
@@ -38,6 +41,79 @@ def pytest_configure(config):
     if config.getoption("--debug-cache"):
         logger.setLevel(logging.DEBUG)
         logger.addHandler(logging.StreamHandler())
+
+
+# What the cached results depend on beyond the inputs of the fixtures: the tools that make the
+# models and references, and the code of the tests. It is part of every version, so that a
+# cache shared across sessions is not reused by other code. Set for each test before its
+# fixtures.
+_salt = None
+
+# salt part of the session, computed once per process
+_global_salt = None
+
+# salt part of each test module
+_module_salts = {}
+
+
+def _files_hash(root, files):
+    return _hash_data([(str(Path(f).relative_to(root)), hashlib.sha256(Path(f).read_bytes()).hexdigest())
+                       for f in files])
+
+
+def _gitlink(root, path):
+    """The commit of a submodule in the checkout, without needing the submodule itself."""
+    try:
+        out = subprocess.run(["git", "ls-tree", "HEAD", path], cwd=root, capture_output=True, text=True,
+                             check=True).stdout.split()
+        return out[2] if len(out) > 2 else "none"
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def _get_global_salt(root):
+    """
+    The tools the tests use to make models and references (the installed packages but our own
+    wheels, which are versioned by their build time, and the iree and iree-turbine commits, which
+    also cover the LLVM-CPU references and the ONNX import), and the code of the torq packages.
+    """
+    global _global_salt
+    if _global_salt is None:
+        packages = sorted({f"{d.metadata['Name']}=={d.version}" for d in importlib.metadata.distributions()
+                           if d.metadata['Name'] and not d.metadata['Name'].lower().startswith("torq")})
+        _global_salt = _hash_data({
+            "python": sys.version,
+            "packages": packages,
+            "iree": _gitlink(root, "third_party/iree"),
+            "iree-turbine": _gitlink(root, "third_party/iree-turbine"),
+            "torq": _files_hash(root, sorted((root / "python" / "torq").rglob("*.py"))),
+        })
+    return _global_salt
+
+
+def _get_module_salt(root, module_path):
+    """
+    The code of a test module: its file, the helper modules next to it (not test_*.py) and the
+    conftest.py files above it.
+    """
+    if module_path not in _module_salts:
+        folder = module_path.parent
+        files = [module_path] + sorted(p for p in folder.glob("*.py") if not p.name.startswith("test_"))
+        files += [d / "conftest.py" for d in [folder, *folder.parents]
+                  if (d / "conftest.py").exists() and d.is_relative_to(root)]
+        _module_salts[module_path] = _files_hash(root, sorted(set(files)))
+    return _module_salts[module_path]
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    global _salt
+    root = Path(item.config.rootpath)
+    module_path = Path(item.path)
+    if module_path.is_relative_to(root):
+        _salt = _hash_data([_get_global_salt(root), _get_module_salt(root, module_path)])
+    else:
+        _salt = _get_global_salt(root)
 
 
 def _dataclass_dict_deep(obj):
@@ -163,6 +239,9 @@ def _get_fixture_params(kwargs):
         
         logger.debug("[param version] " + name + " -> " + value.version)
         input_params_versions.append(value.version)
+
+    if _salt is not None:
+        input_params_versions.append("salt." + _salt)
 
     return input_params_versions, kwargs_data
 
