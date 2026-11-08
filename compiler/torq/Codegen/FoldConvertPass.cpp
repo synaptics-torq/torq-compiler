@@ -1192,11 +1192,6 @@ class SinkSliceOutputConvert : public OpRewritePattern<torq_hl::ConvertOp> {
 class FoldConvertPass : public impl::FoldConvertBase<FoldConvertPass> {
   public:
     using FoldConvertBase<FoldConvertPass>::FoldConvertBase;
-    FoldConvertPass(const FoldConvertOptions &options) {
-        this->lramSize = options.lramSize;
-        this->shareSliceInputs = options.shareSliceInputs;
-        this->shareSliceOutputs = options.shareSliceOutputs;
-    }
     FoldConvertPass(const FoldConvertPass &pass) {
         this->lramSize = pass.lramSize;
         this->shareSliceInputs = pass.shareSliceInputs;

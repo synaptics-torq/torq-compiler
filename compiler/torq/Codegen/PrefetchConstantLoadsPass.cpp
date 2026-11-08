@@ -224,7 +224,8 @@ class PrefetchConstantLoadsPass
             SmallVector<int64_t> planned = live;
             SmallVector<int64_t> slack =
                 llvm::map_to_vector(waitRuns, [](const WaitRun &run) { return run.slack; });
-            SmallVector<std::pair<const ConstLoad *, Operation *>> moves;
+            // the load and the wait run it moves in front of
+            SmallVector<std::pair<const ConstLoad *, size_t>> moves;
             for (const ConstLoad &load : loads) {
                 // The wait runs before the alloc, nearest first.
                 auto it = llvm::partition_point(waitRuns, [&](const WaitRun &run) {
@@ -261,7 +262,7 @@ class PrefetchConstantLoadsPass
                 slack[*chosen] -= load.cycles;
                 for (int64_t i = waitRuns[*chosen].index; i < load.allocIndex; ++i)
                     planned[i] += load.bytes;
-                moves.emplace_back(&load, waitRuns[*chosen].firstWait);
+                moves.emplace_back(&load, *chosen);
             }
             if (moves.empty())
                 return;
@@ -269,7 +270,7 @@ class PrefetchConstantLoadsPass
             // Each moved op goes back in front of the next op that stays, if the
             // allocator rejects the result.
             DenseSet<Operation *> moved;
-            for (auto [load, wait] : moves)
+            for (auto [load, run] : moves)
                 moved.insert(load->ops.begin(), load->ops.end());
             SmallVector<std::pair<Operation *, Operation *>> undo;
             for (Operation &op : body) {
@@ -282,10 +283,25 @@ class PrefetchConstantLoadsPass
             }
 
             // A view that another load already moved further up stays there.
-            for (auto [load, wait] : moves) {
+            // Positions are tracked here rather than asked of the block: every
+            // moveBefore invalidates the block's op order, so isBeforeInBlock after
+            // it renumbers the whole body, and this loop became quadratic in the
+            // function size (95% of the compile time of a 4-layer encoder). Waits
+            // never move, so 2 * index orders them; an op moved in front of the
+            // wait at index w sits at 2 * w - 1, after every op it was moved with.
+            DenseMap<Operation *, int64_t> position;
+            auto positionOf = [&](Operation *op) {
+                auto it = position.find(op);
+                return it != position.end() ? it->second : 2 * index.lookup(op);
+            };
+            for (auto [load, run] : moves) {
+                Operation *wait = waitRuns[run].firstWait;
+                int64_t waitPos = 2 * waitRuns[run].index;
                 for (Operation *op : load->ops) {
-                    if (wait->isBeforeInBlock(op))
+                    if (waitPos < positionOf(op)) {
                         op->moveBefore(wait);
+                        position[op] = waitPos - 1;
+                    }
                 }
             }
             // The moves must not make the allocator swap more bytes than before.
