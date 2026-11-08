@@ -45,12 +45,17 @@
 #include "torq/Utils/MemoryUtils.h"
 #include "torq/Utils/TorqHw.h"
 
+#include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Object/Binary.h"
 #include "llvm/Object/IRObjectFile.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/xxhash.h"
 #include "llvm/TargetParser/Host.h"
+
+#include <mutex>
 
 #include "llvm/TargetParser/Triple.h"
 
@@ -105,6 +110,12 @@ static llvm::cl::opt<bool> clHostVectorize(
 
 namespace {
 
+// Linked CSS programs, keyed by everything the link reads (the linker options and the hashes of
+// the linker script and of the objects). TileAndFuse's memory-fit probes link the same programs as
+// the real pipeline, and each link starts an external lld process.
+std::mutex cssLinkCacheMutex;
+llvm::StringMap<std::vector<uint8_t>> cssLinkCache;
+
 class CssLinker {
 
   public:
@@ -137,6 +148,7 @@ class CssLinker {
         os.flush();
         os.close();
 
+        addInputHash(objectName, objectData);
         objectFiles.push_back(std::move(artifact));
     }
 
@@ -222,6 +234,28 @@ class CssLinker {
 
         std::string fullCommand = llvm::join(command, " ");
 
+        // The temporary paths change at every link: the key uses the other options and the
+        // hashes of the files' contents instead.
+        bool useCache = !asElf && !clKeepCssLinkingArtifacts;
+        std::string cacheKey;
+        if (useCache) {
+            llvm::StringSet<> paths{linkerScript.path, libraryFile.path};
+            for (auto &objectFile : objectFiles)
+                paths.insert(objectFile.path);
+            for (auto &arg : command) {
+                if (!paths.contains(arg))
+                    cacheKey += arg + "\n";
+            }
+            cacheKey += inputHashes;
+
+            std::lock_guard<std::mutex> lock(cssLinkCacheMutex);
+            auto it = cssLinkCache.find(cacheKey);
+            if (it != cssLinkCache.end()) {
+                codeVec.insert(codeVec.end(), it->second.begin(), it->second.end());
+                return success();
+            }
+        }
+
         int ret = system(fullCommand.c_str());
 
         auto bareMetalFileData = libraryFile.read();
@@ -263,6 +297,13 @@ class CssLinker {
             }
         }
 
+        if (useCache) {
+            std::lock_guard<std::mutex> lock(cssLinkCacheMutex);
+            cssLinkCache.try_emplace(
+                cacheKey, std::vector<uint8_t>(bareMetalFileData->begin(), bareMetalFileData->end())
+            );
+        }
+
         codeVec.insert(codeVec.end(), bareMetalFileData->begin(), bareMetalFileData->end());
 
         return success();
@@ -284,12 +325,21 @@ class CssLinker {
         os.write(linkerScript.c_str(), linkerScript.size());
         os.flush();
         os.close();
+
+        addInputHash("ld", linkerScript);
     }
 
   private:
+    void addInputHash(StringRef name, StringRef data) {
+        auto hash = llvm::xxh3_128bits(llvm::arrayRefFromStringRef(data));
+        inputHashes += name.str() + ":" + llvm::utohexstr(hash.high64, false, 16) +
+                       llvm::utohexstr(hash.low64, false, 16) + "\n";
+    }
+
     std::string libraryName;
     SmallVector<IREE::HAL::Artifact> objectFiles;
     IREE::HAL::Artifact linkerScript;
+    std::string inputHashes;
 };
 
 static FailureOr<std::vector<uint8_t>> linkSharedHostLibrary(
