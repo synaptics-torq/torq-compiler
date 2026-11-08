@@ -22,7 +22,7 @@ env:
 
 jobs:
   test_aws_fpga:    
-    name: Test on FPGA for ${{ matrix.chip_group }}
+    name: Test on FPGA for ${{ matrix.chip }}
     runs-on: ${{ format('torq-fpga-{0}-{1}', github.run_id, github.run_attempt) }}    
 
     timeout-minutes: 50
@@ -30,11 +30,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        chip_group: ${{ vars.TEST_GROUPS && fromJSON(vars.TEST_GROUPS) || fromJSON('["default.group"]') }}
+        # one job per chip; the FPGA_TEST_CHIPS repository variable lists them, e.g.
+        # ["sr200-v1"]. SL2610 is tested on the Astra Machina SL boards instead.
+        chip: ${{ vars.FPGA_TEST_CHIPS && fromJSON(vars.FPGA_TEST_CHIPS) || fromJSON('["sr200-v1"]') }}
 
     env:      
-      RUNTIME_PROFILING_OUTPUT_DIR: ${{ github.workspace }}/aws_fpga_profiling_logs_${{ matrix.chip_group }}
-      TEST_STATUS_REPORT_PATH: ${{ github.workspace }}/aws_fpga_test_status_${{ matrix.chip_group }}.json
+      RUNTIME_PROFILING_OUTPUT_DIR: ${{ github.workspace }}/aws_fpga_profiling_logs_${{ matrix.chip }}
+      TEST_STATUS_REPORT_PATH: ${{ github.workspace }}/aws_fpga_test_status_${{ matrix.chip }}.json
 
     steps:
     
@@ -68,21 +70,21 @@ jobs:
             -m "fpga_ci and not not_fpga_ci" -n auto --dist worksteal --slow-tests-first
             --torq-runtime-hw-type aws_fpga
             --torq-runtime-timeout=20
-            --torq-chips ${{ matrix.chip_group }}
+            --torq-chips ${{ matrix.chip }}
             --torq-runtime-profiling-output-dir=${{ env.RUNTIME_PROFILING_OUTPUT_DIR }}
             --tflite-layer-test-generate-full-model-only
             --ignore-binary-mtime
             ${{ env.GENERATE_STATUS_REPORT == 'true' && format('--try-xfails --save-test-status-report-to {0}', env.TEST_STATUS_REPORT_PATH) || '' }}
           ignore_failures: ${{ env.GENERATE_STATUS_REPORT }}
           torq_perf_server: ${{ env.DASHBOARD_SERVER }}
-          batch_name: fpga-${{ matrix.chip_group }}
+          batch_name: fpga-${{ matrix.chip }}
           s3_hf_cache_bucket: ${{ vars.SCCACHE_BUCKET }}
           s3_hf_cache_dir: hf_cache
       
       - name: Upload AWS FPGA profiling logs
         uses: actions/upload-artifact@v7
         with:
-          name: aws_fpga_profiling_logs_${{ matrix.chip_group }}
+          name: aws_fpga_profiling_logs_${{ matrix.chip }}
           path: ${{ env.RUNTIME_PROFILING_OUTPUT_DIR }}
           retention-days: 60
           
@@ -90,6 +92,6 @@ jobs:
         if: env.GENERATE_STATUS_REPORT == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: aws_fpga_test_status_${{ matrix.chip_group }}
+          name: aws_fpga_test_status_${{ matrix.chip }}
           path: ${{ env.TEST_STATUS_REPORT_PATH }}
           retention-days: 60

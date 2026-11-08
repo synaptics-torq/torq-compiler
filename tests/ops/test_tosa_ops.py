@@ -21,7 +21,7 @@ CONFIG = {
     # becomes a W-subview of the producer tile (the regression this test guards); with slicing
     # the work is split before tiling and the subview never forms.
     "conv_s2_dw_w_subview-bf16": {"torq_compiler_options": ["--torq-disable-slicing=true"]},
-    # Compiles in well under a second locally, but a CI run on sr200 (next.group) stalled past
+    # Compiles in well under a second locally, but a CI run on sr200-v1 stalled past
     # the 300s default compile budget. Double it so one-off runner stalls don't red the lane.
     "gather-i16": {"torq_compiler_timeout": 600},
     # Full-range int16 products overflow the 33-bit ACT input over the 113/128-long reduction;

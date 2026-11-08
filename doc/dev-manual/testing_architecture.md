@@ -245,9 +245,10 @@ Each chip is described by a JSON file in ``tests/testdata/chips`` (and in ``extr
 internal chips), e.g. ``sl2610-v1.json`` and ``sr200-v1.json``. To test one chip, name it:
 ``--torq-chips sr200-v1``.
 
-A ``.group`` file in the same directory lists several chips, so that one run tests them all.
-The default of ``--torq-chips`` is ``default.group``, and the CI jobs use one group each. The
-groups also let the public repository refer to chips of ``extras`` without naming them.
+The default of ``--torq-chips`` is ``sl2610-v1``. The CI jobs test one chip each: the
+``TEST_CHIPS``, ``FPGA_TEST_CHIPS`` and ``BOARD_TEST_CHIPS`` repository variables list the chips
+of the C model, FPGA and board jobs. They are set per repository, not in the workflow files, so
+the chips of ``extras`` are never named in the public repository.
 
 A ``case_config`` can depend on the runtime and the chip. ``test_tosa_ops.py`` does that to add
 compiler options on the FPGA only.

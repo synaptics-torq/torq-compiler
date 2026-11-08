@@ -3343,7 +3343,7 @@ void TileAndFusePass::tileAndFuse(
     // has already returned. Fix that, then drop this case.
     // $ pytest
     // tests/test_keras_app.py::test_keras_app_tflite_torq[layer_inceptionv3_conv2d_13-sim-xxx-v4]
-    // --torq-chips=next.group
+    // --torq-chips=xxx-v4
     case TileFit::FitsUnchanged:
         return;
 

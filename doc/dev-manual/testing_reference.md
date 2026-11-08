@@ -65,7 +65,7 @@ Source: ``pytest --help``, section "Custom options". The most used ones:
 
 | Option | What for |
 |---|---|
-| ``--torq-chips CHIPS`` | The chips to compile for: chip names or ``.group`` files, comma-separated, or ``all``. Default ``default.group`` |
+| ``--torq-chips CHIPS`` | The chips to compile for: chip names, comma-separated, or ``all``. Default ``sl2610-v1`` |
 | ``--torq-runtime-hw-type TYPES`` | The runtimes: ``sim`` (default), ``aws_fpga``, ``astra_machina`` |
 | ``--recompute-cache`` | Redo every step, ignoring the cache |
 | ``--debug-cache`` | Print why each cached step is reused or redone |
@@ -94,7 +94,6 @@ Source: ``pytest --help``, section "Custom options". The most used ones:
 | ``tests/ops/keras_ops-not-fpga-ci.txt`` | Keras op case names that get the ``not_fpga_ci`` marker |
 | ``tests/ops/keras_known_failures.py`` | ``SKIP_TESTS``: Keras op cases that are skipped (they crash the test process) |
 | ``tests/testdata/chips/<chip>.json`` | A chip description; ``extras/chips`` for internal chips |
-| ``tests/testdata/chips/<name>.group`` | A list of chip names, one per line |
 | ``tests/testdata/keras_ops/*.py`` | Keras op cases, see [Keras module](#keras-module) |
 | ``tests/testdata/torch_ops/*.py`` | PyTorch and ONNX op cases, see [PyTorch and ONNX module](#pytorch-and-onnx-module) |
 | ``tests/testdata/{tosa,linalg,stablehlo}_ops/*.mlir`` | MLIR op cases, see [MLIR file](#mlir-file) |
@@ -174,9 +173,9 @@ Sources: ``.github/workflows/test.yml`` (pull requests and merge queue), ``relea
 
 | Job (workflow) | Selection | Runtime, chips | Workers |
 |---|---|---|---|
-| C model (``test-cmodel.yml``) | ``-m ci``; on pull requests ``ci and not release_only``, unless ``run-release-only`` | ``sim``; one job per chip group of the ``TEST_GROUPS`` variable | 18, ``--dist worksteal --slow-tests-first`` |
-| AWS FPGA (``test-aws-fpga.yml``) | ``-m "fpga_ci and not not_fpga_ci"`` | ``aws_fpga``; one job per chip group | ``auto``, ``--dist worksteal --slow-tests-first`` |
-| Astra Machina SL (``test-astra-machina-sl.yml``) | ``-m astra_machina_sl_ci`` | ``astra_machina``, ``sl2610-v1`` | 4 |
+| C model (``test-cmodel.yml``) | ``-m ci``; on pull requests ``ci and not release_only``, unless ``run-release-only`` | ``sim``; one job per chip of the ``TEST_CHIPS`` variable | 18, ``--dist worksteal --slow-tests-first`` |
+| AWS FPGA (``test-aws-fpga.yml``) | ``-m "fpga_ci and not not_fpga_ci"`` | ``aws_fpga``; one job per chip of the ``FPGA_TEST_CHIPS`` variable (SL2610 runs on the boards instead) | ``auto``, ``--dist worksteal --slow-tests-first`` |
+| Astra Machina SL (``test-astra-machina-sl.yml``) | ``-m astra_machina_sl_ci`` | ``astra_machina``; one job per chip of the ``BOARD_TEST_CHIPS`` variable | 4 |
 | torq-lab (``test-torq-lab.yml``) | ``tests/lab/test_lab_*.py``, without the ``torq.testing`` plugin | none | 1 |
 
 - **When:** the C model and torq-lab jobs run on every pull request. The FPGA and board jobs run
@@ -184,7 +183,7 @@ Sources: ``.github/workflows/test.yml`` (pull requests and merge queue), ``relea
   the C model jobs pass (or are skipped).
 - **C model options:** ``--check-xfails``, ``--durations=30``, ``--torq-step-timings``, and
   compile-time profiles. The step timings and profiles are in the artifact
-  ``cmodel_compile_profiling_logs_<group>``.
+  ``cmodel_compile_profiling_logs_<chip>``.
 - **All jobs** pass ``--tflite-layer-test-generate-full-model-only`` and
   ``--ignore-binary-mtime``. They check out ``extras`` at the commit of
   ``scripts/extras.gitlink`` (update it with ``scripts/pin_extras.sh``), and upload their results

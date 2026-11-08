@@ -11,7 +11,7 @@ Usage:
     pytest tests/runtime/test_dma_throughput.py
         --torq-runtime-hw-type=astra_machina
         --torq-addr=root@10.3.120.54
-        --torq-chips=default.group
+        --torq-chips=sl2610-v1
         -v --recompute-cache
         --torq-runtime-profiling-output-dir=profile-dma -s
 """

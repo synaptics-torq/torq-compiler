@@ -81,7 +81,7 @@ def pytest_addoption(parser):
     parser.addoption("--debug-torq-compiler", type=int, default=0, help="Run torq compiler under gdb")
     parser.addoption("--trace-buffers", action="store_true", default=False, help="Enable tracing of buffers in the torq runtime")
     parser.addoption("--torq-runtime-hw-type", action="store", default="sim", help="Command separate list of target hw to use for torq tests (sim, aws_fpga)")
-    parser.addoption("--torq-chips", action="store", default="default.group", help="Command separate list of chips to compile models for")
+    parser.addoption("--torq-chips", action="store", default="sl2610-v1", help="Comma-separated list of chips to compile models for, or all")
     parser.addoption("--ignore-binary-mtime", action="store_true", default=False, help="Ignore binary mtime of binaries when deciding to invalidate cached fixtures")
     parser.addoption("--torq-compiler-timeout", type=int, default=60*5, help="Timeout in seconds for torq compiler invocations")
     parser.addoption("--torq-runtime-timeout", type=int, default=60*4, help="Timeout in seconds for torq runtime invocations")
@@ -199,20 +199,7 @@ def pytest_generate_tests(metafunc):
             chips.update(get_latest_chips())
         else:
 
-            all_chips = metafunc.config.getoption("torq_chips").split(",")
-
-            for chip in all_chips:
-                if chip.endswith(".group"):
-                    for root_dir in [TOPDIR / 'extras' / 'chips', TOPDIR / 'tests' / 'testdata' / 'chips']:
-                        group_file = root_dir / chip
-
-                        if not group_file.exists():
-                            continue
-                        
-                        with open(group_file, 'r') as f:
-                            chips.update([x.strip() for x in f.read().splitlines() if x.strip() != ""])
-                else:                    
-                    chips.add(chip)
+            chips.update(metafunc.config.getoption("torq_chips").split(","))
 
         chips = sorted(chips)
 

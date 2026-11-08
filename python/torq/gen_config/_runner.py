@@ -34,10 +34,6 @@ Behavior notes:
   instead of ``<compile dir>/ir``.
 - Reference outputs are cached on disk keyed by MLIR content hash.  All
   reference backends used here are deterministic, so this only saves time.
-- Outside a source checkout, chip group files (``extras/chips``,
-  ``tests/testdata/chips``) are unavailable: ``default.group`` falls back to
-  the built-in ``default`` chip (target ``SL2610``); other groups raise a
-  clear error.
 
 Exit code: 0 when every case passed or was skipped, 1 on any
 difference/error.
@@ -1399,29 +1395,7 @@ def _resolve_chip_configs(torq_hw: str) -> List[Dict[str, Any]]:
     if torq_hw == 'all':
         chips.update(_get_latest_chips())
     else:
-        for chip in torq_hw.split(","):
-            if chip.endswith(".group"):
-                found = False
-                for root_dir in [_TOPDIR / 'extras' / 'chips', _TOPDIR / 'tests' / 'testdata' / 'chips']:
-                    group_file = root_dir / chip
-                    if not group_file.exists():
-                        continue
-                    found = True
-                    with open(group_file, 'r') as f:
-                        chips.update([x.strip() for x in f.read().splitlines() if x.strip() != ""])
-                if not found:
-                    if chip == "default.group":
-                        # Standalone fallback outside a source checkout:
-                        # default.group ships sl2610-v1, whose JSON maps to the
-                        # built-in SL2610 target; "default" resolves to the same.
-                        chips.add("default")
-                    else:
-                        raise ValueError(
-                            f"Chip group file not found: {chip} (looked under "
-                            f"{_TOPDIR}/extras/chips and {_TOPDIR}/tests/testdata/chips)"
-                        )
-            else:
-                chips.add(chip)
+        chips.update(torq_hw.split(","))
 
     chips = sorted(chips)
     if len(chips) == 0:

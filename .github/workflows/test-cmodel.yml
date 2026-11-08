@@ -25,12 +25,14 @@ env:
 
 jobs:
   test_cmodel:
-    name: Test on C model for ${{ matrix.chip_group }}
+    name: Test on C model for ${{ matrix.chip }}
 
     strategy:
       fail-fast: false
       matrix:
-        chip_group: ${{ vars.TEST_GROUPS && fromJSON(vars.TEST_GROUPS) || fromJSON('["default.group"]') }}
+        # one job per chip; the TEST_CHIPS repository variable lists them, e.g.
+        # ["sl2610-v1", "sr200-v1"]
+        chip: ${{ vars.TEST_CHIPS && fromJSON(vars.TEST_CHIPS) || fromJSON('["sl2610-v1"]') }}
 
     timeout-minutes: 50
 
@@ -43,8 +45,8 @@ jobs:
       s3_cache_path: ${{ steps.run_cmodel_tests.outputs.s3_cache_path }}
 
     env:      
-      TEST_STATUS_REPORT_PATH: ${{ github.workspace }}/host_test_status_${{ matrix.chip_group }}.json
-      CMODEL_PROFILING_LOGS_PATH: ${{ github.workspace }}/cmodel_compile_profiling_logs_${{ matrix.chip_group }}
+      TEST_STATUS_REPORT_PATH: ${{ github.workspace }}/host_test_status_${{ matrix.chip }}.json
+      CMODEL_PROFILING_LOGS_PATH: ${{ github.workspace }}/cmodel_compile_profiling_logs_${{ matrix.chip }}
 
     steps:
       
@@ -74,7 +76,7 @@ jobs:
             -m "${{ env.RUN_RELEASE_ONLY == 'true' && 'ci' || 'ci and not release_only' }}"
             -n 18 --dist worksteal --slow-tests-first --durations=30
             --show-capture=no --tb=short --check-xfails
-            --torq-chips ${{ matrix.chip_group }}
+            --torq-chips ${{ matrix.chip }}
             --tflite-layer-test-generate-full-model-only
             --ignore-binary-mtime
             --torq-compile-time-profiling-output-dir=${{ env.CMODEL_PROFILING_LOGS_PATH }}
@@ -82,7 +84,7 @@ jobs:
             ${{ env.GENERATE_STATUS_REPORT == 'true' && format('--try-xfails --save-test-status-report-to={0}', env.TEST_STATUS_REPORT_PATH) || '' }}
           torq_perf_server: ${{ env.DASHBOARD_SERVER }}
           ignore_failures: ${{ env.GENERATE_STATUS_REPORT }}
-          batch_name: cmodel-${{ matrix.chip_group }}
+          batch_name: cmodel-${{ matrix.chip }}
           s3_hf_cache_bucket: ${{ vars.SCCACHE_BUCKET }}
           s3_hf_cache_dir: hf_cache
 
@@ -90,7 +92,7 @@ jobs:
         if: env.GENERATE_STATUS_REPORT == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: cmodel_test_status_${{ matrix.chip_group }}
+          name: cmodel_test_status_${{ matrix.chip }}
           path: ${{ env.TEST_STATUS_REPORT_PATH }}
           retention-days: 60
 
@@ -98,6 +100,6 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
-          name: cmodel_compile_profiling_logs_${{ matrix.chip_group }}
+          name: cmodel_compile_profiling_logs_${{ matrix.chip }}
           path: ${{ env.CMODEL_PROFILING_LOGS_PATH }}
           retention-days: 60

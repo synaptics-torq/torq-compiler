@@ -1,7 +1,7 @@
 # RT-DETR-L int8 (QDQ) known failures.
 #
-# Chips: the CI cmodel lane runs sl2610-v1 (default.group) AND sr200-v1
-# (next.group). SR200 has half the memory and slices (256KB LRAM / 1
+# Chips: the CI cmodel lane runs sl2610-v1 AND sr200-v1, one job each.
+# SR200 has half the memory and slices (256KB LRAM / 1
 # slice / 800MHz vs SL2610's 512KB / 2), so the dispatch/const plans and
 # the sim speed differ — the failing variant per case is listed in the
 # entry below. All notes re-verified 2026-10-15 on the bare-tests tree
