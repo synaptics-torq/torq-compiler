@@ -38,6 +38,7 @@ _WITH_BIAS = [
     ((5, 5, 3), 23, (4, 4), (1, 1), "valid"),
     ((11, 10, 7), 11, (2, 4), (2, 4), "valid"),
     ((1, 8, 8), 8, (1, 5), (1, 2), "same"),
+    ((8, 8, 4), 4, (4, 4), (2, 2), "same"),
 ]
 
 _NO_BIAS = [
@@ -76,11 +77,6 @@ for _c in _NO_BIAS:
 _add("conv1d_transpose_k3_s2_same_12x4_oc4_nobias", sequential(
     (12, 4),
     layers.Conv1DTranspose(filters=4, kernel_size=3, strides=2, padding="same", use_bias=False),
-))
-_add("conv2d_transpose_k4x4_s2x2_same_8x8x4_oc4_seed21321", sequential(
-    (8, 8, 4),
-    layers.Conv2DTranspose(filters=4, kernel_size=4, strides=2, padding="same"),
-    seed=21321,
 ))
 
 
