@@ -759,7 +759,17 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
 
     target = chip_config.get("target", "SL2610")
 
-    cmds = [str(torq_compiler), str(mlir_model_file), '-o', str(model_file)]
+    # compile the input under a fixed name in the compile directory (the compiler's working
+    # directory): the vmfb embeds the input path, so the same input then gives the same vmfb
+    # whatever the cache or checkout directory
+    input_file = versioned_dir / 'input.mlir'
+    input_file.unlink(missing_ok=True)
+    try:
+        os.link(mlir_model_file, input_file)
+    except OSError:
+        shutil.copyfile(mlir_model_file, input_file)
+
+    cmds = [str(torq_compiler), input_file.name, '-o', str(model_file)]
     
     gdb_port = request.config.getoption('--debug-torq-compiler')
 

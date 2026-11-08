@@ -1362,11 +1362,18 @@ def _location_metrics(workunits):
     return _interval_total(merge_intervals(intervals)), metrics
 
 
+def _source_file(original_loc_info):
+    """The path of the input file of a location ("" if it has none), see DebugInfo.source_file()."""
+    if not original_loc_info.location.file:
+        return ""
+    return original_loc_info.dispatch.debug_info.source_file(original_loc_info.location.file)
+
+
 def _read_source_lines(original_locations):
     """Read the input source lines of the locations: {file: {line number: text}}."""
     requests = {}
     for original_loc_info in original_locations:
-        raw_file = original_loc_info.location.file.strip('"') if original_loc_info.location.file else ""
+        raw_file = _source_file(original_loc_info)
         if not raw_file or not os.path.isfile(raw_file):
             continue
         try:
@@ -1392,7 +1399,7 @@ def _read_source_lines(original_locations):
 
 def _location_source_line(original_loc_info, source_lines):
     """Return (line number, text) of the input source line of a location, or None."""
-    raw_file = original_loc_info.location.file.strip('"') if original_loc_info.location.file else ""
+    raw_file = _source_file(original_loc_info)
     try:
         line_no = int(original_loc_info.location.line)
     except ValueError:

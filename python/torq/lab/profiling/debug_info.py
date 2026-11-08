@@ -1399,6 +1399,17 @@ class DebugInfo:
         self._dispatches = {}
         self._cached_input_files = {}
 
+    def source_file(self, file: str) -> str:
+        """
+        The path of the input file of a location. A relative path is relative to the compile
+        directory, the parent of the debug info directory: the tests compile their input as
+        input.mlir there, so that the model does not depend on where the input was.
+        """
+        file = file.strip('"')
+        if os.path.isabs(file):
+            return file
+        return os.path.join(os.path.dirname(os.path.abspath(self.path)), file)
+
     def get_dispatch(self, dispatch_name: str) -> DispatchDebugInfo:
         """
         Get the dispatch debug info for a given dispatch name
@@ -1492,7 +1503,7 @@ class DebugInfo:
             lines = self._cached_input_files.get(file_location.file)
 
             if lines is None:
-                with open(file_location.file.strip('"'), "r") as f:
+                with open(self.source_file(file_location.file), "r") as f:
                     lines = f.readlines()
 
                 self._cached_input_files[file_location.file] = lines
