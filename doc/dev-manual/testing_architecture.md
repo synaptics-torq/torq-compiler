@@ -306,8 +306,9 @@ def test_bar(complex_input):
 ```
 
 ``--recompute-cache`` ignores the stored results. ``--debug-cache`` prints why each fixture is
-recomputed or reused. In CI, ``--ignore-binary-mtime`` makes the binaries' version constant,
-since they are installed fresh for each run.
+recomputed or reused. The version of the compiler and of the runtime is the hash of the binary
+they run and of the libraries it loads, so a rebuild to the same bytes, or a fresh install in CI,
+keeps the cache.
 
 ## Cases from models
 

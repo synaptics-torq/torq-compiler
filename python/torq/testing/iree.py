@@ -12,7 +12,9 @@ import re
 import subprocess
 import shutil
 import statistics
+import sys
 import time
+import warnings
 import pytest
 import json
 
@@ -41,6 +43,7 @@ from .aws_fpga import FpgaSession, RemoteFpgaSession
 from .dtype_utils import convert_io_dtypes_policy
 from .remote_testing import RemoteTestRunner, setup_dev_board, _default_remote_runner_path, acquire_board_lock, release_board_lock, kill_remote_runner
 from .step_timings import record_step, step
+from .versioned_fixtures import _hash_data, _hash_file
 from .versioned_fixtures import VersionedFile, versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
                                 versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_unhashable_object_fixture, versioned_generated_directory_fixture
 from torq.lab.profiling.annotate import DebugInfoCache, annotate_host_profile_from_files
@@ -82,7 +85,6 @@ def pytest_addoption(parser):
     parser.addoption("--trace-buffers", action="store_true", default=False, help="Enable tracing of buffers in the torq runtime")
     parser.addoption("--torq-runtime-hw-type", action="store", default="sim", help="Command separate list of target hw to use for torq tests (sim, aws_fpga)")
     parser.addoption("--torq-chips", action="store", default="sl2610-v1", help="Comma-separated list of chips to compile models for, or all")
-    parser.addoption("--ignore-binary-mtime", action="store_true", default=False, help="Ignore binary mtime of binaries when deciding to invalidate cached fixtures")
     parser.addoption("--torq-compiler-timeout", type=int, default=60*5, help="Timeout in seconds for torq compiler invocations")
     parser.addoption("--torq-runtime-timeout", type=int, default=60*4, help="Timeout in seconds for torq runtime invocations")
     parser.addoption("--torq-runtime-runs", type=int, default=1, help="Number of times each model runs on a remote board; with more than 1, the first run is a warm-up and the timings are the median of the other runs")
@@ -419,6 +421,103 @@ def _find_iree_tool(env_var, tool_name):
     raise FileNotFoundError(f"Could not find {tool_name}.")
 
 
+# libraries of the system are left out of the binary versions, like the Python version
+_SYSTEM_LIBRARY_DIRS = ('/lib/', '/lib64/', '/usr/lib/', '/usr/lib64/', '/System/')
+
+# version of each tool path, computed once per process
+_binary_versions = {}
+
+
+def _executed_binary(file_path):
+    """
+    The binary that running file_path executes: pip installs the tools as Python scripts that
+    start the binary of the wheel.
+    """
+    with open(file_path, 'rb') as f:
+        if f.read(2) != b'#!':
+            return Path(file_path).resolve()
+
+    name = Path(file_path).name
+    if name == 'torq-compile':
+        from torq.compiler.tools.binaries import find_tool
+        return Path(find_tool(name)).resolve()
+    if name == 'torq-run-module':
+        from torq._runtime_libs import library_path
+        return (Path(library_path) / name).resolve()
+    if name == 'iree-benchmark-module':
+        from iree._runtime_libs import library_path
+        return (Path(library_path) / name).resolve()
+
+    raise ValueError(f"{file_path} is a script that starts an unknown binary")
+
+
+def _macos_linked_libraries(binary):
+    """The libraries that binary loads directly, resolved like the macOS dynamic linker does."""
+    load_commands = subprocess.run(['otool', '-l', str(binary)], capture_output=True, text=True, check=True).stdout
+    rpaths = [str(binary.parent) + p[len('@loader_path'):] if p.startswith('@loader_path') else
+              str(binary.parent) + p[len('@executable_path'):] if p.startswith('@executable_path') else p
+              for p in re.findall(r'^\s+path (.*) \(offset \d+\)$', load_commands, re.MULTILINE)]
+
+    install_names = subprocess.run(['otool', '-L', str(binary)], capture_output=True, text=True, check=True).stdout
+    libraries = []
+    for name in re.findall(r'^\s+(\S.*?) \(compatibility', install_names, re.MULTILINE):
+        # the system libraries are in the dyld shared cache, not in files; a library lists its
+        # own install name too
+        if name.startswith(_SYSTEM_LIBRARY_DIRS) or Path(name).name == binary.name:
+            continue
+        if name.startswith('@rpath/'):
+            candidates = [Path(rpath) / name[len('@rpath/'):] for rpath in rpaths]
+        elif name.startswith(('@loader_path/', '@executable_path/')):
+            candidates = [binary.parent / name.split('/', 1)[1]]
+        else:
+            candidates = [Path(name)]
+        found = next((c.resolve() for c in candidates if c.exists()), None)
+        if found is None:
+            raise FileNotFoundError(f"{binary} loads {name}, which was not found")
+        if found != binary and not str(found).startswith(_SYSTEM_LIBRARY_DIRS):
+            libraries.append(found)
+    return libraries
+
+
+def _linked_libraries(binary):
+    """The libraries that binary loads, its dependencies included, without those of the system."""
+    if sys.platform == 'darwin':
+        libraries, pending = [], [binary]
+        while pending:
+            for library in _macos_linked_libraries(pending.pop()):
+                if library not in libraries:
+                    libraries.append(library)
+                    pending.append(library)
+        return libraries
+
+    # ldd lists the dependencies of the dependencies too
+    ldd = subprocess.run(['ldd', str(binary)], capture_output=True, text=True, check=True).stdout
+    if 'not found' in ldd:
+        raise FileNotFoundError(f"{binary} loads a library that was not found:\n{ldd}")
+    return [Path(p).resolve() for p in re.findall(r'=> (\S+) \(0x', ldd)
+            if not p.startswith(_SYSTEM_LIBRARY_DIRS)]
+
+
+def _binary_version(request, prefix, file_path):
+    """
+    The version of a tool: the hash of the binary it runs and of the libraries that binary loads,
+    so that it changes only when the code changes, not when it is rebuilt to the same bytes or
+    installed in another place. Falls back to the mtime of file_path if the binary or its
+    libraries cannot be found.
+    """
+    if file_path not in _binary_versions:
+        try:
+            binary = _executed_binary(file_path)
+            files = [binary] + _linked_libraries(binary)
+            version = prefix + _hash_data(sorted((f.name, _hash_file(request, f)) for f in files))
+        except (OSError, ValueError, ImportError, subprocess.CalledProcessError) as e:
+            # a warning, so that pytest lists it in its summary
+            warnings.warn(f"versioning {file_path} by its mtime: {e}")
+            version = prefix + "mtime_" + str(os.path.getmtime(file_path))
+        _binary_versions[file_path] = version
+    return _binary_versions[file_path]
+
+
 @versioned_hashable_object_fixture
 def iree_opt():
     return _find_iree_tool('IREE_OPT', 'iree-opt')
@@ -434,17 +533,12 @@ def torq_compiler(request):
     """
     This fixture returns the path to the torq compiler binary.
 
-    It is automatically invalidated when the compiler binary or the library changes.
+    It is automatically invalidated when the compiler binary or its libraries change.
     """
 
     file_path = _find_iree_tool('TORQ_COMPILE', 'torq-compile')
-            
-    if request.config.getoption("--ignore-binary-mtime"):
-        compiler_mtime = 0
-    else:
-        compiler_mtime = os.path.getmtime(file_path)
 
-    version = "torq_compiler_" + str(compiler_mtime)
+    version = _binary_version(request, "torq_compiler_", file_path)
 
     print("[compiler] " + "torq_compiler" + f" -> {file_path}")
 
@@ -474,7 +568,7 @@ def torq_benchmark(request, benchmark_output_dir):
     """
     This fixture returns the path to the torq benchmark binary.
 
-    It is automatically invalidated when the benchmark binary mtime changes.
+    It is automatically invalidated when the benchmark binary or its libraries change.
     """
 
     # we are not running benchmarking we don't try to find the benchmark binary
@@ -484,12 +578,7 @@ def torq_benchmark(request, benchmark_output_dir):
 
     file_path = _find_iree_tool('TORQ_BENCHMARK_MODULE', 'iree-benchmark-module')
 
-    if request.config.getoption("--ignore-binary-mtime"):
-        runtime_mtime = 0
-    else:
-        runtime_mtime = os.path.getmtime(file_path)
-
-    version = "torq_benchmark_" + str(runtime_mtime)
+    version = _binary_version(request, "torq_benchmark_", file_path)
 
     return VersionedFile(file_path, version)
 
@@ -499,17 +588,12 @@ def torq_runtime(request):
     """
     This fixture returns the path to the torq runtime binary.
 
-    It is automatically invalidated when the runtime binary mtime changes.
+    It is automatically invalidated when the runtime binary or its libraries change.
     """
 
     file_path = _find_iree_tool('TORQ_RUN_MODULE', 'torq-run-module')
 
-    if request.config.getoption("--ignore-binary-mtime"):
-        runtime_mtime = 0
-    else:
-        runtime_mtime = os.path.getmtime(file_path)
-
-    version = "torq_runtime_" + str(runtime_mtime)
+    version = _binary_version(request, "torq_runtime_", file_path)
 
     return VersionedFile(file_path, version)
 

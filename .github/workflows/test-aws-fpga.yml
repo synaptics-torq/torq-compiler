@@ -73,7 +73,6 @@ jobs:
             --torq-chips ${{ matrix.chip }}
             --torq-runtime-profiling-output-dir=${{ env.RUNTIME_PROFILING_OUTPUT_DIR }}
             --tflite-layer-test-generate-full-model-only
-            --ignore-binary-mtime
             ${{ env.GENERATE_STATUS_REPORT == 'true' && format('--try-xfails --save-test-status-report-to {0}', env.TEST_STATUS_REPORT_PATH) || '' }}
           ignore_failures: ${{ env.GENERATE_STATUS_REPORT }}
           torq_perf_server: ${{ env.DASHBOARD_SERVER }}

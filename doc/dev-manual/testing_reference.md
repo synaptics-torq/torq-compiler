@@ -69,7 +69,6 @@ Source: ``pytest --help``, section "Custom options". The most used ones:
 | ``--torq-runtime-hw-type TYPES`` | The runtimes: ``sim`` (default), ``aws_fpga``, ``astra_machina`` |
 | ``--recompute-cache`` | Redo every step, ignoring the cache |
 | ``--debug-cache`` | Print why each cached step is reused or redone |
-| ``--ignore-binary-mtime`` | Don't redo the steps when the compiler or runtime binaries change (CI) |
 | ``--try-xfails`` | Run the known failures, and report those that pass (``XPASS``) |
 | ``--issue ISSUE`` | Run only the tests of the known failures of an issue |
 | ``--check-xfails`` | Fail when a line of an ``-xfails.txt`` file matches no test |
@@ -184,10 +183,9 @@ Sources: ``.github/workflows/test.yml`` (pull requests and merge queue), ``relea
 - **C model options:** ``--check-xfails``, ``--durations=30``, ``--torq-step-timings``, and
   compile-time profiles. The step timings and profiles are in the artifact
   ``cmodel_compile_profiling_logs_<chip>``.
-- **All jobs** pass ``--tflite-layer-test-generate-full-model-only`` and
-  ``--ignore-binary-mtime``. They check out ``extras`` at the commit of
-  ``scripts/extras.gitlink`` (update it with ``scripts/pin_extras.sh``), and upload their results
-  to the test dashboard.
+- **All jobs** pass ``--tflite-layer-test-generate-full-model-only``. They check out ``extras``
+  at the commit of ``scripts/extras.gitlink`` (update it with ``scripts/pin_extras.sh``), and
+  upload their results to the test dashboard.
 
 ### Time limits
 
