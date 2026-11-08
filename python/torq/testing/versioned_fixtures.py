@@ -101,7 +101,37 @@ def _hash_file(request, file_path):
     return file_hash
 
 
-def _get_fixture_params(kwargs):    
+# content hash of each file, by (path, mtime, size), computed once per process
+_content_hashes = {}
+
+
+def content_hash(path) -> str:
+    """
+    Returns the hash of the content of a file, or of the files of a directory and their paths
+    relative to it ("missing" if path does not exist).
+
+    Unlike _hash_file, the hashes are not stored in the pytest cache: this is meant for the outputs
+    of fixtures, which are many and change in each session.
+    """
+    path = Path(path)
+    if path.is_dir():
+        files = sorted(p for p in path.rglob("*") if p.is_file())
+        return _hash_data([(str(p.relative_to(path)), content_hash(p)) for p in files])
+    if not path.exists():
+        return "missing"
+
+    stat = path.stat()
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    if key not in _content_hashes:
+        hash_obj = hashlib.sha256()
+        with open(path, 'rb') as f:
+            for data in iter(lambda: f.read(1 << 20), b""):
+                hash_obj.update(data)
+        _content_hashes[key] = hash_obj.hexdigest()
+    return _content_hashes[key]
+
+
+def _get_fixture_params(kwargs):
     input_params_versions = []
 
     kwargs_data = {}

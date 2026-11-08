@@ -44,6 +44,7 @@ from .dtype_utils import convert_io_dtypes_policy
 from .remote_testing import RemoteTestRunner, setup_dev_board, _default_remote_runner_path, acquire_board_lock, release_board_lock, kill_remote_runner
 from .step_timings import record_step, step
 from .versioned_fixtures import _hash_data, _hash_file
+from .versioned_fixtures import VersionedUncachedData, content_hash
 from .versioned_fixtures import VersionedFile, versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
                                 versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_unhashable_object_fixture, versioned_generated_directory_fixture
 from torq.lab.profiling.annotate import DebugInfoCache, annotate_host_profile_from_files
@@ -680,7 +681,12 @@ def mlir_static_file(case_config):
 
 @pytest.fixture
 def mlir_model_file(request, case_config):
-    return request.getfixturevalue(case_config['mlir_model_file'])
+    """
+    The MLIR model of the case, versioned by its content: the compile and the references are then
+    reused whenever the MLIR is the same, however it was made.
+    """
+    model = request.getfixturevalue(case_config['mlir_model_file'])
+    return VersionedFile(model.file_path, "mlir_model_file." + content_hash(model.file_path))
 
 
 @versioned_hashable_object_fixture
@@ -960,27 +966,36 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
             shutil.rmtree(temp_pb_dir)
         
 
-@versioned_unhashable_object_fixture
+@pytest.fixture
 def torq_compiled_model(request, torq_compiled_model_dir, torq_compiler_options, chip_config):
+    """
+    The vmfb, versioned by its content: a run is then reused whenever the vmfb is the same, even
+    when the compiler changed.
+    """
+
+    compiled_dir = torq_compiled_model_dir.dir_path
 
     record_property = request.getfixturevalue("record_property")    
     record_property("compiler", "torq")
-    record_property("compiler_options", torq_compiler_options)
-    record_property("compiler_target", chip_config.get("chip_name"))    
+    record_property("compiler_options", torq_compiler_options.data)
+    record_property("compiler_target", chip_config.data.get("chip_name"))    
 
-    record_measurements(request, "compile_time_measurements", torq_compiled_model_dir)
+    record_measurements(request, "compile_time_measurements", compiled_dir)
 
-    profile_path = torq_compiled_model_dir / f'profile.pb'
+    profile_path = compiled_dir / f'profile.pb'
 
     if profile_path.exists():
         record_property("compile_time_profile", str(profile_path))
-    
-    return torq_compiled_model_dir / 'model.vmfb'
+
+    model_file = compiled_dir / 'model.vmfb'
+    return VersionedUncachedData(model_file, "torq_compiled_model." + content_hash(model_file))
 
 
-@versioned_unhashable_object_fixture
+@pytest.fixture
 def torq_compiled_model_debug_info(torq_compiled_model_dir):
-    return torq_compiled_model_dir / 'debug'
+    """The debug info of the compile, versioned by its content like torq_compiled_model."""
+    debug_dir = torq_compiled_model_dir.dir_path / 'debug'
+    return VersionedUncachedData(debug_dir, "torq_compiled_model_debug_info." + content_hash(debug_dir))
 
 
 @versioned_unhashable_object_fixture
