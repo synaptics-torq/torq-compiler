@@ -23,6 +23,7 @@ more_testing.md
 tools.md
 model.md
 ci.md
+iree_upgrade.md
 ```
 
 This manual is structured step-by-step, starting from introduction and setup, through model conversion,
