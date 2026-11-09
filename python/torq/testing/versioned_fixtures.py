@@ -15,6 +15,9 @@ import importlib.metadata
 import logging
 import subprocess
 import sys
+import os
+
+from .remote_cache import RemoteCache
 
 """
 This module provides decorators that allow to create fixtures that cache their results.
@@ -34,13 +37,50 @@ fixture and create a version for it based on its hash or the inputs used to gene
 def pytest_addoption(parser):
     parser.addoption("--recompute-cache", action="store_true", default=False, help="Re-creates all cached artifacts instead of using existing cached values")
     parser.addoption("--debug-cache", action="store_true", default=False, help="Enables debug output for cache operations")
+    parser.addoption("--remote-cache-read", default=os.environ.get("TORQ_REMOTE_CACHE_READ", ""),
+                     help="Comma-separated stores (directories or s3://bucket/prefix) to read cached results from (default: $TORQ_REMOTE_CACHE_READ)")
+    parser.addoption("--remote-cache-write", default=os.environ.get("TORQ_REMOTE_CACHE_WRITE", ""),
+                     help="Store to write the computed results to, and to read first (default: $TORQ_REMOTE_CACHE_WRITE)")
 
 logger = logging.getLogger("versioned_fixtures")
 
+# the store of results shared across sessions, if any (see remote_cache)
+_remote = None
+
+
 def pytest_configure(config):
+    global _remote
+
     if config.getoption("--debug-cache"):
         logger.setLevel(logging.DEBUG)
         logger.addHandler(logging.StreamHandler())
+
+    read_urls = [u.strip() for u in config.getoption("--remote-cache-read").split(",") if u.strip()]
+    write_url = config.getoption("--remote-cache-write").strip()
+    if read_urls or write_url:
+        _remote = RemoteCache(read_urls, write_url)
+
+
+def local_only(fun):
+    """
+    Marks a fixture whose results are not shared across sessions (see remote_cache): they are
+    cheap to compute again, and would only make the shared store bigger. Put it under the
+    versioned fixture decorator.
+    """
+    fun.local_only = True
+    return fun
+
+
+def _fetch_remote(request, fun, version, dest, is_dir):
+    """Puts the result of a fixture in dest from the shared store; False if it isn't there."""
+    if _remote is None or getattr(fun, "local_only", False) or request.config.getoption("--recompute-cache"):
+        return False
+    return _remote.fetch(fun.__name__, version, dest, is_dir)
+
+
+def _store_remote(fun, version, src, is_dir):
+    if _remote is not None and not getattr(fun, "local_only", False):
+        _remote.store(fun.__name__, version, src, is_dir)
 
 
 # What the cached results depend on beyond the inputs of the fixtures: the tools that make the
@@ -487,8 +527,10 @@ def versioned_generated_file_fixture(suffix):
             with FileLock(str(versioned_file.file_path) + ".lock"):
 
                 if not versioned_file.valid(request):
-                    logger.debug("[cache miss] " + fun.__name__ + f" -> {versioned_file.file_path}")
-                    fun(**kwargs_data)
+                    if not _fetch_remote(request, fun, versioned_file.version, versioned_file.file_path, False):
+                        logger.debug("[cache miss] " + fun.__name__ + f" -> {versioned_file.file_path}")
+                        fun(**kwargs_data)
+                        _store_remote(fun, versioned_file.version, versioned_file.file_path, False)
                 else:
                     logger.debug("[cache hit] " + fun.__name__ + f" -> {versioned_file.file_path}")
 
@@ -554,9 +596,12 @@ def versioned_generated_directory_fixture(fun):
         with FileLock(str(versioned_dir.dir_path) + ".lock"):
 
             if not versioned_dir.valid(request):
-                logger.debug("[cache miss] " + fun.__name__ + f" -> {versioned_dir.dir_path}")
+                if not _fetch_remote(request, fun, versioned_dir.version, versioned_dir.dir_path, True):
+                    logger.debug("[cache miss] " + fun.__name__ + f" -> {versioned_dir.dir_path}")
 
-                fun(**kwargs_data)
+                    fun(**kwargs_data)
+
+                    _store_remote(fun, versioned_dir.version, versioned_dir.dir_path, True)
 
                 # mark the directory as valid
                 with open(versioned_dir.dir_path / "valid", "w") as f:
@@ -702,9 +747,12 @@ def versioned_cached_data_fixture(fun):
 
         with FileLock(str(versioned_data.file_path) + ".lock"):
 
-            if not versioned_data.load(request):
+            if not versioned_data.load(request) and not (
+                    _fetch_remote(request, fun, versioned_data.version, versioned_data.file_path, False)
+                    and versioned_data.load(request)):
                 logger.debug("[cache miss] " + fun.__name__ + f" -> {versioned_data.file_path}")
                 versioned_data.save(fun(**kwargs_data))
+                _store_remote(fun, versioned_data.version, versioned_data.file_path, False)
             else:
                 logger.debug("[cache hit] " + fun.__name__ + f" -> {versioned_data.file_path}")
 

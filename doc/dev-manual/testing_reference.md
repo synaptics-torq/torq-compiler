@@ -69,6 +69,7 @@ Source: ``pytest --help``, section "Custom options". The most used ones:
 | ``--torq-runtime-hw-type TYPES`` | The runtimes: ``sim`` (default), ``aws_fpga``, ``astra_machina`` |
 | ``--recompute-cache`` | Redo every step, ignoring the cache |
 | ``--debug-cache`` | Print why each cached step is reused or redone |
+| ``--remote-cache-read STORES``, ``--remote-cache-write STORE`` | Read cached results from stores (directories or ``s3://bucket/prefix``, comma-separated), and write the computed ones to a store. Default ``$TORQ_REMOTE_CACHE_READ``, ``$TORQ_REMOTE_CACHE_WRITE`` |
 | ``--try-xfails`` | Run the known failures, and report those that pass (``XPASS``) |
 | ``--issue ISSUE`` | Run only the tests of the known failures of an issue |
 | ``--check-xfails`` | Fail when a line of an ``-xfails.txt`` file matches no test |

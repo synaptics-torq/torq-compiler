@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import subprocess
 import shutil
+import functools
 import statistics
 import sys
 import time
@@ -46,7 +47,8 @@ from .dtype_utils import convert_io_dtypes_policy
 from .remote_testing import RemoteTestRunner, setup_dev_board, _default_remote_runner_path, acquire_board_lock, release_board_lock, kill_remote_runner
 from .step_timings import record_step, step
 from .versioned_fixtures import _hash_data, _hash_file
-from .versioned_fixtures import VersionedUncachedData, content_hash
+from .versioned_fixtures import VersionedUncachedData, content_hash, local_only
+from .remote_cache import NO_REMOTE_CACHE_MARKER
 from .versioned_fixtures import VersionedFile, versioned_unhashable_object_fixture, versioned_static_file_fixture, versioned_generated_file_fixture, \
                                 versioned_cached_data_fixture, versioned_hashable_object_fixture, versioned_unhashable_object_fixture, versioned_generated_directory_fixture
 from torq.lab.profiling.annotate import DebugInfoCache, annotate_host_profile_from_files
@@ -662,6 +664,7 @@ def iree_input_data_args(iree_input_data, mlir_io_spec):
 
 
 @versioned_generated_directory_fixture
+@local_only
 def iree_input_data(request, versioned_dir, input_data):
     """
     Save the received test data for inference
@@ -676,6 +679,7 @@ def iree_input_data(request, versioned_dir, input_data):
 
 
 @versioned_generated_directory_fixture
+@local_only
 def torq_input_data(request, versioned_dir, input_data, convert_io_dtypes_policy):
     """
     Save input data for torq inference, converting dtypes when convert dtypes is enabled
@@ -727,17 +731,44 @@ def runtime_hw_type(request):
     return request.param
 
 
+@functools.cache
+def _host_cpu():
+    """The model and features of the CPU of this host, as the OS reports them."""
+    if sys.platform == 'darwin':
+        return subprocess.run(['sysctl', '-n', 'machdep.cpu.brand_string'], capture_output=True, text=True,
+                              check=True).stdout.strip()
+
+    # the first processor; x86 lists its features as flags, arm64 as Features
+    first_cpu = Path('/proc/cpuinfo').read_text().split('\n\n')[0]
+    fields = dict((key.strip(), value) for key, value in
+                  (line.split(':', 1) for line in first_cpu.splitlines() if ':' in line))
+    keys = ('model name', 'flags', 'CPU implementer', 'CPU part', 'Features')
+    return {key: fields[key].strip() for key in keys if key in fields}
+
+
 @versioned_hashable_object_fixture
-def torq_target_host_options(runtime_hw_type):
+def host_cpu():
+    """
+    The CPU of this host. Part of the version of the results that depend on it: the code compiled
+    for the host CPU, which may not run on another CPU, and the LLVM-CPU references, which can
+    differ slightly between CPUs.
+    """
+    return _host_cpu()
+
+
+@pytest.fixture
+def torq_target_host_options(runtime_hw_type, host_cpu):
     """
     This fixture returns the --torq-target-host-triple compiler options for the runtime hw type.
     """
 
-    # when the runtime is sim or aws_fpga, we need to compile host binaries for host
+    # when the runtime is sim or aws_fpga, we need to compile host binaries for host, and the
+    # compile depends on its CPU
     if runtime_hw_type.data in ('sim', 'aws_fpga'):
-        return ['--torq-target-host-triple=native']
+        options = ['--torq-target-host-triple=native']
+        return VersionedUncachedData(options, "torq_target_host_options" + _hash_data([options, host_cpu.version]))
 
-    return []
+    return VersionedUncachedData([], "torq_target_host_options" + _hash_data([]))
 
 
 @versioned_hashable_object_fixture
@@ -964,40 +995,52 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
     model_stats = compute_model_stats(model_file, versioned_dir)
     append_measurements(versioned_dir, model_stats)
 
-    # Save compile time profiling data if requested
-    if compile_time_profiling_output_dir:        
-        compile_time_profiling_output_dir = Path(compile_time_profiling_output_dir)
-        compile_time_profiling_output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Copy compile profile CSV with _compile suffix in parent folder
-        if compile_profile_csv.exists():
-            dest_csv = compile_time_profiling_output_dir / f'{request.node.name}_compile.csv'
-            shutil.copy(compile_profile_csv, dest_csv)
-            print(f"✓ Copied compile profile CSV: {dest_csv}")
-                    
-        # Generate Perfetto .pb file from compile time profile            
+    # Generate the Perfetto traces of the compile time profile if requested; torq_compiled_model
+    # copies them and the CSV to the output directory, for each test
+    if compile_time_profiling_output_dir:
         from torq.lab.profiling.perfetto import convert_to_perfetto
-        
-        # Use a temp directory for pb generation, then move files to parent with _compile suffix
-        temp_pb_dir = compile_time_profiling_output_dir / f'{request.node.name}_compile_temp'
+
+        temp_pb_dir = versioned_dir / 'profile_temp'
+        shutil.rmtree(temp_pb_dir, ignore_errors=True)
+        for old_profile in versioned_dir.glob('profile*.pb'):
+            old_profile.unlink()
         measurements = convert_to_perfetto(str(debug_info_dir), str(temp_pb_dir), chip_config.get("npu_frequency_mhz"))
 
         append_measurements(versioned_dir, measurements)
-        
-        # Move .pb files from temp folder to parent with _compile suffix
-        pb_files = sorted(temp_pb_dir.glob('*.pb'))
-        for idx, pb_file in enumerate(pb_files):
-            suffix = f'_{idx}' if len(pb_files) > 1 else ''
-            dest_pb = compile_time_profiling_output_dir / f'{request.node.name}_compile{suffix}.pb'
-            shutil.move(str(pb_file), str(dest_pb))
-            print(f"✓ Generated Perfetto trace: {dest_pb}")
-            if idx == 0:
-                shutil.copy(dest_pb, versioned_dir / f'profile.pb')
-        
-        # Remove temp directory
-        if temp_pb_dir.exists():
-            shutil.rmtree(temp_pb_dir)
-        
+
+        # profile.pb, then profile_1.pb, profile_2.pb...
+        for idx, pb_file in enumerate(sorted(temp_pb_dir.glob('*.pb'))):
+            shutil.move(str(pb_file), str(versioned_dir / (f'profile_{idx}.pb' if idx else 'profile.pb')))
+
+        shutil.rmtree(temp_pb_dir)
+
+
+def _compile_profiles(compiled_dir):
+    """The Perfetto traces of a compile directory, in order."""
+    if not (compiled_dir / 'profile.pb').exists():
+        return []
+    profiles = [compiled_dir / 'profile.pb']
+    while (compiled_dir / f'profile_{len(profiles)}.pb').exists():
+        profiles.append(compiled_dir / f'profile_{len(profiles)}.pb')
+    return profiles
+
+
+def _copy_compile_profiling(compiled_dir, output_dir, test_name):
+    """
+    Copies the compile time profile of a test to --torq-compile-time-profiling-output-dir. Done
+    for each test, so also when the compile was reused from the cache or fetched from a store.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    compile_profile_csv = compiled_dir / 'compile_profile.csv'
+    if compile_profile_csv.exists():
+        shutil.copy(compile_profile_csv, output_dir / f'{test_name}_compile.csv')
+
+    profiles = _compile_profiles(compiled_dir)
+    for idx, pb_file in enumerate(profiles):
+        suffix = f'_{idx}' if len(profiles) > 1 else ''
+        shutil.copy(pb_file, output_dir / f'{test_name}_compile{suffix}.pb')
+
 
 @pytest.fixture
 def torq_compiled_model(request, torq_compiled_model_dir, torq_compiler_options, chip_config):
@@ -1019,6 +1062,10 @@ def torq_compiled_model(request, torq_compiled_model_dir, torq_compiler_options,
 
     if profile_path.exists():
         record_property("compile_time_profile", str(profile_path))
+
+    compile_time_profiling_output_dir = request.config.getoption("--torq-compile-time-profiling-output-dir")
+    if compile_time_profiling_output_dir:
+        _copy_compile_profiling(compiled_dir, Path(compile_time_profiling_output_dir), request.node.name)
 
     model_file = compiled_dir / 'model.vmfb'
     return VersionedUncachedData(model_file, "torq_compiled_model." + content_hash(model_file))
@@ -1116,6 +1163,12 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, torq_input_dat
                         torq_benchmark, benchmark_output_dir, torq_runtime_runs):
 
     clear_measurements(versioned_dir)
+
+    # runs on hardware measure the hardware: they are not shared with other sessions. A run on an
+    # emulated board (QEMU) could be, once its version has what runs it: the emulator, the board
+    # image, and the runner and driver loaded on the board (it has only the host runtime today)
+    if runtime_hw_type != 'sim':
+        (versioned_dir / NO_REMOTE_CACHE_MARKER).touch()
 
     output_args = create_output_args(versioned_dir, mlir_io_spec.outputs)
 
@@ -1461,7 +1514,9 @@ def llvmcpu_runtime_options(request, case_config):
     return cmds
 
 @versioned_generated_file_fixture("vmfb")
-def llvmcpu_compiled_model(versioned_file, llvmcpu_compiler, request, mlir_model_file, llvmcpu_compiler_options):
+def llvmcpu_compiled_model(versioned_file, llvmcpu_compiler, request, mlir_model_file, llvmcpu_compiler_options,
+                           host_cpu):
+    # host_cpu is only in the version: the model is compiled for the CPU of this host
 
     cmd = [str(llvmcpu_compiler),
            '--iree-hal-target-backends=llvm-cpu',
@@ -1555,6 +1610,7 @@ def tweaked_random_input_data_ranges(mlir_io_spec, case_config):
     return random_ranges
 
 @versioned_cached_data_fixture
+@local_only
 def tweaked_random_input_data(request, mlir_io_spec, tweaked_random_input_data_ranges):
     rng = np.random.default_rng(1234)
 

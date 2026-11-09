@@ -316,6 +316,19 @@ the code of ``python/torq``, and the code of the test module (its file, the othe
 its folder that aren't tests, and the ``conftest.py`` files above it). A change in any of them
 recomputes the results of the tests it can affect.
 
+The results can also be shared across sessions: ``--remote-cache-write STORE`` writes each result a
+session computes to a store, a directory or ``s3://bucket/prefix``, and ``--remote-cache-read
+STORES`` reads results from stores before computing them (both read the environment variables
+``TORQ_REMOTE_CACHE_WRITE`` and ``TORQ_REMOTE_CACHE_READ`` by default). A store keeps one archive
+per result, under its version. Only results computed successfully are stored; not the runs on an
+FPGA or a board, nor the compiler's IR dumps, nor the inputs, which are cheap to make again
+(fixtures marked ``@local_only``).
+
+A session only gets the results it would compute itself, so a developer gets the compiles of
+the CI store only with the same options (CI passes ``--no-phases-dump``), on the same OS (the
+Python version and packages are in the salt) and, for the code compiled for the host CPU (sim
+compiles and LLVM-CPU references), on the same CPU.
+
 ## Cases from models
 
 The model test plans don't list their cases: they make them from models at collection time.
