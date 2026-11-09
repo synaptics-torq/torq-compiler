@@ -18,6 +18,9 @@ from .versioned_fixtures import versioned_generated_file_fixture, versioned_cach
 This module provides fixtures and utilities for testing TensorFlow/Keras models.
 """
 
+# seed of the weights of the models that layer_model rebuilds from a Keras config
+LAYER_MODEL_SEED = 21321
+
 
 
 def generate_layers_from_model(model: tf.keras.Model):    
@@ -256,6 +259,10 @@ def layer_model(request, keras_layer_data):
     # corrupts the shared, cached keras_layer_data for subsequent tests and
     # yields an unbuilt model that fails TFLite conversion. Pass a copy so each
     # test reconstructs from a pristine config.
+    # The config has no weights: from_config draws them from the global RNG. Seed it so that the
+    # weights depend only on the config, which versions the model, and not on the tests that ran
+    # before in the process (results computed by other sessions are shared through the cache).
+    tf.keras.utils.set_random_seed(LAYER_MODEL_SEED)
     return tf.keras.Model.from_config(copy.deepcopy(keras_layer_data))
 
 
