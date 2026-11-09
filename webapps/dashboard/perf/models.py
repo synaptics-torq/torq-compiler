@@ -329,6 +329,13 @@ class TestRun(models.Model):
     failure_type = models.CharField(max_length=50, blank=True, null=True)
     linked_issue = models.TextField(blank=True, null=True)
 
+    """ Names of the results (compile, run, references...) that the test fetched from the shared test cache instead of computing them: their compile and run times were not measured."""
+    fetched_results = models.JSONField(default=list, blank=True)
+
+    @property
+    def cached(self):
+        return bool(self.fetched_results)
+
     class Meta:
         constraints = [
             models.UniqueConstraint(

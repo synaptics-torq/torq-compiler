@@ -160,7 +160,8 @@ def process_uploaded_zip(args):
                         test_case=test_case,
                         test_metadata=test_metadata,
                         outcome=outcome_map[outcome],
-                        linked_issue=linked_issue
+                        linked_issue=linked_issue,
+                        fetched_results=item.get('fetched_results') or [],
                     )
 
                     # Handle failure log file and server-side classification for failed tests

@@ -177,7 +177,7 @@
                             {% else %}
                             <td class="fw-semibold">{{ result.nodeid }}</td>
                             {% endif %}
-                            <td>{% outcome_badge result.current_outcome %}</td>
+                            <td>{% outcome_badge result.current_outcome %}{% if result.current_cached %} <span class="badge text-bg-light border" title="Results fetched from the test cache: compile and run times not measured">cached</span>{% endif %}</td>
                             {% if baseline_session %}
                             <td>{% outcome_badge result.baseline_outcome %}</td>
                             {% endif %}

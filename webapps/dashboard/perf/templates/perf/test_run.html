@@ -24,6 +24,7 @@
                             <h1 class="h3 mb-0">
                                 {{ test_run.test_case.name }}{% if test_run.test_case.parameters %}<span class="text-body-secondary fw-normal fs-5 ms-1">[{{ test_run.test_case.parameters }}]</span>{% endif %}
                                 <span class="fs-6 align-middle">{% outcome_badge test_run.outcome %}</span>
+                                {% if test_run.cached %}<span class="badge text-bg-light border fs-6 align-middle" title="Results fetched from the test cache">cached</span>{% endif %}
                             </h1>
                         </div>
                         <a href="{% url 'test_session_results' test_run.test_run_batch.test_session.id %}{% if baseline_session %}?baseline_session={{ baseline_session.id }}{% endif %}" class="btn btn-sm btn-outline-primary ms-auto">Back to session</a>
@@ -31,6 +32,12 @@
                     <p class="text-body-secondary mb-1">
                         Session #{{ test_run.test_run_batch.test_session.id }} - {{ test_run.test_run_batch.test_session.git_branch | default:"unknown" }}
                     </p>
+                    {% if test_run.cached %}
+                    <p class="mb-1">
+                        <span class="text-body-secondary small me-1">Fetched from the test cache (compile and run times not measured):</span>
+                        {{ test_run.fetched_results|join:", " }}
+                    </p>
+                    {% endif %}
                     {% if test_run.linked_issue %}
                     <p class="mb-1">
                         <span class="text-body-secondary small me-1">Linked issue:</span>

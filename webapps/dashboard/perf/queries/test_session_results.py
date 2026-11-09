@@ -96,6 +96,7 @@ def get_test_runs(metric_name, include_metadata=False):
             x.test_case_id,
             {"metadata.compiler_input," if include_metadata else ""}
             CONCAT(testcase.module, '::', testcase.name, '[', testcase.parameters, ']') AS nodeid,
+            jsonb_array_length(x.fetched_results) > 0 AS cached,
             measurement.value AS value
         FROM
             perf_testrun AS x
@@ -129,6 +130,7 @@ def join_current_and_baseline_results(baseline_query, results_query, join_key = 
             c_testrun.nodeid AS nodeid,
             c_testrun.outcome AS current_outcome,
             b_testrun.outcome AS baseline_outcome,
+            c_testrun.cached AS current_cached,
             c_testrun.value AS current_value,
             b_testrun.value AS baseline_value,
             (c_testrun.value - b_testrun.value) * 100.0 / NULLIF(b_testrun.value, 0) AS change_percent
@@ -192,6 +194,7 @@ def get_session_results(session, baseline_session, metric_name, nodeid, status, 
                 c_testrun.nodeid AS nodeid,
                 c_testrun.outcome AS current_outcome,
                 NULL AS baseline_outcome,
+                c_testrun.cached AS current_cached,
                 c_testrun.value AS current_value,
                 NULL AS baseline_value,
                 NULL AS change_percent
