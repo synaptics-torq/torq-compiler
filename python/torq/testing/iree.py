@@ -18,6 +18,8 @@ import warnings
 import pytest
 import json
 
+from filelock import FileLock
+
 from torq.utils.boards import create_boards_control
 
 try:
@@ -507,16 +509,47 @@ def _binary_version(request, prefix, file_path):
     libraries cannot be found.
     """
     if file_path not in _binary_versions:
-        try:
-            binary = _executed_binary(file_path)
-            files = [binary] + _linked_libraries(binary)
-            version = prefix + _hash_data(sorted((f.name, _hash_file(request, f)) for f in files))
-        except (OSError, ValueError, ImportError, subprocess.CalledProcessError) as e:
-            # a warning, so that pytest lists it in its summary
-            warnings.warn(f"versioning {file_path} by its mtime: {e}")
-            version = prefix + "mtime_" + str(os.path.getmtime(file_path))
+        # finding the libraries of a large binary is slow (otool reads the whole file), so the
+        # version is stored in the pytest cache with the size and mtime of the files it hashes,
+        # and computed by one xdist worker while the others wait
+        cache = request.config.cache
+        with FileLock(str(Path(cache.mkdir("torq_binary_versions")) / "lock")):
+            stored = cache.get("torq_binary_versions", {})
+            entry = stored.get(file_path)
+            try:
+                # found again each time: the binary of a pip script depends on PYTHONPATH
+                binary = _executed_binary(file_path)
+                if (entry is not None and entry.get("binary") == str(binary)
+                        and all(_file_stamp(f) == stamp for f, stamp in entry["files"])):
+                    version = entry["version"]
+                else:
+                    # the stamps are read before the files are hashed, and the version is stored
+                    # only if they didn't change meanwhile (e.g. a rebuild during the session)
+                    stamps = [_file_stamp(f) for f in (Path(file_path), binary)]
+                    libraries = _linked_libraries(binary)
+                    stamps += [_file_stamp(f) for f in libraries]
+                    files = [binary] + libraries
+                    version = prefix + _hash_data(sorted((f.name, _hash_file(request, f)) for f in files))
+                    stamped = [Path(file_path)] + files
+                    if [_file_stamp(f) for f in stamped] == stamps:
+                        stored[file_path] = {"version": version, "binary": str(binary),
+                                             "files": [[str(f), stamp] for f, stamp in zip(stamped, stamps)]}
+                        cache.set("torq_binary_versions", stored)
+            except (OSError, ValueError, ImportError, subprocess.CalledProcessError) as e:
+                # a warning, so that pytest lists it in its summary
+                warnings.warn(f"versioning {file_path} by its mtime: {e}")
+                version = prefix + "mtime_" + str(os.path.getmtime(file_path))
         _binary_versions[file_path] = version
     return _binary_versions[file_path]
+
+
+def _file_stamp(path):
+    """The size and mtime of a file, or None if it doesn't exist."""
+    try:
+        stat = os.stat(path)
+        return [stat.st_size, stat.st_mtime_ns]
+    except OSError:
+        return None
 
 
 @versioned_hashable_object_fixture
