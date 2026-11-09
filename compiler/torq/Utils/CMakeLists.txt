@@ -14,6 +14,7 @@ iree_cc_library(
     ConversionUtils.cpp
     Kernel.cpp
     ComputeConstants.cpp
+    ConstantEvaluator.cpp
     InvocationUtils.cpp
     LayoutTransformUtils.cpp
     TorqHw.cpp
@@ -29,6 +30,7 @@ iree_cc_library(
     TorqUtils.h
     ConversionUtils.h
     ComputeConstants.h
+    ConstantEvaluator.h
     Kernel.h
     InvocationUtils.h
     LayoutTransformUtils.h

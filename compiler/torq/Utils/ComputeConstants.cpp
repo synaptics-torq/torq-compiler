@@ -12,6 +12,7 @@
 #include "torq/Conversions/TorqHLToLinalg/Passes.h"
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
+#include "torq/Utils/ConstantEvaluator.h"
 
 #include "mlir/Dialect/LLVMIR/Transforms/Passes.h"
 #include "mlir/Dialect/Linalg/Passes.h"
@@ -59,6 +60,14 @@ llvm::cl::opt<std::string> clDumpComputeConstantsIR(
 llvm::cl::opt<bool> clInsertDebugTrapInComputeConstants(
     "torq-insert-debug-trap-in-compute-constants",
     llvm::cl::desc("Insert a debug trap in the generated code for computing constants"),
+    llvm::cl::init(false)
+);
+
+// Computes every non-constant value with the JIT, e.g. to compare ConstantEvaluator with it.
+static llvm::cl::opt<bool> clDisableConstantEvaluator(
+    "torq-disable-constant-evaluator",
+    llvm::cl::desc("Compute all compile-time constants with the JIT instead of evaluating the "
+                   "supported ops directly"),
     llvm::cl::init(false)
 );
 
@@ -777,17 +786,23 @@ FailureOr<SmallVector<Attribute>> computeAllConstAttr(
     SmallVector<SmallVector<Operation *>, 4> opsSets;
     opsSets.reserve(values.size());
 
-    // Values that are already constants are read directly: only the others need a module to be
-    // JIT-compiled. knownAttrs is null for the values to compute.
+    // Values that ConstEvaluator computes from the constants' data don't need the JIT: only the
+    // others need a module to be JIT-compiled. knownAttrs is null for the values to compute.
     SmallVector<Value> constValues;
     SmallVector<Attribute> knownAttrs;
     SmallVector<Value> valuesToCompute;
     constValues.reserve(values.size());
     knownAttrs.reserve(values.size());
+    ConstantEvaluator evaluator(recursive, assumeZero);
     for (auto value : values) {
         DenseElementsAttr attr;
-        if (isa<RankedTensorType>(value.getType()) && !llvm::is_contained(assumeZero, value) &&
-            matchPattern(value, m_Constant(&attr))) {
+        if (!clDisableConstantEvaluator) {
+            attr = evaluator.evaluate(value);
+        }
+        else if (!llvm::is_contained(assumeZero, value)) {
+            matchPattern(value, m_Constant(&attr));
+        }
+        if (attr) {
             constValues.push_back(value);
             knownAttrs.push_back(attr);
             continue;
