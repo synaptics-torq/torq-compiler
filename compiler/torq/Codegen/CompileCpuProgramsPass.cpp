@@ -116,6 +116,12 @@ namespace {
 std::mutex cssLinkCacheMutex;
 llvm::StringMap<std::vector<uint8_t>> cssLinkCache;
 
+// Compiled CSS objects, keyed by the target and the hash of the program before lowering. The
+// probes also lower and compile the same programs as the real pipeline; the link that follows
+// goes through cssLinkCache.
+std::mutex cssObjectCacheMutex;
+llvm::StringMap<std::string> cssObjectCache;
+
 class CssLinker {
 
   public:
@@ -772,10 +778,35 @@ LogicalResult CompileCpuProgramsPass::compileAndLink(IREE::HAL::ExecutableVarian
 
     /* 1. Compile the variant to an object file */
 
-    auto maybeObject = compile(variantOp, target, *targetMachine);
+    // The key is taken before compile(), which lowers the variant in place.
+    std::string objectKey;
+    FailureOr<std::string> maybeObject = failure();
+    if (!hostBuild) {
+        std::string programIr;
+        llvm::raw_string_ostream os(programIr);
+        variantOp->print(os, OpPrintingFlags().useLocalScope());
+        auto hash = llvm::xxh3_128bits(llvm::arrayRefFromStringRef(programIr));
+        objectKey = target.getTriple() + "\n" + target.getCpu() + "\n" + target.getCpuFeatures() +
+                    "\n" + llvm::utohexstr(hash.high64, false, 16) +
+                    llvm::utohexstr(hash.low64, false, 16);
+
+        std::lock_guard<std::mutex> lock(cssObjectCacheMutex);
+        auto it = cssObjectCache.find(objectKey);
+        if (it != cssObjectCache.end())
+            maybeObject = it->second;
+    }
 
     if (failed(maybeObject)) {
-        return failure();
+        maybeObject = compile(variantOp, target, *targetMachine);
+
+        if (failed(maybeObject)) {
+            return failure();
+        }
+
+        if (!objectKey.empty()) {
+            std::lock_guard<std::mutex> lock(cssObjectCacheMutex);
+            cssObjectCache.try_emplace(objectKey, *maybeObject);
+        }
     }
 
     /* 2. Link the target program */

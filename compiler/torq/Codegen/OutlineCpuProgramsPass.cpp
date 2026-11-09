@@ -10,6 +10,7 @@
 #include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
 #include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
 #include "mlir/IR/Attributes.h"
+#include "torq/Conversions/LinalgToTorqHL/PatternUtils.h"
 #include "torq/Dialect/TorqHL/TorqHLDialect.h"
 #include "torq/Dialect/TorqHL/TorqHLOps.h"
 #include "torq/Utils/MemoryUtils.h"
@@ -220,7 +221,11 @@ static Operation *outlineCpuProgramIntoExecutable(
             continue;
         }
 
-        rewriter.clone(op, map);
+        // The fuse group ids only matter for the NSS pipeline: dropping them lets the CSS compile
+        // cache reuse a program that a probe compiled under another group id.
+        rewriter.clone(op, map)->walk([](Operation *clonedOp) {
+            clonedOp->removeAttr(TORQ_FUSE_GROUP_ID);
+        });
     }
 
     // perform a store operation for all the outputs
