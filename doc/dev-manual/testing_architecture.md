@@ -322,7 +322,18 @@ STORES`` reads results from stores before computing them (both read the environm
 ``TORQ_REMOTE_CACHE_WRITE`` and ``TORQ_REMOTE_CACHE_READ`` by default). A store keeps one archive
 per result, under its version. Only results computed successfully are stored; not the runs on an
 FPGA or a board, nor the compiler's IR dumps, nor the inputs, which are cheap to make again
-(fixtures marked ``@local_only``).
+(fixtures marked ``@local_only``). The tests still compare the outputs with the reference, so a
+change of tolerance takes effect. A result fetched from a store doesn't report the compile and
+run times measured when it was computed, and the dashboard bundle lists it in
+``fetched_results``. ``--test-cache-summary FILE`` appends to ``FILE`` how many results each test
+file and each fixture reused, fetched and computed (the C-model CI jobs write it to their job
+summary).
+
+The C-model CI jobs use the store when the ``TEST_CACHE`` repository variable is ``true``. Pushes
+to ``main`` write their results to the artifact bucket (``ARTIFACT_BUCKET``). Pull requests and
+the merge queue write theirs to the bucket of work in progress (``WIP_ARTIFACT_BUCKET``), which
+only they can read, and read both. The buckets keep their objects for 7 days. Runs on tags
+(releases) and pull requests with the ``no-test-cache`` label compute everything.
 
 A session only gets the results it would compute itself, so a developer gets the compiles of
 the CI store only with the same options (CI passes ``--no-phases-dump``), on the same OS (the

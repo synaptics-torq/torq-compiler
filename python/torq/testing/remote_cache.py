@@ -8,8 +8,10 @@ a local directory or an S3 prefix (s3://bucket/prefix). Each entry is one archiv
 it depends on.
 
 Entries are only written for results that were computed successfully. A directory with a
-.no_remote_cache file (e.g. the results of a run on a board) is not written. Any error of a store
-disables it for the rest of the process, with a warning: the tests then compute what they need.
+.no_remote_cache file (e.g. the results of a run on a board) is not written. A directory fetched
+from a store gets a .from_remote_cache file, so that the times measured when it was computed, on
+another machine, are not reported again. Any error of a store disables it for the rest of the
+process, with a warning: the tests then compute what they need.
 """
 
 import logging
@@ -27,6 +29,7 @@ logger = logging.getLogger("versioned_fixtures")
 _EXCLUDED_DIR_ENTRIES = {"phases", "ir", "valid"}
 
 NO_REMOTE_CACHE_MARKER = ".no_remote_cache"
+FROM_REMOTE_CACHE_MARKER = ".from_remote_cache"
 
 
 class LocalStore:
@@ -142,6 +145,7 @@ class RemoteCache:
                                 item.unlink()
                         for item in extracted.iterdir():
                             os.replace(item, dest / item.name)
+                        (dest / FROM_REMOTE_CACHE_MARKER).touch()
                     else:
                         os.replace(extracted / "file", dest)
                 logger.debug(f"[remote cache hit] {key} from {store.name}")

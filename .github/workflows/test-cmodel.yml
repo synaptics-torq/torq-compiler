@@ -67,6 +67,15 @@ jobs:
       - name: Run C model tests
         id: run_cmodel_tests
         uses: ./.github/actions/tests
+        env:
+          # the store of test results shared across jobs (see python/torq/testing/remote_cache.py),
+          # on when the TEST_CACHE repository variable is 'true'. Runs with the protected role
+          # (pushes to main) write their results to ARTIFACT_BUCKET; the others (pull requests,
+          # merge queue) write theirs to WIP_ARTIFACT_BUCKET, which they read first, and read
+          # ARTIFACT_BUCKET. Both buckets expire their objects 7 days after upload. Tags (releases)
+          # and pull requests with the no-test-cache label compute everything.
+          TORQ_REMOTE_CACHE_READ: ${{ vars.TEST_CACHE == 'true' && !startsWith(github.ref, 'refs/tags/') && !contains(github.event.pull_request.labels.*.name || '', 'no-test-cache') && format('s3://{0}/torq-test-cache', vars.ARTIFACT_BUCKET) || '' }}
+          TORQ_REMOTE_CACHE_WRITE: ${{ vars.TEST_CACHE == 'true' && !startsWith(github.ref, 'refs/tags/') && !contains(github.event.pull_request.labels.*.name || '', 'no-test-cache') && format('s3://{0}/torq-test-cache', steps.configure-aws-credentials.outputs.protected_role == 'true' && vars.ARTIFACT_BUCKET || vars.WIP_ARTIFACT_BUCKET) || '' }}
         with:
           app_id: ${{ vars.CI_APP_ID }}
           app_private_key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -80,6 +89,7 @@ jobs:
             --tflite-layer-test-generate-full-model-only
             --torq-compile-time-profiling-output-dir=${{ env.CMODEL_PROFILING_LOGS_PATH }}
             --torq-step-timings=${{ env.CMODEL_PROFILING_LOGS_PATH }}/step_timings.json
+            --test-cache-summary=$GITHUB_STEP_SUMMARY
             ${{ env.GENERATE_STATUS_REPORT == 'true' && format('--try-xfails --save-test-status-report-to={0}', env.TEST_STATUS_REPORT_PATH) || '' }}
           torq_perf_server: ${{ env.DASHBOARD_SERVER }}
           ignore_failures: ${{ env.GENERATE_STATUS_REPORT }}

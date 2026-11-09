@@ -12,10 +12,17 @@ from torq.lab.metrics import (  # noqa: F401
     measure_time,
 )
 
+from .remote_cache import FROM_REMOTE_CACHE_MARKER
+
 
 """
 This module provides helper functions to profile tests
 """
+
+
+# wall times measured when a result is computed: not reported for a result fetched from a test
+# cache store (see remote_cache), as another machine measured them
+MEASURED_TIMES = ("compilation_time", "e2e_inference_time")
 
 
 def record_measurements(request, property_name: str, file_path: str):
@@ -31,6 +38,9 @@ def record_measurements(request, property_name: str, file_path: str):
 
     with open(f, 'r') as fp:
         data = json.load(fp)
+
+    if (Path(file_path) / FROM_REMOTE_CACHE_MARKER).exists():
+        data = {name: value for name, value in data.items() if name not in MEASURED_TIMES}
 
     record_property = request.getfixturevalue("record_property")
     

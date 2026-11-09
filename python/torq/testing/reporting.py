@@ -403,6 +403,12 @@ def get_test_data(node_id, report_phases):
     if props['runtime_measurements']:
         measurements.update(props['runtime_measurements'])
 
+    # the results fetched from a test cache store (see remote_cache), by this test or an earlier
+    # one: their measured times are not reported
+    fetched_results = sorted({value[0] for phase_report in report_phases.values()
+                              for name, value in phase_report.user_properties
+                              if name == 'test_cache_use' and value[2]})
+
     test_run = {
         'module': module,
         'name': name,
@@ -410,7 +416,8 @@ def get_test_data(node_id, report_phases):
         'outcome': outcome,
         'linked_issue': props['issue'],
         'measurements': measurements,
-        'metadata': {detail: props.get(detail) for detail in test_metadata}
+        'metadata': {detail: props.get(detail) for detail in test_metadata},
+        'fetched_results': fetched_results,
     }
 
     return test_run, props

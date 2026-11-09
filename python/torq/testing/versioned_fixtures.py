@@ -16,8 +16,9 @@ import logging
 import subprocess
 import sys
 import os
+from collections import Counter, defaultdict
 
-from .remote_cache import RemoteCache
+from .remote_cache import FROM_REMOTE_CACHE_MARKER, RemoteCache
 
 """
 This module provides decorators that allow to create fixtures that cache their results.
@@ -41,6 +42,8 @@ def pytest_addoption(parser):
                      help="Comma-separated stores (directories or s3://bucket/prefix) to read cached results from (default: $TORQ_REMOTE_CACHE_READ)")
     parser.addoption("--remote-cache-write", default=os.environ.get("TORQ_REMOTE_CACHE_WRITE", ""),
                      help="Store to write the computed results to, and to read first (default: $TORQ_REMOTE_CACHE_WRITE)")
+    parser.addoption("--test-cache-summary", default=None,
+                     help="Markdown file to append the cache use of the session to, per test file and per fixture (e.g. $GITHUB_STEP_SUMMARY)")
 
 logger = logging.getLogger("versioned_fixtures")
 
@@ -81,6 +84,59 @@ def _fetch_remote(request, fun, version, dest, is_dir):
 def _store_remote(fun, version, src, is_dir):
     if _remote is not None and not getattr(fun, "local_only", False):
         _remote.store(fun.__name__, version, src, is_dir)
+
+
+# how the tests got the results of the fixtures, per test file: Counter of (fixture, use), use
+# being "computed", "reused" (from the local cache) or "fetched" (from a store)
+_cache_uses = defaultdict(Counter)
+
+
+def _record_cache_use(request, fun, use, from_store=False):
+    """
+    from_store: the result was fetched from a store, by this test or (for a reused directory) by
+    an earlier one, so its measured times are not reported
+    """
+    # the local_only results are never in a store: they would only lower the hit rates
+    if not getattr(fun, "local_only", False):
+        request.node.user_properties.append(("test_cache_use", (fun.__name__, use, from_store or use == "fetched")))
+
+
+def pytest_runtest_logreport(report):
+    # the teardown report has the properties recorded by all the fixtures of the test
+    if report.when == "teardown":
+        test_file = report.nodeid.split("::")[0]
+        for name, value in report.user_properties:
+            if name == "test_cache_use":
+                _cache_uses[test_file][(value[0], value[1])] += 1
+
+
+def _cache_use_summary():
+    def row(name, uses):
+        total = sum(uses.values())
+        hits = uses["reused"] + uses["fetched"]
+        return (f"| {name} | {total} | {uses['reused']} | {uses['fetched']} | {uses['computed']} | "
+                f"{100 * hits / total:.0f}% |")
+
+    header = ["| {} | Results | Reused | Fetched | Computed | Hit rate |", "|---|---:|---:|---:|---:|---:|"]
+    lines = ["### Test cache", "", header[0].format("Test file"), header[1]]
+    per_fixture = defaultdict(Counter)
+    for test_file, uses in sorted(_cache_uses.items()):
+        per_test_file = Counter()
+        for (fixture, use), count in uses.items():
+            per_test_file[use] += count
+            per_fixture[fixture][use] += count
+        lines.append(row(test_file, per_test_file))
+    lines += ["", header[0].format("Fixture"), header[1]]
+    lines += [row(fixture, uses) for fixture, uses in sorted(per_fixture.items())]
+    return "\n".join(lines) + "\n"
+
+
+def pytest_sessionfinish(session):
+    summary_file = session.config.getoption("--test-cache-summary")
+    # under xdist, only the controller has the reports of all the workers
+    if summary_file and _cache_uses and not hasattr(session.config, "workerinput"):
+        with open(summary_file, "a") as f:
+            f.write(_cache_use_summary())
 
 
 # What the cached results depend on beyond the inputs of the fixtures: the tools that make the
@@ -527,12 +583,16 @@ def versioned_generated_file_fixture(suffix):
             with FileLock(str(versioned_file.file_path) + ".lock"):
 
                 if not versioned_file.valid(request):
-                    if not _fetch_remote(request, fun, versioned_file.version, versioned_file.file_path, False):
+                    if _fetch_remote(request, fun, versioned_file.version, versioned_file.file_path, False):
+                        _record_cache_use(request, fun, "fetched")
+                    else:
                         logger.debug("[cache miss] " + fun.__name__ + f" -> {versioned_file.file_path}")
                         fun(**kwargs_data)
                         _store_remote(fun, versioned_file.version, versioned_file.file_path, False)
+                        _record_cache_use(request, fun, "computed")
                 else:
                     logger.debug("[cache hit] " + fun.__name__ + f" -> {versioned_file.file_path}")
+                    _record_cache_use(request, fun, "reused")
 
             logger.debug("[generated file version] " + fun.__name__ + f" -> {versioned_file.file_path}")
 
@@ -596,18 +656,26 @@ def versioned_generated_directory_fixture(fun):
         with FileLock(str(versioned_dir.dir_path) + ".lock"):
 
             if not versioned_dir.valid(request):
-                if not _fetch_remote(request, fun, versioned_dir.version, versioned_dir.dir_path, True):
+                if _fetch_remote(request, fun, versioned_dir.version, versioned_dir.dir_path, True):
+                    _record_cache_use(request, fun, "fetched")
+                else:
                     logger.debug("[cache miss] " + fun.__name__ + f" -> {versioned_dir.dir_path}")
+
+                    # left by an earlier fetch of the same version (e.g. with --recompute-cache)
+                    (versioned_dir.dir_path / FROM_REMOTE_CACHE_MARKER).unlink(missing_ok=True)
 
                     fun(**kwargs_data)
 
                     _store_remote(fun, versioned_dir.version, versioned_dir.dir_path, True)
+                    _record_cache_use(request, fun, "computed")
 
                 # mark the directory as valid
                 with open(versioned_dir.dir_path / "valid", "w") as f:
                     pass
             else:
                 logger.debug("[cache hit] " + fun.__name__ + f" -> {versioned_dir.dir_path}")
+                _record_cache_use(request, fun, "reused",
+                                  from_store=(versioned_dir.dir_path / FROM_REMOTE_CACHE_MARKER).exists())
 
         logger.debug("[generated dir version] " + fun.__name__ + f" -> {versioned_dir.dir_path}")
 
@@ -747,14 +815,17 @@ def versioned_cached_data_fixture(fun):
 
         with FileLock(str(versioned_data.file_path) + ".lock"):
 
-            if not versioned_data.load(request) and not (
-                    _fetch_remote(request, fun, versioned_data.version, versioned_data.file_path, False)
-                    and versioned_data.load(request)):
+            if versioned_data.load(request):
+                logger.debug("[cache hit] " + fun.__name__ + f" -> {versioned_data.file_path}")
+                _record_cache_use(request, fun, "reused")
+            elif (_fetch_remote(request, fun, versioned_data.version, versioned_data.file_path, False)
+                  and versioned_data.load(request)):
+                _record_cache_use(request, fun, "fetched")
+            else:
                 logger.debug("[cache miss] " + fun.__name__ + f" -> {versioned_data.file_path}")
                 versioned_data.save(fun(**kwargs_data))
                 _store_remote(fun, versioned_data.version, versioned_data.file_path, False)
-            else:
-                logger.debug("[cache hit] " + fun.__name__ + f" -> {versioned_data.file_path}")
+                _record_cache_use(request, fun, "computed")
 
         logger.debug("[data version] " + fun.__name__ + " -> " + versioned_data.version)
 
