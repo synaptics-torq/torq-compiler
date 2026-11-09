@@ -15,8 +15,8 @@ from torq.testing.tensorflow import run_with_tflite
 from torq.testing.tflite_layer_extractor import extract_all_layers, TFLiteTensorOutputExporter
 
 from torq.testing.versioned_fixtures import (    
-    versioned_unhashable_object_fixture, versioned_hashable_object_fixture, versioned_cached_data_fixture,
-    versioned_generated_file_fixture
+    versioned_unhashable_object_fixture, versioned_cached_data_fixture,
+    versioned_generated_file_fixture, VersionedUncachedData, _hash_data, _hash_file
 )
 
 
@@ -271,11 +271,22 @@ def get_quant_params(model_path):
 # Fixtures
 # ============================================================================
 
-@versioned_hashable_object_fixture
+@pytest.fixture
 def tflite_layer_model(request):
-    """Fixture that provides the TFLite model for the current test case."""
+    """
+    Fixture that provides the TFLite model for the current test case.
 
-    return request.param
+    It is versioned by the content of its model files, not by their paths: they are in the pytest
+    cache, whose absolute path changes between checkouts (e.g. between CI jobs), and a version
+    that has them can't be shared through a remote cache.
+    """
+
+    case: TFLiteLayerCase = request.param
+    model_hashes = {name: _hash_file(request, Path(path)) if path and Path(path).exists() else None
+                    for name, path in [("full_model", case.full_model_path), ("layer_model", case.layer_model_path)]}
+    version_data = {**asdict(case), "full_model_path": None, "layer_model_path": None, "model_hashes": model_hashes}
+
+    return VersionedUncachedData(case, "tflite_layer_model" + _hash_data(version_data))
 
 
 @versioned_generated_file_fixture("tflite")
