@@ -1177,11 +1177,18 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
     );
 };
 
+// The probes only measure the memory of IR they then drop, and the real pipeline runs the same
+// passes, so the probes don't verify the IR after each pass.
+static LogicalResult applyProbePassManagerOptions(PassManager &pm) {
+    pm.enableVerifier(false);
+    return applyPassManagerCLOptions(pm);
+}
+
 void TileAndFusePass::initPipelines(MLIRContext *context) {
     if (assignAddressesPipelineOptimized_ == nullptr) {
         assignAddressesPipelineOptimized_ = std::make_unique<PassManager>(context);
 
-        if (failed(applyPassManagerCLOptions(*assignAddressesPipelineOptimized_)))
+        if (failed(applyProbePassManagerOptions(*assignAddressesPipelineOptimized_)))
             assert(false);
 
         addPassesPostTileAndFuseUpToAssignLramAddresses(*assignAddressesPipelineOptimized_, true);
@@ -1190,7 +1197,7 @@ void TileAndFusePass::initPipelines(MLIRContext *context) {
     if (assignAddressesPipelineNotOptimized_ == nullptr) {
         assignAddressesPipelineNotOptimized_ = std::make_unique<PassManager>(context);
 
-        if (failed(applyPassManagerCLOptions(*assignAddressesPipelineNotOptimized_)))
+        if (failed(applyProbePassManagerOptions(*assignAddressesPipelineNotOptimized_)))
             assert(false);
 
         addPassesPostTileAndFuseUpToAssignLramAddresses(
@@ -1201,7 +1208,7 @@ void TileAndFusePass::initPipelines(MLIRContext *context) {
     if (assignAddressesPipelineSharedSlices_ == nullptr) {
         assignAddressesPipelineSharedSlices_ = std::make_unique<PassManager>(context);
 
-        if (failed(applyPassManagerCLOptions(*assignAddressesPipelineSharedSlices_)))
+        if (failed(applyProbePassManagerOptions(*assignAddressesPipelineSharedSlices_)))
             assert(false);
 
         addPassesPostTileAndFuseUpToAssignLramAddresses(
@@ -1224,7 +1231,7 @@ TileAndFusePass::runAssignAddressesPipeline(ModuleOp moduleOp, bool optimizeForT
             p.sharedSlices = std::make_unique<PassManager>(context);
             for (PassManager *pm :
                  {p.optimized.get(), p.notOptimized.get(), p.sharedSlices.get()}) {
-                if (failed(applyPassManagerCLOptions(*pm)))
+                if (failed(applyProbePassManagerOptions(*pm)))
                     assert(false);
             }
             addPassesPostTileAndFuseUpToAssignLramAddresses(
@@ -1637,7 +1644,7 @@ llvm::FailureOr<bool> TileAndFusePass::checkTileFitsInMemory(
         auto &funcPm = shapes.nest<func::FuncOp>();
         funcPm.addPass(createFuseGroupPreservingCanonicalizerPass());
         funcPm.addPass(createPeelTileLoopsPass());
-        if (failed(applyPassManagerCLOptions(shapes)) || failed(shapes.run(*fixedModuleOp)))
+        if (failed(applyProbePassManagerOptions(shapes)) || failed(shapes.run(*fixedModuleOp)))
             return llvm::failure();
         if (failed(encodeSpecializedProbePayloads(funcOp)))
             return llvm::failure();
