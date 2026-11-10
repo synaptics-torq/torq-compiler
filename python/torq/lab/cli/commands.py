@@ -385,6 +385,10 @@ def main(argv=None) -> int:
         from torq.lab.model_tools.shape_conversion.tflite import main as convert_static_main
 
         return convert_static_main(argv[1:])
+    elif task == "boards":
+        from torq.lab.boards import main as boards_main
+
+        return boards_main(argv[1:])
 
     parser = _build_parser()
     args = parser.parse_args(argv)

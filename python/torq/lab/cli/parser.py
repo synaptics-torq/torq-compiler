@@ -195,6 +195,7 @@ Delegated command groups (see `{PROG} <group> --help`):
   analyze       ONNX quantization sensitivity analysis (per-node / per-layer reports)
   convert_dtype Convert model to Torq compatible dtypes
   convert_static Convert a dynamic TFLite model to static (default) shapes
+  boards        Manage and interact with board benches
 """
     parser = argparse.ArgumentParser(
         prog=PROG,

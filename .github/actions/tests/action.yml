@@ -257,7 +257,8 @@ runs:
         JENKINS_URL: ${{ inputs.jenkins_url }}
         JENKINS_JOB: ${{ inputs.jenkins_job }}
       run: |
-        python3 -u -m torq.utils.boards setup-for-ci \
+        torq-lab boards setup-for-ci \
+            --backend jenkins \
             --control-file bench-control.json \
             --local-runner-path release/tools/astra-sl-torq-run-module \
             --build-version $(cat scripts/astra_build_version.txt) \
@@ -310,8 +311,7 @@ runs:
         JENKINS_URL: ${{ inputs.jenkins_url }}
         JENKINS_JOB: ${{ inputs.jenkins_job }}
       run: |
-        python3 -u -m torq.utils.boards release \
-            --control-file bench-control.json
+        torq-lab boards release --control-file bench-control.json
 
     - name: Create compressed test data cache artifact
       if: ${{ inputs.test_data_cache_artifact != '' || inputs.s3_artifact_bucket != '' }}

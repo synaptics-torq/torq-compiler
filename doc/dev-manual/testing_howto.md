@@ -23,6 +23,28 @@ Run ``pytest`` from the root of the repository, with the development virtual env
 
 To see the tests a command would run, add ``--collect-only -q``.
 
+## Run test cases on a board
+
+To run tests on a board (physical or emulated), first ensure adb is working. Then acquire
+a connection to the board (this is persistent across reboots as long as the board name 
+doesn't change):
+
+```
+$ torq-lab boards acquire
+```
+
+Then, optionally, update the runtime and kernel binary on the board with a local build:
+
+```
+$ torq-lab boards setup --soc-build-tree <path/to/soc/build/tree>
+```
+
+Finally, run the tests with the following extra parameter:
+
+```
+$ pytest --torq-runtime-hw="astra_machina"
+```
+
 ## Add a test case
 
 Add the smallest test that shows the feature or the bug. Choose the kind of case from what you

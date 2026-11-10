@@ -19,9 +19,8 @@ import warnings
 import pytest
 import json
 
+from torq.lab.boards import create_boards_control
 from filelock import FileLock
-
-from torq.utils.boards import create_boards_control
 
 try:
     import iree.compiler.ir  # noqa: F401  # gate: skip iree-based tests when iree is unavailable
@@ -95,7 +94,7 @@ def pytest_addoption(parser):
     parser.addoption("--torq-runtime-runs", type=int, default=1, help="Number of times each model runs on a remote board; with more than 1, the first run is a warm-up and the timings are the median of the other runs")
     parser.addoption("--torq-compile-time-profiling-output-dir", default=None, help="Directory to save per-test compile time profiling outputs")
     parser.addoption("--torq-runtime-profiling-output-dir", default=None, help="Directory to save per-test profiling outputs")
-    parser.addoption("--torq-bench-control-file", default=None, help="Path to JSON file used to control a board bench deployment")
+    parser.addoption("--torq-bench-control-file", default=None, help="Path to JSON file used to control a board bench deployment")    
     parser.addoption("--torq-addr", default=None, help="SSH address or ADB device ID to run tests remotely, use 'ADB' to select the first detected device")
     parser.addoption("--torq-port", default=22, help="SSH port to run tests remotely")
     parser.addoption("--torq-private-key", default=None, help="Private key to use to run tests remotely")
@@ -1155,6 +1154,25 @@ def benchmark_output_dir(request):
     return request.config.getoption("--torq-benchmark-output-dir")
 
 
+def get_bench_control_file(request, runtime_hw_type):
+
+    # simulator and fpga tests never run on remote boards
+    if runtime_hw_type in [ 'sim', 'aws_fpga' ]:
+        return None
+
+    # the user specified a bench control file, use that instead of the default one
+    if opt_val := request.config.getoption("--torq-bench-control-file", default=None):
+        return opt_val
+
+    # check if the user acquired any board
+    default_control_file = Path.home() / ".config" / "torq-control.json"
+
+    if default_control_file.exists():
+        return str(default_control_file)
+
+    raise Exception("No bench control file found for runtime hardware type " + runtime_hw_type)
+
+
 @versioned_generated_directory_fixture
 def torq_results_dir(versioned_dir, request, torq_compiled_model, torq_input_data_args, mlir_io_spec,
                         torq_runtime, runtime_hw_type, torq_runtime_options, enable_torq_buffer_tracing, 
@@ -1273,7 +1291,7 @@ def torq_results_dir(versioned_dir, request, torq_compiled_model, torq_input_dat
         remote_run_module(remote_addr, remote_port, remote_runner_path, update_runtime, 
                           private_key=request.config.getoption("--torq-private-key", default=None))
 
-    elif bench_control_file := request.config.getoption("--torq-bench-control-file", default=None):
+    elif bench_control_file := get_bench_control_file(request, runtime_hw_type):
         controller = create_boards_control(bench_control_file)
 
         wait_start = time.perf_counter()

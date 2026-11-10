@@ -872,7 +872,7 @@ def _detect_control_backend(control_file: str | None) -> str | None:
 
 
 def create_boards_control(control_file: str | None, backend: str | None = None, adb_devices: list[str] | None = None) -> BoardsControl:
-    resolved_backend = backend or _detect_control_backend(control_file) or "jenkins"
+    resolved_backend = backend or _detect_control_backend(control_file) or "adb"
 
     if resolved_backend == "jenkins":
         return JenkinsBoardsControl(control_file)
@@ -948,8 +948,9 @@ def clear_jenkins_queue():
 
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Script to create and manage Torq boards using Jenkins or local ADB devices.")
+def main(argv, prog="torq-lab boards"):
+    parser = argparse.ArgumentParser(prog=prog, description="Script to create and manage Torq boards using Jenkins or local ADB devices.")
+    default_control_file = str(Path.home() / ".config" / "torq-control.json")
     
     subcommands = parser.add_subparsers(dest="command", required=True)
     backend_parent = argparse.ArgumentParser(add_help=False)
@@ -960,30 +961,31 @@ def main():
     create_parser.add_argument("--board-build-id", type=int, help="Do not acquire a new set of boards, use the boards from this existing build ID")    
     create_parser.add_argument("--build-version", type=str, help="Optional build version to specify when creating the board, if not provided the default build will be used")
     create_parser.add_argument("--private-key-path", type=str, help="Path to an existing private key to use for board creation, if not provided a new key pair will be generated")    
-    create_parser.add_argument("--control-file", required=True, help="Path to the control file with allocation info")    
+    create_parser.add_argument("--control-file", default=default_control_file, help="Path to the control file with allocation info (default: %(default)s)")
 
     subcommands.add_parser("list-queue", help="List the current queue items in Jenkins, this can be used to check the status of the board creation request", parents=[backend_parent])
 
     subcommands.add_parser("latest-installed-build-version", help="Get the latest build version installed on the board from Jenkins", parents=[backend_parent])
 
     wait_parser = subcommands.add_parser("wait", help="Wait for the boards to be ready using the allocation info saved from a previous acquire command", parents=[backend_parent])
-    wait_parser.add_argument("--control-file", required=True, help="Path to the control file with allocation info")    
+    wait_parser.add_argument("--control-file", default=default_control_file, help="Path to the control file with allocation info (default: %(default)s)")
 
     connect_parser = subcommands.add_parser("connect", help="Connect to the boards using SSH or ADB shell, this is a blocking call that will keep the connection open until interrupted", parents=[backend_parent])    
     connect_parser.add_argument("--verbose", action="store_true", help="Print more verbose output when connecting to the board")
-    connect_parser.add_argument("--control-file", required=True, help="Path to the control file with allocation info")
+    connect_parser.add_argument("--control-file", default=default_control_file, help="Path to the control file with allocation info (default: %(default)s)")
 
     release_parser = subcommands.add_parser("release", help="Release the board, this should be used after the board is no longer needed to free up resources", parents=[backend_parent])
-    release_parser.add_argument("--control-file", required=True, help="Path to the control file with allocation info")
+    release_parser.add_argument("--control-file", default=default_control_file, help="Path to the control file with allocation info (default: %(default)s)")
 
-    setup_boards_parser = subcommands.add_parser("setup-boards", help="Install torq runtime and kernel driver to the boards", parents=[backend_parent])
-    setup_boards_parser.add_argument("--control-file", required=True, help="Path to the control file with allocation info")
-    setup_boards_parser.add_argument("--local-runner-path", required=True, help="Path to the local torq-run-module binary")
+    setup_boards_parser = subcommands.add_parser("setup-boards", help="Install torq runtime and kernel driver to the boards", parents=[backend_parent])    
+    setup_boards_parser.add_argument("--control-file", default=default_control_file, help="Path to the control file with allocation info (default: %(default)s)")
+    setup_boards_parser.add_argument("--soc-build-tree", help="Path to the SoC build tree")
+    setup_boards_parser.add_argument("--local-runner-path", help="Path to the local torq-run-module binary")
     setup_boards_parser.add_argument("--local-ko-path", help="Path to the local kernel module (.ko) file")
 
     setup_ci_parser = subcommands.add_parser("setup-for-ci", help="Perform all steps to setup a bench for CI testing", parents=[backend_parent])
     setup_ci_parser.add_argument("--force", action="store_true", help="Force update of image even if already present on board")
-    setup_ci_parser.add_argument("--control-file", required=True, help="Path to the control file with allocation info")
+    setup_ci_parser.add_argument("--control-file", default=default_control_file, help="Path to the control file with allocation info (default: %(default)s)")
     setup_ci_parser.add_argument("--local-runner-path", required=True, help="Path to the local torq-run-module binary")
     setup_ci_parser.add_argument("--local-ko-path", help="Path to the local kernel module (.ko) file")
     setup_ci_parser.add_argument("--build-version", type=str, help="Optional build version to specify when creating the board, if not provided the default build will be used")
@@ -993,7 +995,10 @@ def main():
 
     subcommands.add_parser("clear-jenkins-queue", help="Clear all queued board creation requests in Jenkins, this can be used to cancel all pending requests")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    if args.command == "acquire":
+        Path(args.control_file).parent.mkdir(parents=True, exist_ok=True)
 
     if hasattr(args, "control_file"):
         control = create_boards_control(args.control_file, backend=getattr(args, "backend", None), adb_devices=getattr(args, "adb_device", None))
@@ -1085,7 +1090,22 @@ def main():
         os.unlink(args.control_file)
 
     elif args.command == "setup-boards":
-        control.setup_boards(args.local_runner_path, args.local_ko_path)
+
+        local_runner_path = args.local_runner_path
+        local_ko_path = args.local_ko_path
+
+        if args.soc_build_tree:
+            if not local_runner_path:
+                local_runner_path = os.path.join(args.soc_build_tree, "runtime", "tools", "torq-run-module")
+
+            if not local_ko_path:
+                local_ko_path = os.path.join(args.soc_build_tree, "third_party", "iree", "runtime", "plugins", "TORQ", "torq_hw", "hal", "SL2610", "syna_npu.ko")
+
+        if not local_runner_path:
+            print("No local runner path nor SOC build tree specified")
+            exit(1)
+
+        control.setup_boards(local_runner_path, local_ko_path)
 
     elif args.command == "force-release":
         if not isinstance(control, JenkinsBoardsControl):
@@ -1100,4 +1120,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[0], sys.argv[1:])
