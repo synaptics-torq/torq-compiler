@@ -286,6 +286,13 @@ runs:
           CONTROL_PARAMS="--torq-bench-control-file bench-control.json"
         fi
 
+        # torq-compile doesn't verify the IR by default: verify it on main, and on PRs with the
+        # verify-ir label
+        if [[ "${{ github.event_name }}" == 'push' && "${{ github.ref }}" == 'refs/heads/main' ]] ||
+           [[ "${{ contains(github.event.pull_request.labels.*.name, 'verify-ir') }}" == 'true' ]]; then
+          CONTROL_PARAMS="$CONTROL_PARAMS --torq-verify-ir"
+        fi
+
         # Keep the total pytest invocation below the GitHub Actions job timeout.
         # This is separate from pytest-timeout, which limits each individual
         # test but does not limit the accumulated duration of the test suite.

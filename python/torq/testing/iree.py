@@ -86,6 +86,7 @@ def pytest_addoption(parser):
 
     parser.addoption("--no-phases-dump", action="store_true", default=False, help="Disable phase dumps in torq compiler")
     parser.addoption("--debug-torq-compiler", type=int, default=0, help="Run torq compiler under gdb")
+    parser.addoption("--torq-verify-ir", action="store_true", default=False, help="Verify the IR after each pass when compiling with the torq backend (torq-compile doesn't by default)")
     parser.addoption("--trace-buffers", action="store_true", default=False, help="Enable tracing of buffers in the torq runtime")
     parser.addoption("--torq-runtime-hw-type", action="store", default="sim", help="Command separate list of target hw to use for torq tests (sim, aws_fpga)")
     parser.addoption("--torq-chips", action="store", default="sl2610-v1", help="Comma-separated list of chips to compile models for, or all")
@@ -965,6 +966,11 @@ def torq_compiled_model_dir(versioned_dir, torq_compiler_options, request, mlir_
     cmds += torq_target_host_options
 
     cmds += torq_compiler_options
+
+    # not a compiler option fixture, so it stays out of the cache key: verifying doesn't change the
+    # vmfb, and sessions with and without it share their cached compiles
+    if request.config.getoption("--torq-verify-ir"):
+        cmds.append('--verify')
     
     compile_time_profiling_output_dir = request.config.getoption("--torq-compile-time-profiling-output-dir")
 

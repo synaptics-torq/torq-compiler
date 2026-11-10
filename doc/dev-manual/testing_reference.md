@@ -79,6 +79,7 @@ Source: ``pytest --help``, section "Custom options". The most used ones:
 | ``--debug-ir [DIR]`` | Save the IR after each compiler pass |
 | ``--no-output-capture`` | Print the whole compiler and runtime output |
 | ``--extra-torq-compiler-options OPTS`` | Add compiler options to every test |
+| ``--torq-verify-ir`` | Verify the IR after each compiler pass (``torq-compile --verify``), which ``torq-compile`` doesn't do by default. It doesn't change the compiled model, so it's not part of the cache key. CI uses it on ``main``, and on PRs with the ``verify-ir`` label |
 | ``--torq-compiler-timeout S``, ``--torq-runtime-timeout S`` | Time limits of one compilation and one run (default 300 s and 240 s) |
 | ``--torq-runtime-profiling-output-dir DIR`` | Save a runtime profile of each test |
 | ``--torq-compile-time-profiling-output-dir DIR`` | Save the time of each compiler pass of each test |
@@ -209,6 +210,7 @@ Sources: ``.github/workflows/test.yml`` (pull requests and merge queue), ``relea
 | ``run-release-only`` | Run the ``release_only`` tests in the C model jobs |
 | ``generate-test-status-report`` | Run the known failures too (``--try-xfails``), attach a status report per job, don't fail on test failures |
 | ``test-stage-dashboard`` | Upload the results to the staging dashboard instead of production |
+| ``verify-ir`` | Verify the IR after each compiler pass (``--torq-verify-ir``), as on ``main`` |
 
 Adding a label starts a new run; removing one doesn't. Re-running a workflow run reuses the
 labels it had when it started.

@@ -32,6 +32,9 @@ int main(int argc, char **argv) {
     // as garbage (quantized_batch_matmul regression on 3.12).
     allArgs.push_back("--iree-dispatch-creation-hoist-uniform-scalar-compute=false");
 
+    // Verifying the IR after each pass takes 8-19% of the compile time; --verify turns it on
+    allArgs.push_back("--verify=false");
+
     for (int i = 1; i < argc; ++i) {
         allArgs.push_back(argv[i]);
     }
