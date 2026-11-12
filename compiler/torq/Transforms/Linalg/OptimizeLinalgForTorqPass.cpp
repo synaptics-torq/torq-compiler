@@ -198,6 +198,16 @@ class OptimizeLinalgForTorqPass
             if (failed(applyPatternsGreedily(getOperation(), frozenRaisePatterns))) {
                 return signalPassFailure();
             }
+
+            // After the raise, which takes the constant-weight corrections: the ones left
+            // correct a matmul of two activations, and run on the slices once split. The
+            // elementwise patterns give the split's adds the broadcast inputs their kernel needs.
+            RewritePatternSet zeroPointPatterns(ctx);
+            populateSplitMatmulZeroPointCorrectionPatterns(ctx, zeroPointPatterns);
+            populateOptimizeElementwiseBinaryOpPatterns(ctx, zeroPointPatterns);
+            if (failed(applyPatternsGreedily(getOperation(), std::move(zeroPointPatterns)))) {
+                return signalPassFailure();
+            }
         }
 
         populateCastI32MulPatterns(funcOp, rewriter);

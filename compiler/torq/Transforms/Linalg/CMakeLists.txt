@@ -46,6 +46,7 @@ iree_cc_library(
     OptimizeConv1DPattern.cpp
     OptimizeArithElementwiseBinaryOpPattern.cpp
     CastI32MulPattern.cpp
+    SplitMatmulZeroPointCorrectionPattern.cpp
     ShareMaxPoolStages.cpp
     FoldMaxPoolQuantizationPattern.cpp
     SplitStride4MaxPoolPattern.cpp

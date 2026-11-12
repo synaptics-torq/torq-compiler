@@ -102,6 +102,12 @@ void populateFuseReluClampWithTruncfPatterns(MLIRContext *ctx, RewritePatternSet
 
 void populateAbsorbDecomposedWzpCorrectionPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 
+// Split the i32 zero-point correction of a matmul of two activations into shifts and broadcast
+// adds that slice kernels support.
+void populateSplitMatmulZeroPointCorrectionPatterns(
+    MLIRContext *context, RewritePatternSet &patterns
+);
+
 // Converts to standardized representation of the many ops that may not be handled by
 // canonicalization patterns, to make them easier to match for torq-specific patterns
 void populateCommonStandardizationPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
