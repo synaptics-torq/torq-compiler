@@ -817,7 +817,10 @@ class RaiseDecomposedSoftmax : public OpRewritePattern<linalg::GenericOp> {
 //     -> four tosa.table i16 LUTs combined as (T_a<<17)+(T_b<<9)+(T_c<<1)+(T_d>>7)
 //        and round-shifted right by 12
 //     -> sum-reduce + ctlz + reciprocal multiply -> rounded right-shift
-//     -> apply_scale(mult=2^30, shift=30) + addi(-128) -> i8 result
+//     -> apply_scale(mult=2^shift, shift) + addi(-128) -> i8 result
+//
+// The rescales are 32-bit (2^30, 30) from the TF legalizer and tosa-converter-for-tflite
+// v2026.02.0 and earlier, and 16-bit (2^14, 14) from later converters.
 //
 // Reference (TF, convertSoftmaxOp int8 path + getTosaConst32bitSoftmaxExpTable):
 //   https://github.com/tensorflow/tensorflow/blob/master/tensorflow/compiler/mlir/tosa/transforms/legalize_common.cc
@@ -872,7 +875,7 @@ class RaiseSoftmaxTflite : public OpRewritePattern<linalg::GenericOp> {
             return failure();
         }
 
-        // Body must be TFLite-canonical: apply_scale(mult=2^30, shift=30) +
+        // Body must be TFLite-canonical: apply_scale(mult=2^shift, shift) +
         // addi(ozp=-128). rewriteSoftmax feeds `softmax_prob * 256` (i32) into
         // apply_scale's input expecting it to pass through unchanged, which
         // requires effective scale = mult / 2^shift = 1.
@@ -904,14 +907,17 @@ class RaiseSoftmaxTflite : public OpRewritePattern<linalg::GenericOp> {
                 return failure();
             }
 
-            if (APInt c; !matchPattern(applyScale.getMultiplier(), m_ConstantInt(&c)) ||
-                         c.getSExtValue() != (1 << 30)) {
-                LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] apply_scale multiplier != 2^30\n");
+            APInt mult, shift;
+            if (!matchPattern(applyScale.getMultiplier(), m_ConstantInt(&mult)) ||
+                !matchPattern(applyScale.getShift(), m_ConstantInt(&shift))) {
+                LLVM_DEBUG(
+                    llvm::dbgs() << "[SoftmaxTflite] apply_scale multiplier or shift not constant\n"
+                );
                 return failure();
             }
-            if (APInt c;
-                !matchPattern(applyScale.getShift(), m_ConstantInt(&c)) || c.getSExtValue() != 30) {
-                LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] apply_scale shift != 30\n");
+            if (int64_t s = shift.getSExtValue();
+                s < 0 || s > 30 || mult.getSExtValue() != (int64_t{1} << s)) {
+                LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] apply_scale multiplier != 2^shift\n");
                 return failure();
             }
 
@@ -945,8 +951,16 @@ class RaiseSoftmaxTflite : public OpRewritePattern<linalg::GenericOp> {
             return failure();
         }
 
-        // shift_amount = subi(cst, ctlz(expand_shape(sum_reduce))).
-        auto subiShiftGenericOp = shrsiGenericOp.getInputs()[1].getDefiningOp<linalg::GenericOp>();
+        // shift_amount = subi(cst, ctlz(expand_shape(sum_reduce))), which the 16-bit form
+        // broadcasts over the softmax axis as collapse_shape(Nx1 -> N) + broadcast.
+        Value shiftAmount = shrsiGenericOp.getInputs()[1];
+        if (Value broadcastSrc = matchBroadcastOp(shiftAmount)) {
+            auto collapseOp = broadcastSrc.getDefiningOp<tensor::CollapseShapeOp>();
+            if (collapseOp && collapseOp.getSrcType().getRank() > 0 &&
+                collapseOp.getSrcType().getShape().back() == 1)
+                shiftAmount = collapseOp.getSrc();
+        }
+        auto subiShiftGenericOp = shiftAmount.getDefiningOp<linalg::GenericOp>();
         if (!subiShiftGenericOp || subiShiftGenericOp.getNumDpsInputs() != 2 ||
             subiShiftGenericOp.getNumDpsInits() != 1) {
             LLVM_DEBUG(llvm::dbgs() << "[SoftmaxTflite] shift-amount subi generic missing\n");
