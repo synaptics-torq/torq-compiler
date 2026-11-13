@@ -92,15 +92,7 @@ static iree_status_t compute_xram_footprint(ns(ExecutableDef_table_t) executable
   
   }
 
-  // Attached bindings reach XRAM through TORQ_IOCTL_ATTACH_BINDING, so they
-  // need no reserved range on real hardware. The simulator's attachBinding
-  // copies into the same XRAM vector, so bindings must be in the footprint:
-  // otherwise the reserved NSS-program hole is unallocated and writes land
-  // past _xram.size().
-  const bool hw_copies_bindings =
-      !FLAG_torq_hw_type ||
-      iree_string_view_equal(iree_make_cstring_view(FLAG_torq_hw_type), IREE_SVL("sim"));
-  if (!attaches_bindings || hw_copies_bindings) {
+  if (!attaches_bindings) {
     if (iree_hal_torq_ExecutableDef_bindings_is_present(executable_def)) {
       iree_hal_torq_Binding_vec_t bindings =
           ns(ExecutableDef_bindings_get(executable_def));
@@ -728,11 +720,15 @@ iree_status_t TorqExecutable::initialize() {
   const bool has_host_code =
       flatbuffers_uint8_vec_len(ns(ExecutableDef_host_code(executableDef))) != 0;
   attachesBindings_ = is_dmabuf_mode && !has_host_code;
+  const bool hw_copies_bindings =
+      !FLAG_torq_hw_type ||
+      iree_string_view_equal(iree_make_cstring_view(FLAG_torq_hw_type), IREE_SVL("sim"));
+  const bool attaches_bindings = attachesBindings_ && !hw_copies_bindings;
 
   TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::INIT_COMPUTE_XRAM_FOOTPRINT);
 
   ret = compute_xram_footprint(
-    executableDef, attachesBindings_, &xram_base, &xram_size);
+    executableDef, attaches_bindings, &xram_base, &xram_size);
 
   TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::INIT_COMPUTE_XRAM_FOOTPRINT);
 

@@ -2,6 +2,13 @@ cmake_minimum_required(VERSION 3.21)
 
 project(TORQ ASM C CXX)
 
+option(TORQ_OS_RTOS "Build the TORQ runtime for RTOS instead of Linux" OFF)
+if(TORQ_OS_RTOS)
+  set(TORQ_OS_LINUX OFF)
+else()
+  set(TORQ_OS_LINUX ON)
+endif()
+
 option(TORQ_HW_DEBUG "Enable verbose debugging logs of HW" OFF)
 
 option(TORQ_ENABLE_SOC_FPGA "Enable SoC FPGA support" OFF)
@@ -32,7 +39,26 @@ set(IREE_HAL_DRIVER_DEFAULTS OFF)
 # enable our hal driver in the runtime
 set(IREE_EXTERNAL_HAL_DRIVERS torq)
 set(IREE_INPUT_STABLEHLO ON)
+if(TORQ_OS_RTOS)
+  set(IREE_ALLOCATOR_SYSTEM "rtos" CACHE STRING "IREE system allocator" FORCE)
+  set(IREE_ALLOCATOR_SYSTEM_CTL "rtos_allocator_system_ctl" CACHE STRING "IREE system allocator callback" FORCE)
+  set(IREE_ALLOCATOR_RTOS_CTL rtos_allocator_system_ctl)
+  set(IREE_ALLOCATOR_RTOS_SRCS "${CMAKE_CURRENT_LIST_DIR}/runtime/driver/rtos_allocator.c")
+  set(IREE_ALLOCATOR_RTOS_DEPS
+    "$<BUILD_LOCAL_INTERFACE:zephyr_interface>"
+    "$<BUILD_LOCAL_INTERFACE:zephyr_generated_headers>"
+  )
+endif()
 add_subdirectory(third_party/iree)
+
+if(TORQ_OS_RTOS)
+  add_dependencies(iree_base_base.objects zephyr_generated_headers)
+endif()
+
+option(TORQ_BUILD_CLI "Build the Torq engine MobileNetV2 Linux sample" OFF)
+if(TORQ_BUILD_CLI)
+  add_subdirectory(runtime/app)
+endif()
 
 add_custom_target(torq
   DEPENDS torq_rt_cm iree-compile torq-compile torq-mlir-lsp-server iree-run-module torq-run-module iree-c-embed-data iree-flatcc-cli iree-opt third_party/iree/compiler/bindings/python/all third_party/iree/runtime/bindings/python/all

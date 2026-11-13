@@ -10,8 +10,15 @@
 #-------------------------------------------------------------------------------
 
 set(torq_deps iree::base::internal)
-set(torq_srcs src/TorqUtils.cpp src/TorqHw.cpp src/TorqEventLog.cpp src/TorqDeviceBufferAPI.cpp)
-set(torq_defs)
+set(torq_srcs src/TorqUtils.cpp src/TorqHw.cpp src/TorqEventLog.cpp)
+if(TORQ_OS_LINUX)
+  list(APPEND torq_srcs src/TorqDeviceBufferAPI.cpp)
+endif()
+
+set(torq_defs
+    TORQ_OS_LINUX=$<BOOL:${TORQ_OS_LINUX}>
+    TORQ_OS_RTOS=$<BOOL:${TORQ_OS_RTOS}>
+)
 
 if(DEFINED IREE_FILE_IO_ENABLE)
   if(IREE_FILE_IO_ENABLE)
@@ -37,7 +44,7 @@ if (TORQ_ENABLE_SIMULATOR)
   set(TORQ_MPACT_SIMULATOR_INC_DIR
     ${IREE_TORQ_SOURCE_DIR}/third_party/coralnpu-mpact/${CMAKE_HOST_SYSTEM_PROCESSOR}-${CMAKE_HOST_SYSTEM_NAME}/
       CACHE PATH "Path to the mpact simulator include directory")
-  
+
   if(EXISTS ${TORQ_MPACT_SIMULATOR_LIB} AND EXISTS ${TORQ_MPACT_SIMULATOR_INC_DIR})
 
     list(APPEND torq_defs "ENABLE_SIMULATOR=1")
@@ -82,10 +89,16 @@ if(TORQ_ENABLE_SOC_FPGA)
 endif()
 
 if(TORQ_ENABLE_ASTRA_MACHINA)
-    list(APPEND torq_srcs src/TorqAstraMachina.cpp src/TorqAstraMachina.h)
     list(APPEND torq_defs "ENABLE_ASTRA_MACHINA=1")
-    list(APPEND include_dirs ${CMAKE_CURRENT_LIST_DIR}/hal/SL2610/inc)
-    add_subdirectory(hal/SL2610)
+    list(APPEND torq_srcs src/TorqAstraMachina.h)
+    if(TORQ_OS_RTOS)
+        list(APPEND torq_srcs src/TorqAstraMachinaRTOS.cpp src/TorqAstraMachinaRTOS.h)
+        list(APPEND include_dirs "${TORQ_SRSDK_ROOT}/soc/SR220/common/include")
+    else()
+        list(APPEND torq_srcs src/TorqAstraMachinaLinux.cpp src/TorqAstraMachinaLinux.h)
+        list(APPEND include_dirs ${CMAKE_CURRENT_LIST_DIR}/hal/SL2610/inc)
+        add_subdirectory(hal/SL2610)
+    endif()
 endif()
 
 if(TORQ_ENABLE_AWS_FPGA)

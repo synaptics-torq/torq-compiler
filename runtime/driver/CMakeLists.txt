@@ -71,7 +71,11 @@ set(torq_deps
     schemas::torq_executable_def_c_fbs
     torq_hw::TorqHw
 )
-set(torq_defs)
+
+set(torq_defs
+    TORQ_OS_LINUX=$<BOOL:${TORQ_OS_LINUX}>
+    TORQ_OS_RTOS=$<BOOL:${TORQ_OS_RTOS}>
+)
 
 if(DEFINED IREE_FILE_IO_ENABLE)
   if(IREE_FILE_IO_ENABLE)

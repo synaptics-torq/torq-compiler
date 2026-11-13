@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "TorqAstraMachina.h"
+#include "TorqAstraMachinaLinux.h"
 #include "TorqUtils.h"
 #include "reg/torq_regs_host_view.h"
 #include "reg/torq_nss_regs.h"
@@ -31,7 +32,11 @@ using namespace std;
 
 namespace synaptics {
 
-TorqAstraMachina::~TorqAstraMachina() {
+std::unique_ptr<TorqHw> getAstraMachina(uint32_t xramStartAddr, size_t xramSize) {
+    return std::make_unique<TorqAstraMachinaLinux>(xramStartAddr, xramSize);
+}
+
+TorqAstraMachinaLinux::~TorqAstraMachinaLinux() {
     // Clean up network if still active
     if (_networkActive) {
         stopNetwork();
@@ -40,12 +45,12 @@ TorqAstraMachina::~TorqAstraMachina() {
     close();
 }
 
-TorqAstraMachina::TorqAstraMachina(uint32_t xramStartAddr, size_t xramSize): TorqHw(Type::ASTRA_MACHINA), _xramStartAddr(xramStartAddr), _xramSize(xramSize) {
+TorqAstraMachinaLinux::TorqAstraMachinaLinux(uint32_t xramStartAddr, size_t xramSize): TorqHw(Type::ASTRA_MACHINA), _xramStartAddr(xramStartAddr), _xramSize(xramSize) {
     _xramVBase = NULL;
     alignXram();
 }
 
-void TorqAstraMachina::alignXram() {
+void TorqAstraMachinaLinux::alignXram() {
     /* align xram start to 4K for mapping IOVA region */
     _xramStartAligned = _xramStartAddr;
     _xramSizeAligned = _xramSize;
@@ -59,7 +64,7 @@ void TorqAstraMachina::alignXram() {
          << _xramStartAligned << " size " << _xramSizeAligned << " alignOffset " << _alignOffset << "\n";
 }
 
-bool TorqAstraMachina::open() {
+bool TorqAstraMachinaLinux::open() {
     _torqDevNode = ::open(TORQ_NODE, O_RDWR | O_SYNC);
     if (_torqDevNode == kInvalidFd) {
         cerr << "torq node not available" << endl;
@@ -94,7 +99,7 @@ bool TorqAstraMachina::open() {
     return true;
 }
 
-bool TorqAstraMachina::close() {
+bool TorqAstraMachinaLinux::close() {
     // Clean up network if still active
     if (_networkActive) {
         stopNetwork();
@@ -116,11 +121,11 @@ bool TorqAstraMachina::close() {
     return true;
 }
 
-bool TorqAstraMachina::wfi() {
+bool TorqAstraMachinaLinux::wfi() {
     return true;
 }
 
-bool TorqAstraMachina::cli() {
+bool TorqAstraMachinaLinux::cli() {
     return true;
 }
 
@@ -136,27 +141,27 @@ static uint32_t read32(const uint8_t *base, uint32_t addr)
     return *p;
 }
 
-bool TorqAstraMachina::writeReg32(uint32_t addr, uint32_t data) {
+bool TorqAstraMachinaLinux::writeReg32(uint32_t addr, uint32_t data) {
     /* register access should go via kernel module */
     return false;
 }
 
-bool TorqAstraMachina::readReg32(uint32_t addr, uint32_t & data) const {
+bool TorqAstraMachinaLinux::readReg32(uint32_t addr, uint32_t & data) const {
     /* register access should go via kernel module */
     return false;
 }
 
-bool TorqAstraMachina::writeLram32(uint32_t addr, uint32_t data) {
+bool TorqAstraMachinaLinux::writeLram32(uint32_t addr, uint32_t data) {
     /* LRAM access should go via kernel module */
     return false;
 }
 
-bool TorqAstraMachina::readLram32(uint32_t addr, uint32_t & data) const {
+bool TorqAstraMachinaLinux::readLram32(uint32_t addr, uint32_t & data) const {
     /* LRAM access should go via kernel module */
     return false;
 }
 
-bool TorqAstraMachina::startXramAccess() const {
+bool TorqAstraMachinaLinux::startXramAccess() const {
 #if defined (DMABUF_USE_UNCACHED)
     return true;
 #else
@@ -175,7 +180,7 @@ bool TorqAstraMachina::startXramAccess() const {
 #endif
 }
 
-bool TorqAstraMachina::endXramAccess() const {
+bool TorqAstraMachinaLinux::endXramAccess() const {
 #if defined (DMABUF_USE_UNCACHED)
     return true;
 #else
@@ -193,7 +198,7 @@ bool TorqAstraMachina::endXramAccess() const {
 #endif
 }
 
-const void * TorqAstraMachina::startXramReadAccess(uint32_t addr) const {
+const void * TorqAstraMachinaLinux::startXramReadAccess(uint32_t addr) const {
     // TODO check bounds with size and use DMA_BUF_SYNC_READ for read only access
     if (!startXramAccess()) {
         return nullptr;
@@ -201,12 +206,12 @@ const void * TorqAstraMachina::startXramReadAccess(uint32_t addr) const {
     return reinterpret_cast<const void*>(_xramVBase + _alignOffset + (addr - _xramStartAddr));
 }
 
-bool TorqAstraMachina::endXramReadAccess() {
+bool TorqAstraMachinaLinux::endXramReadAccess() {
     // TODO use DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ for read only access
     return endXramAccess();
 }
 
-void * TorqAstraMachina::startXramWriteAccess(uint32_t addr) {
+void * TorqAstraMachinaLinux::startXramWriteAccess(uint32_t addr) {
     // TODO check bounds and use DMA_BUF_SYNC_WRITE for write access
     if (!startXramAccess()) {
         return nullptr;
@@ -214,13 +219,13 @@ void * TorqAstraMachina::startXramWriteAccess(uint32_t addr) {
     return reinterpret_cast<void*>(_xramVBase + _alignOffset + (addr - _xramStartAddr));
 }
 
-bool TorqAstraMachina::endXramWriteAccess() {
+bool TorqAstraMachinaLinux::endXramWriteAccess() {
     // TODO use DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE for write access
     return endXramAccess();
 }
 
 
-bool TorqAstraMachina::writeXram(uint32_t addr, size_t size, const void *dataIn) {
+bool TorqAstraMachinaLinux::writeXram(uint32_t addr, size_t size, const void *dataIn) {
     const uint8_t *p = _xramVBase + _alignOffset + (addr - _xramStartAddr);
     if ((p < _xramVBase) || (p + size) > (_xramVBase + _xramSizeAligned)) {
         cerr << "xram_write:acessing memory out of bounds\n";
@@ -234,7 +239,7 @@ bool TorqAstraMachina::writeXram(uint32_t addr, size_t size, const void *dataIn)
     return endXramAccess();
 }
 
-bool TorqAstraMachina::readXram(uint32_t addr, size_t size, void *dataOut) const {
+bool TorqAstraMachinaLinux::readXram(uint32_t addr, size_t size, void *dataOut) const {
     const uint8_t *p = _xramVBase + _alignOffset + (addr - _xramStartAddr);
     if ((p < _xramVBase) || (p + size) > (_xramVBase + _xramSizeAligned)) {
         cerr << "xram_read:acessing memory out of bounds\n";
@@ -248,7 +253,7 @@ bool TorqAstraMachina::readXram(uint32_t addr, size_t size, void *dataOut) const
     return endXramAccess();
 }
 
-bool TorqAstraMachina::writeLram(uint32_t addr, size_t size, const void *dataIn) {
+bool TorqAstraMachinaLinux::writeLram(uint32_t addr, size_t size, const void *dataIn) {
     if (!_networkActive) {
         cerr << "Network not active, cannot write LRAM" << endl;
         return false;
@@ -268,7 +273,7 @@ bool TorqAstraMachina::writeLram(uint32_t addr, size_t size, const void *dataIn)
     return true;
 }
 
-bool TorqAstraMachina::readLram(uint32_t addr, size_t size, void *dataOut) const {
+bool TorqAstraMachinaLinux::readLram(uint32_t addr, size_t size, void *dataOut) const {
     if (!_networkActive) {
         cerr << "Network not active, cannot read LRAM" << endl;
         return false;
@@ -288,7 +293,7 @@ bool TorqAstraMachina::readLram(uint32_t addr, size_t size, void *dataOut) const
     return true;
 }
 
-void TorqAstraMachina::consumeCssDebugBuffer() {
+void TorqAstraMachinaLinux::consumeCssDebugBuffer() {
 
     if (!_networkActive || !isCssDebugBufferCallbackEnabled()) {
         return;
@@ -317,7 +322,7 @@ void TorqAstraMachina::consumeCssDebugBuffer() {
 
 }
 
-bool TorqAstraMachina::setupXramSpace() {
+bool TorqAstraMachinaLinux::setupXramSpace() {
     // don't *need* a temp copy, defensive move in-case `torq_hw_device_buffer_allocate() fails
     TorqDeviceBuffer xramBuffer{};
     iree_status_t status = torq_hw_device_buffer_allocate(
@@ -336,7 +341,7 @@ bool TorqAstraMachina::setupXramSpace() {
     return true;
 }
 
-std::optional<TorqDeviceBuffer> TorqAstraMachina::allocateDeviceBuffer(size_t size) {
+std::optional<TorqDeviceBuffer> TorqAstraMachinaLinux::allocateDeviceBuffer(size_t size) {
     TorqDeviceBuffer buffer{};
     iree_status_t status = torq_hw_device_buffer_allocate(
         TORQ_HW_DEVICE_BUFFER_MODE_DMA_HEAP_UNCACHED, size, &buffer);
@@ -349,7 +354,7 @@ std::optional<TorqDeviceBuffer> TorqAstraMachina::allocateDeviceBuffer(size_t si
     return buffer;
 }
 
-bool TorqAstraMachina::attachBinding(
+bool TorqAstraMachinaLinux::attachBinding(
     const TorqDeviceBuffer &buffer, uint32_t xramAddr, size_t dataOffset, size_t size
 ) {
     if (!_networkActive || _networkId == kInvalidNetworkId || buffer.handle == kInvalidFd) {
@@ -365,7 +370,7 @@ bool TorqAstraMachina::attachBinding(
     return ioctl(_torqDevNode, TORQ_IOCTL_ATTACH_BINDING, &req) == 0;
 }
 
-bool TorqAstraMachina::detachBinding(
+bool TorqAstraMachinaLinux::detachBinding(
     const TorqDeviceBuffer &buffer, uint32_t xramAddr, size_t dataOffset, size_t size
 ) {
     if (!_networkActive || _networkId == kInvalidNetworkId || buffer.handle == kInvalidFd) {
@@ -380,7 +385,7 @@ bool TorqAstraMachina::detachBinding(
     return ioctl(_torqDevNode, TORQ_IOCTL_DETACH_BINDING, &req) == 0;
 }
 
-bool TorqAstraMachina::createNetwork() {
+bool TorqAstraMachinaLinux::createNetwork() {
     torq_create_network_req createReq;
     createReq.xram_start = _xramStartAddr;
     createReq.dmabuf_fd = _dmabufHandle;
@@ -396,7 +401,7 @@ bool TorqAstraMachina::createNetwork() {
     return true;
 }
 
-bool TorqAstraMachina::startNetwork() {
+bool TorqAstraMachinaLinux::startNetwork() {
     torq_start_network_req startReq;
     startReq.network_id = _networkId;
 
@@ -427,7 +432,7 @@ bool TorqAstraMachina::startNetwork() {
     return true;
 }
 
-bool TorqAstraMachina::runNetwork(uint32_t codeEntry) {
+bool TorqAstraMachinaLinux::runNetwork(uint32_t codeEntry) {
     torq_run_network_req runReq;
     runReq.network_id = _networkId;
     runReq.code_entry = codeEntry;
@@ -444,7 +449,7 @@ bool TorqAstraMachina::runNetwork(uint32_t codeEntry) {
     return true;
 }
 
-bool TorqAstraMachina::waitNetwork(uint32_t waitBits) {
+bool TorqAstraMachinaLinux::waitNetwork(uint32_t waitBits) {
     torq_wait_network_req waitReq;
     waitReq.network_id = _networkId;
     waitReq.wait_bits = waitBits;
@@ -464,7 +469,7 @@ bool TorqAstraMachina::waitNetwork(uint32_t waitBits) {
     return true;
 }
 
-bool TorqAstraMachina::stopNetwork() {
+bool TorqAstraMachinaLinux::stopNetwork() {
     if (_networkId == kInvalidNetworkId) {
         return true;
     }
@@ -482,7 +487,7 @@ bool TorqAstraMachina::stopNetwork() {
     return true;
 }
 
-bool TorqAstraMachina::destroyNetwork() {
+bool TorqAstraMachinaLinux::destroyNetwork() {
     if (_networkId == kInvalidNetworkId) {
         return true;
     }
@@ -502,7 +507,7 @@ bool TorqAstraMachina::destroyNetwork() {
     return true;
 }
 
-bool TorqAstraMachina::acquire() {
+bool TorqAstraMachinaLinux::acquire() {
     if (_networkId == kInvalidNetworkId) {
         cerr << "unable to load, network not setup yet\n";
         return false;
@@ -521,7 +526,7 @@ bool TorqAstraMachina::acquire() {
     return true;
 }
 
-bool TorqAstraMachina::release() {
+bool TorqAstraMachinaLinux::release() {
 
     if (!TorqHw::release()) {
         return false;
@@ -534,7 +539,7 @@ bool TorqAstraMachina::release() {
     return true;
 }
 
-bool TorqAstraMachina::start(uint32_t lramAddr) {
+bool TorqAstraMachinaLinux::start(uint32_t lramAddr) {
     if (!_networkActive) {
         LOGD << " network is not active yet\n";
         return false;
@@ -549,7 +554,7 @@ bool TorqAstraMachina::start(uint32_t lramAddr) {
     return true;
 }
 
-bool TorqAstraMachina::wait(bool nssCfg, bool slice1Cfg, bool slice2Cfg, bool dmaInCfg, bool dmaOutCfg) {
+bool TorqAstraMachinaLinux::wait(bool nssCfg, bool slice1Cfg, bool slice2Cfg, bool dmaInCfg, bool dmaOutCfg) {
     uint32_t waitBits = 0;
     if (nssCfg) waitBits |= (1 << TORQ_IOCTL_WAIT_BITMASK_NSS);
     if (dmaInCfg) waitBits |= (1 << TORQ_IOCTL_WAIT_BITMASK_DMA_IN);
@@ -571,12 +576,12 @@ bool TorqAstraMachina::wait(bool nssCfg, bool slice1Cfg, bool slice2Cfg, bool dm
     return true;
 }
 
-bool TorqAstraMachina::end() {
+bool TorqAstraMachinaLinux::end() {
     //  wait() already clears interrupt status
     return true;
 }
 
-bool TorqAstraMachina::isHwCompatible(int32_t hwId) const {
+bool TorqAstraMachinaLinux::isHwCompatible(int32_t hwId) const {
     // Query current hardware ID from kernel driver
     int fd = ::open(TORQ_NODE, O_RDWR | O_SYNC);
     if (fd == kInvalidFd) {

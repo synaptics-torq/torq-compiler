@@ -10,6 +10,14 @@
 #include <stdint.h>
 #include <string.h>
 
+#if TORQ_OS_LINUX
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 #include "TorqDeviceBufferAPI.h"
 #include "iree/base/api.h"
 #include "iree/hal/allocator.h"
@@ -20,6 +28,8 @@ typedef struct iree_hal_torq_buffer_t {
     iree_hal_buffer_t base;
     iree_allocator_t host_allocator;
     torq_hw_device_buffer_t device_buffer;
+    iree_hal_buffer_release_callback_t release_callback;
+    bool owns_imported_mapping;
 } iree_hal_torq_buffer_t;
 
 typedef struct iree_hal_torq_allocator_t {
@@ -66,9 +76,90 @@ const torq_hw_device_buffer_t *iree_hal_torq_buffer_device_buffer(const iree_hal
 static void iree_hal_torq_buffer_destroy(iree_hal_buffer_t *base_buffer) {
     iree_hal_torq_buffer_t *buffer = iree_hal_torq_buffer_cast(base_buffer);
     iree_allocator_t host_allocator = buffer->host_allocator;
-    IREE_IGNORE_ERROR(torq_hw_device_buffer_free(&buffer->device_buffer));
+    if (buffer->release_callback.fn) {
+        buffer->release_callback.fn(buffer->release_callback.user_data, base_buffer);
+    }
+#if TORQ_OS_LINUX
+    if (buffer->owns_imported_mapping) {
+        munmap(buffer->device_buffer.mapped, buffer->device_buffer.allocatedSize);
+        close(buffer->device_buffer.handle);
+    } else
+#endif
+    {
+        IREE_IGNORE_ERROR(torq_hw_device_buffer_free(&buffer->device_buffer));
+    }
     iree_allocator_free(host_allocator, buffer);
 }
+
+#if TORQ_OS_LINUX
+static iree_status_t iree_hal_torq_buffer_import_dmabuf(
+    int fd, iree_device_size_t size, const iree_hal_buffer_params_t *params,
+    iree_hal_buffer_release_callback_t release_callback,
+    iree_allocator_t host_allocator, iree_hal_buffer_t **out_buffer
+) {
+    IREE_ASSERT_ARGUMENT(out_buffer);
+    *out_buffer = NULL;
+    if (fd < 0 || !size || size > SIZE_MAX) {
+        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "Invalid DMA-BUF fd or size");
+    }
+    iree_hal_torq_buffer_t *buffer = NULL;
+    IREE_RETURN_IF_ERROR(iree_allocator_malloc(host_allocator, sizeof(*buffer), (void **)&buffer));
+    memset(buffer, 0, sizeof(*buffer));
+    int owned_fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    if (owned_fd < 0) {
+        int saved_errno = errno;
+        iree_allocator_free(host_allocator, buffer);
+        return iree_make_status(IREE_STATUS_UNAVAILABLE, "Duplicating DMA-BUF fd: %s", strerror(saved_errno));
+    }
+    struct stat fd_stat;
+    if (fstat(owned_fd, &fd_stat) < 0) {
+        int saved_errno = errno;
+        close(owned_fd);
+        iree_allocator_free(host_allocator, buffer);
+        return iree_make_status(IREE_STATUS_UNAVAILABLE, "Querying DMA-BUF size: %s", strerror(saved_errno));
+    }
+    if (fd_stat.st_size <= 0 || size > (uint64_t)fd_stat.st_size) {
+        close(owned_fd);
+        iree_allocator_free(host_allocator, buffer);
+        return iree_make_status(IREE_STATUS_OUT_OF_RANGE, "DMA-BUF import exceeds allocation size");
+    }
+    int protection = 0;
+    if (iree_any_bit_set(params->access, IREE_HAL_MEMORY_ACCESS_READ)) protection |= PROT_READ;
+    if (iree_any_bit_set(params->access, IREE_HAL_MEMORY_ACCESS_WRITE)) protection |= PROT_WRITE;
+    void *mapped = mmap(NULL, (size_t)size, protection, MAP_SHARED, owned_fd, 0);
+    if (mapped == MAP_FAILED) {
+        int saved_errno = errno;
+        close(owned_fd);
+        iree_allocator_free(host_allocator, buffer);
+        return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED, "Mapping DMA-BUF: %s", strerror(saved_errno));
+    }
+    buffer->host_allocator = host_allocator;
+    buffer->release_callback = release_callback;
+    buffer->owns_imported_mapping = true;
+    buffer->device_buffer = (torq_hw_device_buffer_t){
+        .handle = owned_fd,
+        .mapped = mapped,
+        .requestedSize = size,
+        .allocatedSize = size,
+        .dataOffset = 0,
+        .mode = TORQ_HW_DEVICE_BUFFER_MODE_DMA_HEAP,
+        .hostCached = true,
+    };
+    const iree_hal_buffer_placement_t placement = {
+        .device = NULL,
+        .queue_affinity = params->queue_affinity ? params->queue_affinity
+                               : IREE_HAL_QUEUE_AFFINITY_ANY,
+        .flags = IREE_HAL_BUFFER_PLACEMENT_FLAG_NONE,
+    };
+    iree_hal_buffer_initialize(
+        placement, &buffer->base, size, 0, size,
+        params->type, params->access, params->usage,
+        &iree_hal_torq_buffer_vtable, &buffer->base
+    );
+    *out_buffer = &buffer->base;
+    return iree_ok_status();
+}
+#endif
 
 static iree_status_t iree_hal_torq_buffer_map_range(
     iree_hal_buffer_t *base_buffer, iree_hal_mapping_mode_t mapping_mode,
@@ -311,6 +402,7 @@ static iree_status_t iree_hal_torq_allocator_import_buffer(
     iree_hal_buffer_t **IREE_RESTRICT out_buffer
 ) {
     iree_hal_torq_allocator_t *allocator = iree_hal_torq_allocator_cast(base_allocator);
+    *out_buffer = NULL;
 
     iree_hal_buffer_params_t compat_params = *params;
     iree_device_size_t allocation_size = external_buffer->size;
@@ -325,6 +417,15 @@ static iree_status_t iree_hal_torq_allocator_import_buffer(
             "allocator cannot import a buffer with the given parameters"
         );
     }
+
+#if TORQ_OS_LINUX
+    if (external_buffer->type == IREE_HAL_EXTERNAL_BUFFER_TYPE_OPAQUE_FD) {
+        return iree_hal_torq_buffer_import_dmabuf(
+            external_buffer->handle.opaque_fd.fd, external_buffer->size, &compat_params,
+            release_callback, allocator->host_allocator, out_buffer
+        );
+    }
+#endif
 
     // workaround: constants are imported with this function, but we can't really
     // map the constants with zero-copy in the NPU address space because they may
