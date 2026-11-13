@@ -26,6 +26,7 @@ from .versioned_fixtures import (
     versioned_unhashable_object_fixture,
     versioned_generated_file_fixture,
     VersionedUncachedData,
+    collection_data,
 )
 
 if torch:
@@ -1385,6 +1386,11 @@ def generate_torch_layers_from_file(filepath, example_inputs=None, node_groups=N
 
 def _save_torch_metadata_cache(key_dir: Path, model_version: str, cases, node_groups, dedup):
     """Atomically write lightweight case metadata (no model weights) to disk."""
+    atomic_write_json_manifest(key_dir, _torch_metadata_manifest(model_version, cases, node_groups, dedup))
+
+
+def _torch_metadata_manifest(model_version: str, cases, node_groups, dedup):
+    """The lightweight case metadata (no model weights) of cases, as JSON data."""
     entries = []
     for c in cases:
         entry = {
@@ -1401,13 +1407,13 @@ def _save_torch_metadata_cache(key_dir: Path, model_version: str, cases, node_gr
         if getattr(c, "definition", ""):
             entry["definition"] = c.definition
         entries.append(entry)
-    atomic_write_json_manifest(key_dir, {
+    return {
         "version": _TORCH_LAYER_CACHE_VERSION,
         "model_version": model_version,
         "node_groups": node_groups,
         "dedup": dedup,
         "cases": entries,
-    })
+    }
 
 
 def _load_torch_metadata_cases(manifest: dict, model_loader_key: str):
@@ -1508,7 +1514,7 @@ def generate_torch_layers_from_model_metadata_cache(
 
 
 def generate_traced_torch_model_layers(
-    cache,
+    metafunc,
     prefix: str,
     model_version: str,
     model_loader_key: str,
@@ -1518,15 +1524,17 @@ def generate_traced_torch_model_layers(
     """Generate full-argument-traced layer cases for an in-memory model, caching
     only metadata.
 
-    Same worker / metadata-cache pattern as
-    ``generate_torch_layers_from_model_metadata_cache`` (the first pytest-xdist
-    worker to reach this function builds the model and traces one forward
-    pass; the rest read the manifest), but the cases record the *full* call
-    signature of each module -- tensor args by shape + dtype, non-tensor args
-    as constants, keyword args by name -- so modules called with kwargs or
-    non-tensor arguments can be exported and tested standalone.  Use this for
-    any torch.nn.Module test suite where a single example forward pass defines
-    the model's invocation (see tests/models/test_torch_zoo_turbine.py and
+    The metadata of the cases is cached across sessions (see
+    ``torq.testing.versioned_fixtures.collection_data``, versioned by
+    ``model_version`` and the code of the test module of ``metafunc``): the
+    first pytest-xdist worker that needs it fetches it from the shared store,
+    or builds the model and traces one forward pass; the rest read it from the
+    local cache.  The cases record the *full* call signature of each module --
+    tensor args by shape + dtype, non-tensor args as constants, keyword args by
+    name -- so modules called with kwargs or non-tensor arguments can be
+    exported and tested standalone.  Use this for any torch.nn.Module test
+    suite where a single example forward pass defines the model's invocation
+    (see tests/models/test_torch_zoo_turbine.py and
     tests/models/test_hf_models.py).
 
     The returned cases reference the model via ``model_loader_key``; fixtures
@@ -1535,26 +1543,8 @@ def generate_traced_torch_model_layers(
     if not isinstance(example_inputs, (list, tuple)):
         example_inputs = (example_inputs,)
 
-    cache_dir = cache.mkdir('torch_model_metadata_cache')
-    key_dir = cache_dir / prefix
-    # Keep the lock file outside key_dir so the directory can be replaced
-    # safely under pytest-xdist / NFS.
-    lock_path = cache_dir / (prefix + ".lock")
-    key_dir.mkdir(parents=True, exist_ok=True)
-
-    with FileLock(str(lock_path)):
-        manifest_path = key_dir / "manifest.json"
-        if manifest_path.exists():
-            try:
-                manifest = json.loads(manifest_path.read_text())
-                if (manifest.get("version") == _TORCH_LAYER_CACHE_VERSION
-                        and manifest.get("model_version") == model_version):
-                    print(f"[torch-traced-metadata-cache] HIT  {prefix} -> {key_dir}")
-                    return _load_torch_metadata_cases(manifest, model_loader_key)
-            except Exception as e:
-                print(f"[torch-traced-metadata-cache] ignoring corrupt cache for {prefix}: {e}")
-
-        print(f"[torch-traced-metadata-cache] MISS {prefix} -> {key_dir}")
+    def compute():
+        print(f"[torch-traced-metadata-cache] MISS {prefix}")
         model = model_fn()
         if not isinstance(model, torch.nn.Module):
             raise ValueError(
@@ -1564,9 +1554,11 @@ def generate_traced_torch_model_layers(
         cases = build_traced_torch_cases(model, example_inputs)
         for c in cases:
             c.name = f"{prefix}_{c.name}"
-            c.data["model_loader_key"] = model_loader_key
-        _save_torch_metadata_cache(key_dir, model_version, cases, None, False)
-        return cases
+        return _torch_metadata_manifest(model_version, cases, None, False)
+
+    key = {"prefix": prefix, "model_version": model_version, "format": _TORCH_LAYER_CACHE_VERSION}
+    manifest = collection_data(metafunc, "torch_traced_metadata", key, compute)
+    return _load_torch_metadata_cases(manifest, model_loader_key)
 
 
 @pytest.fixture

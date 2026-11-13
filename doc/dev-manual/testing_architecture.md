@@ -329,6 +329,12 @@ run times measured when it was computed, and the dashboard bundle lists it in
 file and each fixture reused, fetched and computed (the C-model CI jobs write it to their job
 summary).
 
+What a test module computes to generate its cases can be cached the same way, with
+``collection_data(metafunc, name, key, compute)`` in its ``pytest_generate_tests``: e.g. the
+layers of the Keras application models (``test_keras_app.py``) and the traced metadata of the torch
+models (``generate_traced_torch_model_layers``). Under xdist each worker collects every module,
+so without the store each CI job computes this data again before its first test.
+
 The C-model CI jobs use the store when the ``TEST_CACHE`` repository variable is ``true``. Pushes
 to ``main`` write their results to the artifact bucket (``ARTIFACT_BUCKET``). Pull requests and
 the merge queue write theirs to the bucket of work in progress (``WIP_ARTIFACT_BUCKET``), which

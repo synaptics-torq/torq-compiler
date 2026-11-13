@@ -86,6 +86,47 @@ def _store_remote(fun, version, src, is_dir):
         _remote.store(fun.__name__, version, src, is_dir)
 
 
+def collection_data(metafunc, name, key, compute):
+    """
+    The data that the test module of metafunc computes to generate its test cases (e.g. the
+    layers of a model), cached like the results of the versioned fixtures: in the local cache
+    and in the shared store, under a version made of key (JSON data), the code of the torq
+    packages, the installed packages and the code of the test module.
+
+    compute() returns the data, which must be JSON data. Under xdist, the first worker to need
+    it computes or fetches it, and the others read it from the local cache.
+    """
+    config = metafunc.config
+    root = Path(config.rootpath)
+    module_path = Path(metafunc.definition.path)
+    salt = [_get_global_salt(root)]
+    if module_path.is_relative_to(root):
+        salt.append(_get_module_salt(root, module_path))
+    version = _hash_data([salt, key])
+    fixture_name = f"collection_{name}"
+
+    cache_dir = config.cache.mkdir("collection_data") / name
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / f"{version}.json"
+
+    with FileLock(str(cache_dir / f"{version}.lock")):
+        recompute = config.getoption("--recompute-cache")
+        if not recompute and path.exists():
+            return json.loads(path.read_text())
+        if not recompute and _remote is not None and _remote.fetch(fixture_name, version, path, False):
+            logger.debug(f"[collection data fetched] {name} {version}")
+            return json.loads(path.read_text())
+        data = compute()
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data))
+        os.replace(tmp, path)
+        if _remote is not None:
+            _remote.store(fixture_name, version, path, False)
+        # what is read back, so that the data is the same whether it was computed or not (e.g.
+        # lists instead of tuples)
+        return json.loads(path.read_text())
+
+
 # how the tests got the results of the fixtures, per test file: Counter of (fixture, use), use
 # being "computed", "reused" (from the local cache) or "fetched" (from a store)
 _cache_uses = defaultdict(Counter)

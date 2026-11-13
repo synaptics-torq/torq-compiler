@@ -87,7 +87,7 @@ def pytest_generate_tests(metafunc):
     cases = []
     for model in HF_MODELS:
         cases += generate_traced_torch_model_layers(
-            metafunc.config.cache,
+            metafunc,
             model["prefix"],
             _model_version(model),
             model["prefix"],

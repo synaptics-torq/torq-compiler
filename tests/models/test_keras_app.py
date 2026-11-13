@@ -3,8 +3,8 @@ import pytest
 from torq.testing.comparison import compare_test_results
 from torq.testing.tensorflow import generate_layers_from_model
 from torq.testing.iree import llvmcpu_reference_results
-from torq.testing.cases import drop_duplicate_cases, get_test_cases_from_tf_model, keras_layer_key
-from torq.testing.versioned_fixtures import versioned_hashable_object_fixture
+from torq.testing.cases import Case, drop_duplicate_cases, get_test_cases_from_tf_model, keras_layer_key
+from torq.testing.versioned_fixtures import collection_data, versioned_hashable_object_fixture
 
 import tensorflow as tf
 
@@ -37,44 +37,70 @@ def get_model_cases(model_name, input_shape, include_top=False, full_model=False
     return get_test_cases_from_tf_model(model, model_name, full_model)
 
 
-test_cases = [
-    *get_model_cases("resnet50", (224, 224, 3)),
+# models whose layers are tested: (name, input shape, test the full model instead of its layers)
+MODELS = [
+    ("resnet50", (224, 224, 3), False),
     # full_model_resnet50 working with differences: 26357 out of 100352 [26.26%]
-    # *get_model_cases("resnet50", (224, 224, 3), full_model=True),
+    # ("resnet50", (224, 224, 3), True),
 
     # full model_vgg16 hang as some conv2d ops hang
-    *get_model_cases("vgg16", (224, 224, 3)),
+    ("vgg16", (224, 224, 3), False),
 
     # full model_xception hang/crash as some conv2d ops
-    *get_model_cases("xception", (299, 299, 3)),
+    ("xception", (299, 299, 3), False),
 
     # full model inceptionv3 hang/crash as some conv2d hang and avgpool ops crash
-    *get_model_cases("inceptionv3", (299, 299, 3)),
+    ("inceptionv3", (299, 299, 3), False),
 
     # full model_inceptionresnetv2(total 780 layers) hang/crash
     # as some conv2d hang and maxpool layer crash
-    *get_model_cases("inceptionresnetv2", (299, 299, 3)),
+    ("inceptionresnetv2", (299, 299, 3), False),
 
     # full model_densenet121(total 427 layers) hang as some avgpool ops hang
-    *get_model_cases("densenet121", (224, 224, 3)),
+    ("densenet121", (224, 224, 3), False),
 
     # crash and hang because of many avgpool crash
-    *get_model_cases("nasnetmobile", (224, 224, 3)),
+    ("nasnetmobile", (224, 224, 3), False),
 
     # full model crash (total 237 layers)
-    *get_model_cases("efficientnetb0", (224, 224, 3), full_model=True),
+    ("efficientnetb0", (224, 224, 3), True),
 
     # convnext serial model cannot work as many depthwise/pointwise ops crash
     # and mul op need to broadcast on two dims which unsupported now
     # (tensor<1x14x14x1xi32>, tensor<1x1x1x384xi32>) -> tensor<1x14x14x384xi32>
-    # *get_model_cases("convnext_tiny", (224, 224, 3))
+    # ("convnext_tiny", (224, 224, 3), False),
 ]
-# a layer with the same configuration and input shapes as an earlier one (in the same model or
-# another one) is the same test
-test_cases = drop_duplicate_cases(test_cases, keras_layer_key)
 
 
-@pytest.fixture(params=test_cases)
+def _compute_test_cases():
+    # the names of the layers, part of the test names, are numbered per process (conv2d_6): count
+    # from 0 whatever was built before
+    tf.keras.backend.clear_session()
+    cases = []
+    for model_name, input_shape, full_model in MODELS:
+        cases += get_model_cases(model_name, input_shape, full_model=full_model)
+    # a layer with the same configuration and input shapes as an earlier one (in the same model or
+    # another one) is the same test
+    cases = drop_duplicate_cases(cases, keras_layer_key)
+    return [{"name": c.name, "data": c.data} for c in cases]
+
+
+# the cases of this process, computed once for all the test functions
+_test_cases = None
+
+
+def pytest_generate_tests(metafunc):
+    global _test_cases
+    if "case_config" not in metafunc.fixturenames:
+        return
+    if _test_cases is None:
+        # building the models takes about 20 s: cached across sessions (see collection_data)
+        _test_cases = [Case(c["name"], c["data"]) for c in
+                       collection_data(metafunc, "keras_app_cases", MODELS, _compute_test_cases)]
+    metafunc.parametrize("case_config", _test_cases, indirect=True)
+
+
+@pytest.fixture
 def case_config(request, runtime_hw_type, chip_config):
 
   extra_args = {}

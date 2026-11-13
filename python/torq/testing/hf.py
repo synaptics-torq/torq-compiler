@@ -1,9 +1,14 @@
 from huggingface_hub import get_collection, list_repo_files, hf_hub_download, try_to_load_from_cache, get_hf_file_metadata, hf_hub_url
 
 import pytest
+import hashlib
 import json
+import os
+import uuid
 import numpy as np
 from time import sleep
+
+from filelock import FileLock
 
 from .versioned_fixtures import versioned_unhashable_object_fixture, versioned_hashable_object_fixture
 from . import s3
@@ -72,6 +77,51 @@ def generate_test_for_collection(metafunc, fixture_name, collection_id):
         )
 
 
+# the test run of this process: the xdist workers of a run share the id of the run
+_TEST_RUN = os.environ.get("PYTEST_XDIST_TESTRUNUID") or uuid.uuid4().hex
+
+
+def _get_hf_file_metadata(cache, repo_id, filename, repo_type, revision):
+    """
+    The etag and commit of the latest version of a file of the HuggingFace Hub, asked once per test
+    run: the xdist workers of the run read the answer of the first one from the local cache.
+    """
+    cache_dir = cache.mkdir("hf_metadata")
+    key = hashlib.sha256(json.dumps([repo_id, filename, repo_type, revision]).encode()).hexdigest()[:32]
+    path = cache_dir / f"{key}.json"
+
+    with FileLock(str(cache_dir / f"{key}.lock")):
+        try:
+            known = json.loads(path.read_text())
+            if known["run"] == _TEST_RUN:
+                return known["etag"], known["revision"]
+        except (OSError, ValueError, KeyError):
+            pass
+
+        for _ in range(3):  # try 3 times to handle potential connection failures with huggingface
+            # fetch the etag and revision of the latest version
+            try:
+                url = hf_hub_url(
+                    repo_id=repo_id,
+                    filename=filename,
+                    repo_type=repo_type,
+                    revision=revision
+                )
+
+                metadata = get_hf_file_metadata(url=url)
+                break
+            except Exception:
+                print(f"Attempt to get metadata for {repo_id}@{revision}/{filename} failed, retrying...")
+                sleep(5)  # wait for a bit before retrying
+        else:
+            raise RuntimeError(f"Failed to get metadata for {repo_id}@{revision}/{filename} after multiple attempts")
+
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"run": _TEST_RUN, "etag": metadata.etag, "revision": metadata.commit_hash}))
+        os.replace(tmp, path)
+        return metadata.etag, metadata.commit_hash
+
+
 def get_hf_file_with_s3_cache(cache, repo_id, filename, repo_type="model", revision=None):
     """
     Internal helper to download files from HuggingFace Hub with three-tier caching:
@@ -82,25 +132,7 @@ def get_hf_file_with_s3_cache(cache, repo_id, filename, repo_type="model", revis
 
     category = repo_type
 
-    for _ in range(3):  # try 3 times to handle potential connection failures with huggingface
-        # fetch the etag and revision of the latest version
-        try:
-            url = hf_hub_url(
-                repo_id=repo_id,
-                filename=filename,
-                repo_type=repo_type,
-                revision=revision
-            )
-
-            metadata = get_hf_file_metadata(url=url)
-            etag = metadata.etag
-            revision = metadata.commit_hash
-            break
-        except Exception:
-            print(f"Attempt to get metadata for {repo_id}@{revision}/{filename} failed, retrying...")
-            sleep(5)  # wait for a bit before retrying
-    else:
-        raise RuntimeError(f"Failed to get metadata for {repo_id}@{revision}/{filename} after multiple attempts")
+    etag, revision = _get_hf_file_metadata(cache, repo_id, filename, repo_type, revision)
 
     # try to get the file from the S3 cache (either the local dir or the S3 bucket)
     print("Trying to get file from S3 cache:", repo_id, revision, filename, etag)

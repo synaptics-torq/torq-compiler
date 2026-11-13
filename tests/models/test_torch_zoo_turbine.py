@@ -121,7 +121,7 @@ def pytest_generate_tests(metafunc):
     cases = []
     for prefix, model_version, loader, example_inputs in ZOO_MODELS:
         cases += generate_traced_torch_model_layers(
-            metafunc.config.cache,
+            metafunc,
             prefix,
             model_version,
             prefix,  # loader key registered above
