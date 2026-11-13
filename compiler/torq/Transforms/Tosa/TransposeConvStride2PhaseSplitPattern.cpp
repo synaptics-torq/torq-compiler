@@ -12,6 +12,7 @@
 #include "mlir/Dialect/Tosa/IR/TosaOps.h"
 #include "mlir/Dialect/Tosa/Utils/ConversionUtils.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 
 #include <algorithm>
@@ -116,6 +117,43 @@ static bool isSplitFaster(RankedTensorType weightType) {
     return TorqHw::get().getSliceCount() == 1 || oddKernel;
 }
 
+// Return the weights of a phase with one tap on each axis as a constant, when `weights` is a
+// constant. Return a null value otherwise. The tosa.slice of selectReversedTaps does not fold, so
+// these weights would stay a runtime value. When such a phase is tiled over its output channels,
+// the sum of its weights is then computed at runtime, its input zero-point correction and rescale
+// do not fuse into the conv, and they run on the CSS. With 2 or more taps on an axis, the
+// tosa.concat folds, so the weights of the other phases are already constants.
+static Value buildConstPhaseWeights(
+    Value weights, const PhaseAxis &axisH, const PhaseAxis &axisW, Location loc,
+    PatternRewriter &rewriter
+) {
+    if (axisH.taps != 1 || axisW.taps != 1)
+        return nullptr;
+    DenseElementsAttr attr;
+    if (!matchPattern(weights, m_Constant(&attr)))
+        return nullptr;
+    auto type = cast<RankedTensorType>(weights.getType());
+    ArrayRef<int64_t> shape = type.getShape();
+    auto phaseType = type.clone({shape[0], 1, 1, shape[3]});
+    if (attr.isSplat())
+        return tosa::ConstOp::create(rewriter, loc, phaseType, attr.resizeSplat(phaseType));
+    unsigned bitWidth = type.getElementTypeBitWidth();
+    if (bitWidth % 8 != 0)
+        return nullptr;
+    // Copy the input channels of tap (firstTap, firstTap) of each output channel.
+    int64_t rowBytes = shape[3] * (bitWidth / 8);
+    ArrayRef<char> src = attr.getRawData();
+    SmallVector<char> dst;
+    dst.reserve(shape[0] * rowBytes);
+    for (int64_t o = 0; o < shape[0]; ++o) {
+        int64_t offset = ((o * shape[1] + axisH.firstTap) * shape[2] + axisW.firstTap) * rowBytes;
+        dst.append(src.begin() + offset, src.begin() + offset + rowBytes);
+    }
+    return tosa::ConstOp::create(
+        rewriter, loc, phaseType, DenseElementsAttr::getFromRawBuffer(phaseType, dst)
+    );
+}
+
 // Return the rescale that is the only user of `srcOp`, or a null op.
 static tosa::RescaleOp getOnlyRescaleUser(tosa::TransposeConv2DOp srcOp) {
     if (!srcOp->hasOneUse())
@@ -163,9 +201,12 @@ static Value buildPhaseConv(
     const PhaseAxis &axisW, PatternRewriter &rewriter
 ) {
     Location loc = srcOp.getLoc();
-    Value weights =
-        selectReversedTaps(srcOp.getWeight(), 1, axisH.firstTap, axisH.taps, loc, rewriter);
-    weights = selectReversedTaps(weights, 2, axisW.firstTap, axisW.taps, loc, rewriter);
+    Value weights = buildConstPhaseWeights(srcOp.getWeight(), axisH, axisW, loc, rewriter);
+    if (!weights) {
+        weights =
+            selectReversedTaps(srcOp.getWeight(), 1, axisH.firstTap, axisH.taps, loc, rewriter);
+        weights = selectReversedTaps(weights, 2, axisW.firstTap, axisW.taps, loc, rewriter);
+    }
 
     auto srcType = cast<RankedTensorType>(srcOp.getType());
     SmallVector<int64_t> phaseShape = {
