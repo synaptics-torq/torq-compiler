@@ -334,6 +334,13 @@ What a test module computes to generate its cases can be cached the same way, wi
 layers of the Keras application models (``test_keras_app.py``) and the traced metadata of the torch
 models (``generate_traced_torch_model_layers``). Under xdist each worker collects every module,
 so without the store each CI job computes this data again before its first test.
+``lazy_onnx_layer_cases`` (and ``generate_lazy_onnx_layers_from_hf``) caches only the names of
+ONNX cases this way, and makes their model files (downloads, components, extracted layers) when
+a test first reads one: a test whose results are cached doesn't need them (``test_onnx_gemma3.py``,
+``test_onnx_rtdetr.py``). The version of an ONNX case (``onnx_layer_model``) has its name and the
+version of its model: the key of ``lazy_onnx_layer_cases`` (the etags of the HuggingFace files),
+else the content of the file it was generated from, else the content of the model, so a new
+version of a model computes its results again.
 
 The C-model CI jobs use the store when the ``TEST_CACHE`` repository variable is ``true``. Pushes
 to ``main`` write their results to the artifact bucket (``ARTIFACT_BUCKET``). Pull requests and

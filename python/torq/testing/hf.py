@@ -122,6 +122,12 @@ def _get_hf_file_metadata(cache, repo_id, filename, repo_type, revision):
         return metadata.etag, metadata.commit_hash
 
 
+def get_hf_file_etag(cache, repo_id, filename, repo_type="model", revision=None):
+    """The etag of the latest version of a file of the HuggingFace Hub, without downloading it: a
+    version of what is computed from the file."""
+    return _get_hf_file_metadata(cache, repo_id, filename, repo_type, revision)[0]
+
+
 def get_hf_file_with_s3_cache(cache, repo_id, filename, repo_type="model", revision=None):
     """
     Internal helper to download files from HuggingFace Hub with three-tier caching:

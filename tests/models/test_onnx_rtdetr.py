@@ -5,7 +5,7 @@ import scipy.ndimage
 from torq.lab.pipeline.io import get_dtype
 from torq.testing.comparison import compare_test_results
 from torq.testing.onnx import (
-    generate_onnx_layers_from_hf,
+    generate_lazy_onnx_layers_from_hf,
     is_onnx_qdq_wrapper_layer,
     onnx_reference_results,
 )
@@ -126,8 +126,8 @@ def case_config(request, runtime_hw_type, chip_config):
 
 def pytest_generate_tests(metafunc):
 
-    cases = generate_onnx_layers_from_hf(metafunc.config.cache,
-            "Synaptics/torch_models", "rtdetr-l_int8.onnx")
+    # the layers are extracted only when a test needs them (see lazy_onnx_layer_cases)
+    cases = generate_lazy_onnx_layers_from_hf(metafunc, "Synaptics/torch_models", "rtdetr-l_int8.onnx")
 
     # Standalone QuantizeLinear/DequantizeLinear/Cast layers are QDQ wrappers,
     # not compute units; the full_model case covers the quantized path.

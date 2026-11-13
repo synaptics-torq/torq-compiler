@@ -7,11 +7,12 @@ from torq.testing.onnx import (
     ModelWithMetadata,
     OnnxLayerCase,
     generate_onnx_layers_from_file,
+    lazy_onnx_layer_cases,
     onnx_layer_key,
     onnx_reference_results,
 )
 from torq.testing.cases import drop_duplicate_cases
-from torq.testing.hf import get_hf_model_file
+from torq.testing.hf import get_hf_file_etag, get_hf_model_file
 from torq.testing.iree import get_dtype
 from torq.lab.model_tools.extraction.onnx.decoder_components import extract_representative_components
 
@@ -149,17 +150,20 @@ def case_config(request, chip_config):
     return comp_config
 
 
-def pytest_generate_tests(metafunc):
-    source_model = get_hf_model_file(
-        metafunc.config.cache, "Synaptics/gemma-3-270m-it", "onnx/model.onnx"
-    )
+_SOURCE_MODEL = ("Synaptics/gemma-3-270m-it", "onnx/model.onnx")
+_HYBRID_MODEL = ("Synaptics/gemma-3-270m-it", "onnx/model_hybrid_int4_int8.onnx")
+
+
+def _generate_cases(cache):
+    """The cases, made from the source and hybrid models (downloaded and split into components)."""
+    source_model = get_hf_model_file(cache, *_SOURCE_MODEL)
 
     # Extract whatever representative components the extractor can discover and
     # cache them on disk. Under pytest-xdist every worker collects independently,
     # so guard the (heavy) extraction with a lock: the first worker extracts and
     # writes a completion marker; the rest reuse the cached component files. The
     # marker lets us skip re-extraction without hardcoding the component names.
-    components_dir = metafunc.config.cache.mkdir("gemma3_components")
+    components_dir = cache.mkdir("gemma3_components")
     extracted_marker = components_dir / ".extracted"
     with FileLock(str(components_dir / "lock")):
         if not extracted_marker.exists():
@@ -174,7 +178,7 @@ def pytest_generate_tests(metafunc):
     cases = []
     for comp_path in sorted(components_dir.glob("*.onnx")):
         cases += generate_onnx_layers_from_file(
-            metafunc.config.cache, comp_path, dedup=True
+            cache, comp_path, dedup=True
         )
     # a layer with the same definition as one of another component is the same test
     cases = drop_duplicate_cases(cases, onnx_layer_key)
@@ -192,9 +196,7 @@ def pytest_generate_tests(metafunc):
     # bf16/int4/int8 layers, so it is fed through the pipeline as-is (see
     # onnx_fake_quantize_config) and compared against the IREE llvmcpu backend
     # (see reference_results) instead of ONNXRuntime, which cannot execute int4.
-    hybrid_model = get_hf_model_file(
-        metafunc.config.cache, "Synaptics/gemma-3-270m-it", "onnx/model_hybrid_int4_int8.onnx"
-    )
+    hybrid_model = get_hf_model_file(cache, *_HYBRID_MODEL)
 
     # Split the hybrid model into its architectural components (embed_scale,
     # decoder_block, final_norm, lm_head) and test each as a WHOLE subgraph.  We
@@ -205,7 +207,7 @@ def pytest_generate_tests(metafunc):
     # onnx.checker on every output, so each component is a valid standalone model
     # with its quant/dequant pairs kept intact; running it end-to-end
     # (is_full_model=True) exercises the real quantized compute.
-    hybrid_components_dir = metafunc.config.cache.mkdir("hybrid_components")
+    hybrid_components_dir = cache.mkdir("hybrid_components")
     hybrid_marker = hybrid_components_dir / ".extracted"
     with FileLock(str(hybrid_components_dir / "lock")):
         if not hybrid_marker.exists():
@@ -229,6 +231,16 @@ def pytest_generate_tests(metafunc):
             is_full_model=True,
         )
     )
+
+    return cases
+
+
+def pytest_generate_tests(metafunc):
+    cache = metafunc.config.cache
+    # The models (about 1 GB) are downloaded and split into components only when a test needs
+    # them, not at collection (see lazy_onnx_layer_cases).
+    key = {"models": [[*m, get_hf_file_etag(cache, *m)] for m in (_SOURCE_MODEL, _HYBRID_MODEL)]}
+    cases = lazy_onnx_layer_cases(metafunc, "gemma3_cases", key, lambda: _generate_cases(cache))
 
     # The full models take minutes of compile and simulation. The source model is not run:
     # hybrid_int4_int8_full_model covers the same decoder. The C model CI runs the hybrid full model

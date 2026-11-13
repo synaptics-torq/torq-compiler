@@ -1,4 +1,5 @@
 import copy as _copy
+import hashlib
 import json
 from functools import wraps
 from pathlib import Path
@@ -13,7 +14,7 @@ import pytest
 from torq.lab.model_tools.dtype_conversion.onnx import convert_model
 
 from torq.testing.cases import Case
-from torq.testing.hf import get_hf_model_file
+from torq.testing.hf import get_hf_file_etag, get_hf_model_file
 
 from .versioned_fixtures import (
     versioned_cached_data_fixture,
@@ -21,6 +22,9 @@ from .versioned_fixtures import (
     versioned_hashable_object_fixture,
     versioned_unhashable_object_fixture,
     VersionedUncachedData,
+    _hash_data,
+    _hash_file,
+    collection_data,
 )
 from torq.lab.quantization.onnx.fake import onnx_fake_quantize
 from .quantization import onnx_fake_quantize_config
@@ -73,6 +77,77 @@ def generate_onnx_layers_from_hf(cache, repo_id, filename, node_groups=None, ded
     model_file = get_hf_model_file(cache, repo_id, filename)
     return _load_cached_layers(
         cache, model_file, Path(filename).stem, node_groups, dedup)
+
+
+class _LazyOnnxModel(ModelWithMetadata):
+    """
+    The model of a case of lazy_onnx_layer_cases: resolve() makes the model files of all the cases
+    and returns the model of each case by name. It runs only when an attribute of the model is
+    read.
+    """
+
+    def __init__(self, name, resolve, version):
+        self._name = name
+        self._resolve = resolve
+        self._real = None
+        # the version of what resolve() makes, known without making it
+        self.lazy_version = version
+
+    def _get(self):
+        if self._real is None:
+            self._real = self._resolve()[self._name]
+        return self._real
+
+    @property
+    def model(self):
+        real = self._get()
+        return real.model if isinstance(real, ModelWithMetadata) else real
+
+    def __getattr__(self, name):
+        if name.startswith("__") or name in ("_name", "_resolve", "_real", "lazy_version"):
+            raise AttributeError(name)
+        return getattr(self._get(), name)
+
+
+def lazy_onnx_layer_cases(metafunc, name, key, generate):
+    """
+    The cases that generate() returns (OnnxLayerCase objects, e.g. from
+    generate_onnx_layers_from_hf), without making their model files at collection.
+
+    The names of the cases are cached with collection_data under key (JSON data, which must
+    version what generate() makes, e.g. with get_hf_file_etag), so generate() runs at collection
+    only on a miss. The models of the cases are made by running generate() (once per process)
+    when a test first reads one: a test whose results are all cached doesn't need its model, nor
+    the downloads and the layer extraction behind it. generate() may filter the cases with their
+    models (e.g. drop_duplicate_cases).
+    """
+    resolved = {}
+
+    def resolve():
+        if not resolved:
+            resolved.update({c.name: c.data for c in generate()})
+        return resolved
+
+    def compute():
+        cases = generate()
+        resolved.update({c.name: c.data for c in cases})
+        return [{"name": c.name, "is_full_model": c.is_full_model, "node_name": c.node_name}
+                for c in cases]
+
+    version = _hash_data(key)
+    return [OnnxLayerCase(name=c["name"], data=_LazyOnnxModel(c["name"], resolve, version),
+                          is_full_model=c["is_full_model"], node_name=c["node_name"])
+            for c in collection_data(metafunc, name, key, compute)]
+
+
+def generate_lazy_onnx_layers_from_hf(metafunc, repo_id, filename, node_groups=None, dedup=True):
+    """generate_onnx_layers_from_hf through lazy_onnx_layer_cases."""
+    cache = metafunc.config.cache
+    key = {"repo_id": repo_id, "filename": filename, "etag": get_hf_file_etag(cache, repo_id, filename),
+           "node_groups": node_groups, "dedup": dedup}
+    return lazy_onnx_layer_cases(
+        metafunc, f"onnx_layers_{Path(filename).stem}", key,
+        lambda: generate_onnx_layers_from_hf(cache, repo_id, filename, node_groups, dedup))
 
 
 def _tensor_key(tensor):
@@ -367,11 +442,34 @@ def onnx_reference_results(request, onnx_ref_data, convert_io_dtypes_policy):
     return convert_io_dtypes_policy.round_trip_outputs(outputs)
 
 
+def _onnx_case_content_version(request, case):
+    """
+    The version of the model of an ONNX case: the key of lazy_onnx_layer_cases, else the content
+    of the file it was generated from, else the content of the model. Without it, a new version of
+    the model (e.g. uploaded to the HuggingFace Hub) would reuse the cached results of the old
+    one.
+    """
+    version = getattr(case, "_content_version", None)
+    if version is None:
+        data = case.data
+        source = getattr(case, "source_model_path", "")
+        if isinstance(data, _LazyOnnxModel):
+            version = "lazy" + data.lazy_version
+        elif source and Path(source).exists():
+            version = "file" + _hash_file(request, Path(source))
+        else:
+            model = data.model if isinstance(data, ModelWithMetadata) else data
+            version = "model" + hashlib.sha256(model.SerializeToString(deterministic=True)).hexdigest()
+        # computed once per case and process: a model can be large
+        case._content_version = version
+    return version
+
+
 @pytest.fixture
 def onnx_layer_model(request):
     case_name = request.param.name
     model_data = request.param.data
-    version = "onnx_layer_model_" + case_name
+    version = "onnx_layer_model_" + case_name + "_" + _onnx_case_content_version(request, request.param)
 
     if isinstance(request.param, OnnxLayerCase):
         if request.config.getoption("--onnx-print-layer-info") and not request.param.is_full_model:
