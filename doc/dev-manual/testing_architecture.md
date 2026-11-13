@@ -312,9 +312,12 @@ keeps the cache.
 
 Every version also includes a salt for what the results depend on beyond the fixtures' inputs:
 the installed Python packages (but the ``torq-*`` wheels), the iree and iree-turbine commits,
-the code of ``python/torq``, and the code of the test module (its file, the other modules of
-its folder that aren't tests, and the ``conftest.py`` files above it). A change in any of them
-recomputes the results of the tests it can affect.
+the code of the test module (its file, the other modules of its folder that aren't tests, and
+the ``conftest.py`` files above it), and the code of the module that defines the fixture: its file
+and the ``python/torq`` modules it imports, directly or not (found by reading the ``import``
+statements, with the ``__init__.py`` of their packages). A change in any of them recomputes the
+results of the fixtures it can affect: e.g. a change in ``torq/testing/onnx.py`` doesn't recompute
+the Keras models, and recomputes the compiles of ONNX tests only if their MLIR changes.
 
 The results can also be shared across sessions: ``--remote-cache-write STORE`` writes each result a
 session computes to a store, a directory or ``s3://bucket/prefix``, and ``--remote-cache-read

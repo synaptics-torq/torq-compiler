@@ -1,3 +1,5 @@
+import ast
+import functools
 import pytest
 
 from filelock import FileLock
@@ -90,8 +92,8 @@ def collection_data(metafunc, name, key, compute):
     """
     The data that the test module of metafunc computes to generate its test cases (e.g. the
     layers of a model), cached like the results of the versioned fixtures: in the local cache
-    and in the shared store, under a version made of key (JSON data), the code of the torq
-    packages, the installed packages and the code of the test module.
+    and in the shared store, under a version made of key (JSON data), the installed packages, the
+    code of the test module and the code of the torq modules it imports.
 
     compute() returns the data, which must be JSON data. Under xdist, the first worker to need
     it computes or fetches it, and the others read it from the local cache.
@@ -99,7 +101,7 @@ def collection_data(metafunc, name, key, compute):
     config = metafunc.config
     root = Path(config.rootpath)
     module_path = Path(metafunc.definition.path)
-    salt = [_get_global_salt(root)]
+    salt = [_get_env_salt(root), _get_code_salt(root, module_path)]
     if module_path.is_relative_to(root):
         salt.append(_get_module_salt(root, module_path))
     version = _hash_data([salt, key])
@@ -183,14 +185,20 @@ def pytest_sessionfinish(session):
 # What the cached results depend on beyond the inputs of the fixtures: the tools that make the
 # models and references, and the code of the tests. It is part of every version, so that a
 # cache shared across sessions is not reused by other code. Set for each test before its
-# fixtures.
+# fixtures; each versioned fixture adds the code of its own module (see _get_code_salt).
 _salt = None
 
+# the root of the checkout, set with _salt
+_salt_root = None
+
 # salt part of the session, computed once per process
-_global_salt = None
+_env_salt = None
 
 # salt part of each test module
 _module_salts = {}
+
+# code salt of each module file
+_code_salts = {}
 
 
 def _files_hash(root, files):
@@ -208,24 +216,93 @@ def _gitlink(root, path):
         return "unknown"
 
 
-def _get_global_salt(root):
+def _get_env_salt(root):
     """
-    The tools the tests use to make models and references (the installed packages but our own
+    The tools the tests use to make models and references: the installed packages but our own
     wheels, which are versioned by their build time, and the iree and iree-turbine commits, which
-    also cover the LLVM-CPU references and the ONNX import), and the code of the torq packages.
+    also cover the LLVM-CPU references and the ONNX import.
     """
-    global _global_salt
-    if _global_salt is None:
+    global _env_salt
+    if _env_salt is None:
         packages = sorted({f"{d.metadata['Name']}=={d.version}" for d in importlib.metadata.distributions()
                            if d.metadata['Name'] and not d.metadata['Name'].lower().startswith("torq")})
-        _global_salt = _hash_data({
+        _env_salt = _hash_data({
             "python": sys.version,
             "packages": packages,
             "iree": _gitlink(root, "third_party/iree"),
             "iree-turbine": _gitlink(root, "third_party/iree-turbine"),
-            "torq": _files_hash(root, sorted((root / "python" / "torq").rglob("*.py"))),
         })
-    return _global_salt
+    return _env_salt
+
+
+def _torq_module_file(torq_root, name):
+    """The file of module name (torq.x.y) under torq_root (python/), None if it isn't there."""
+    path = torq_root.joinpath(*name.split("."))
+    if (path / "__init__.py").exists():
+        return path / "__init__.py"
+    if path.with_suffix(".py").exists():
+        return path.with_suffix(".py")
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def _torq_imports(torq_root, path):
+    """The files of the torq modules that the module file path imports (anywhere in it, e.g. in a
+    function), with the __init__.py of their packages, which run when they are imported."""
+    if path.is_relative_to(torq_root):
+        parts = list(path.relative_to(torq_root).with_suffix("").parts)
+        package = parts[:-1]
+        if parts[-1] == "__init__":
+            parts = package
+    else:
+        parts, package = [], []
+    names = set()
+    for node in ast.walk(ast.parse(path.read_text(), str(path))):
+        if isinstance(node, ast.Import):
+            names |= {a.name for a in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                if not package:
+                    continue
+                base = package[:len(package) - node.level + 1]
+                module = ".".join(base + ([node.module] if node.module else []))
+            else:
+                module = node.module or ""
+            # from a import b: b may be a module
+            names |= {module} | {f"{module}.{a.name}" for a in node.names}
+    names.add(".".join(parts))
+    files = set()
+    for name in names:
+        split = name.split(".")
+        if split[0] != "torq":
+            continue
+        for i in range(1, len(split) + 1):
+            f = _torq_module_file(torq_root, ".".join(split[:i]))
+            if f is not None:
+                files.add(f)
+    return files
+
+
+def _get_code_salt(root, path):
+    """
+    The code that the module file path (e.g. of a fixture) can run: its content and the content of
+    the torq modules (python/torq) it imports, directly or not. A change in the other torq modules
+    doesn't change the results of its fixtures.
+    """
+    path = Path(path)
+    if path not in _code_salts:
+        torq_root = root / "python"
+        seen = set()
+        todo = [path]
+        while todo:
+            f = todo.pop()
+            if f in seen:
+                continue
+            seen.add(f)
+            todo += [d for d in _torq_imports(torq_root, f) if d not in seen]
+        files = sorted(f for f in seen if f.is_relative_to(root))
+        _code_salts[path] = _files_hash(root, files)
+    return _code_salts[path]
 
 
 def _get_module_salt(root, module_path):
@@ -244,13 +321,14 @@ def _get_module_salt(root, module_path):
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item):
-    global _salt
+    global _salt, _salt_root
     root = Path(item.config.rootpath)
+    _salt_root = root
     module_path = Path(item.path)
     if module_path.is_relative_to(root):
-        _salt = _hash_data([_get_global_salt(root), _get_module_salt(root, module_path)])
+        _salt = _hash_data([_get_env_salt(root), _get_module_salt(root, module_path)])
     else:
-        _salt = _get_global_salt(root)
+        _salt = _get_env_salt(root)
 
 
 def _dataclass_dict_deep(obj):
@@ -344,7 +422,7 @@ def content_hash(path) -> str:
     return _content_hashes[key]
 
 
-def _get_fixture_params(kwargs):
+def _get_fixture_params(kwargs, fun):
     input_params_versions = []
 
     kwargs_data = {}
@@ -378,7 +456,8 @@ def _get_fixture_params(kwargs):
         input_params_versions.append(value.version)
 
     if _salt is not None:
-        input_params_versions.append("salt." + _salt)
+        code_salt = _get_code_salt(_salt_root, inspect.getsourcefile(fun))
+        input_params_versions.append("salt." + _hash_data([_salt, code_salt]))
 
     return input_params_versions, kwargs_data
 
@@ -613,7 +692,7 @@ def versioned_generated_file_fixture(suffix):
 
             logger.debug("[generating versioned file] " + fun.__name__)
 
-            input_params_versions, kwargs_data = _get_fixture_params(kwargs)
+            input_params_versions, kwargs_data = _get_fixture_params(kwargs, fun)
 
             request = kwargs['request']
                     
@@ -686,7 +765,7 @@ def versioned_generated_directory_fixture(fun):
     def wrapper(**kwargs):
 
         logger.debug("[generating versioned directory] " + fun.__name__)
-        input_params_versions, kwargs_data = _get_fixture_params(kwargs)
+        input_params_versions, kwargs_data = _get_fixture_params(kwargs, fun)
 
         request = kwargs['request']
 
@@ -783,7 +862,7 @@ def versioned_unhashable_object_fixture(fun):
 
         logger.debug("[uncached unhashable] " + fun.__name__)
 
-        input_params_versions, kwargs_data = _get_fixture_params(kwargs)
+        input_params_versions, kwargs_data = _get_fixture_params(kwargs, fun)
 
         logger.debug("[unhashable object version] " + fun.__name__ + " -> " + str(input_params_versions))
 
@@ -848,7 +927,7 @@ def versioned_cached_data_fixture(fun):
 
         logger.debug("[generating versioned data] " + fun.__name__)
         
-        input_params_versions, kwargs_data = _get_fixture_params(kwargs)
+        input_params_versions, kwargs_data = _get_fixture_params(kwargs, fun)
 
         request = kwargs['request']
 
