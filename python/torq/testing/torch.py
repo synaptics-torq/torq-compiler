@@ -26,6 +26,9 @@ from .versioned_fixtures import (
     versioned_unhashable_object_fixture,
     versioned_generated_file_fixture,
     VersionedUncachedData,
+    _hash_data,
+    _hash_file,
+    _get_code_salt,
     collection_data,
 )
 
@@ -1561,13 +1564,24 @@ def generate_traced_torch_model_layers(
     return _load_torch_metadata_cases(manifest, model_loader_key)
 
 
-@pytest.fixture
-def torch_layer_model_data(request, case_config):
-    """Fixture that exports a single layer from a Torch model to Torch MLIR text.
-
-    Returns a VersionedUncachedData containing the MLIR text.
-    The actual file generation and caching is handled by torch_layer_model.
+def torch_layer_version(request, case_config, export_module):
     """
+    The version of the MLIR export of the layer of a torch case, known without loading the model:
+    the layer, its inputs, the model (its loader, or the content of its file) and the code of the
+    module file export_module that exports it.
+    """
+    if case_config.get("model") is not None:
+        model = {"class": type(case_config["model"]).__name__}
+    elif case_config.get("model_path"):
+        model = {"file": _hash_file(request, Path(case_config["model_path"]))}
+    else:
+        model = {"loader": case_config.get("model_loader_key")}
+    code = _get_code_salt(Path(request.config.rootpath), export_module)
+    return _hash_data([case_config["layer_name"], model, case_config.get("layer_input_shapes", []),
+                       case_config.get("layer_arg_specs"), case_config.get("layer_kwarg_specs"), code])
+
+
+def _export_layer_with_fx_importer(case_config):
     from iree.compiler.extras.fx_importer import FxImporter
 
     layer_name = case_config["layer_name"]
@@ -1604,9 +1618,20 @@ def torch_layer_model_data(request, case_config):
     importer.import_frozen_program(exported)
     mlir_module = importer.module
 
-    mlir_text = str(mlir_module)
-    version = f"torch_layer_{layer_name}_{type(model).__name__}"
-    return VersionedUncachedData(data=mlir_text, version=version)
+    return str(mlir_module)
+
+
+
+
+@pytest.fixture
+def torch_layer_model_data(request, case_config):
+    """Fixture that exports a single layer from a Torch model to Torch MLIR text.
+
+    Returns a VersionedUncachedData whose data is a function that returns the MLIR text: the
+    model is loaded and exported only when torch_layer_model writes a file that isn't cached.
+    """
+    return VersionedUncachedData(data=lambda: _export_layer_with_fx_importer(case_config),
+                                 version="torch_layer_" + torch_layer_version(request, case_config, __file__))
 
 
 @pytest.fixture
@@ -1616,9 +1641,11 @@ def torch_model_data(request, case_config):
 
 @versioned_generated_file_fixture("mlir")
 def torch_layer_model(request, versioned_file, torch_model_data):
-    """Fixture that writes the Torch MLIR text to a versioned cached file."""
+    """Fixture that writes the Torch MLIR text to a versioned cached file (torch_model_data is the
+    text, or a function that returns it)."""
+    text = torch_model_data() if callable(torch_model_data) else torch_model_data
     with open(versioned_file, "w") as f:
-        f.write(torch_model_data)
+        f.write(text)
 
 
 @pytest.fixture

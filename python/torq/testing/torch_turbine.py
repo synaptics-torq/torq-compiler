@@ -21,6 +21,7 @@ from .torch import (
     TorchLayerCase,
     _find_layer_by_name,
     _get_model_from_case_config,
+    torch_layer_version,
 )
 from .versioned_fixtures import VersionedUncachedData
 
@@ -100,12 +101,7 @@ def _rand_tensor_for_spec(spec, default_dtype):
     return torch.randn(*shape, dtype=dtype)
 
 
-@pytest.fixture
-def torch_turbine_layer_model_data(request, case_config):
-    """Fixture that exports a single layer from a Torch model using IREE Turbine.
-
-    Returns a VersionedUncachedData containing the Torch MLIR text.
-    """
+def _export_layer_with_turbine(case_config):
     layer_name = case_config["layer_name"]
     model = _get_model_from_case_config(case_config)
     layer_input_shapes = case_config.get("layer_input_shapes", [])
@@ -142,11 +138,9 @@ def torch_turbine_layer_model_data(request, case_config):
             raise ValueError(f"No input shapes available for layer '{layer_name}'")
         # torch.export takes tensors as args; constant positional args are
         # interleaved in the same tuple (they get baked into the graph).
-        mlir_text = export_submodule_with_turbine(
+        return export_submodule_with_turbine(
             submodule, tuple(example_inputs), example_kwargs or None
         )
-        version = f"torch_turbine_layer_{layer_name}_{type(model).__name__}"
-        return VersionedUncachedData(data=mlir_text, version=version)
 
     # Build random example inputs from recorded shapes using the model's dtype.
     example_inputs = []
@@ -158,6 +152,15 @@ def torch_turbine_layer_model_data(request, case_config):
     if not example_inputs:
         raise ValueError(f"No input shapes available for layer '{layer_name}'")
 
-    mlir_text = export_submodule_with_turbine(submodule, tuple(example_inputs))
-    version = f"torch_turbine_layer_{layer_name}_{type(model).__name__}"
-    return VersionedUncachedData(data=mlir_text, version=version)
+    return export_submodule_with_turbine(submodule, tuple(example_inputs))
+
+
+@pytest.fixture
+def torch_turbine_layer_model_data(request, case_config):
+    """Fixture that exports a single layer from a Torch model using IREE Turbine.
+
+    Returns a VersionedUncachedData whose data is a function that returns the Torch MLIR text: the
+    model is loaded and exported only when torch_layer_model writes a file that isn't cached.
+    """
+    return VersionedUncachedData(data=lambda: _export_layer_with_turbine(case_config),
+                                 version="torch_turbine_layer_" + torch_layer_version(request, case_config, __file__))
