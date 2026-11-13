@@ -21,6 +21,7 @@ def OptimizeTosaForTorq :
   let constructor = "mlir::syna::torq::createOptimizeTosaForTorqPass()";
 
   let dependentDialects = [
+    "tensor::TensorDialect",
     "tosa::TosaDialect"
   ];
 }

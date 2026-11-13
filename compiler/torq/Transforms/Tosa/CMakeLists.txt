@@ -18,11 +18,14 @@ iree_cc_library(
   SRCS
     Passes.cpp
     TransposeConvPhaseConvPattern.cpp
+    TransposeConvStride2PhaseSplitPattern.cpp
   DEPS
     ::PassesIncGen
     MLIRFunctionInterfaces
     MLIRIR
+    MLIRDialectUtils
     MLIRPass
+    MLIRTensorDialect
     MLIRTosaDialect
     MLIRTransformUtils
     iree::target::torq::Utils

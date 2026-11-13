@@ -39,6 +39,9 @@ _WITH_BIAS = [
     ((11, 10, 7), 11, (2, 4), (2, 4), "valid"),
     ((1, 8, 8), 8, (1, 5), (1, 2), "same"),
     ((8, 8, 4), 4, (4, 4), (2, 2), "same"),
+    ((8, 8, 16), 16, (3, 3), (2, 2), "same"),
+    ((5, 7, 8), 24, (2, 2), (2, 2), "valid"),
+    ((6, 5, 8), 8, (4, 2), (2, 2), "valid"),
 ]
 
 _NO_BIAS = [
@@ -78,6 +81,17 @@ _add("conv1d_transpose_k3_s2_same_12x4_oc4_nobias", sequential(
     (12, 4),
     layers.Conv1DTranspose(filters=4, kernel_size=3, strides=2, padding="same", use_bias=False),
 ))
+
+
+# A positive output_padding gives a positive out_pad: rows and columns with the bias only. The
+# default bias is 0, so these cases use a random bias.
+_RANDOM_BIAS = {"bias_initializer": "random_uniform"}
+_add("conv2d_transpose_k3x3_s2x2_valid_5x5x4_oc8_outpad1", conv2d_transpose(
+    (5, 5, 4), 8, (3, 3), (2, 2), "valid", output_padding=1, **_RANDOM_BIAS))
+_add("conv2d_transpose_k4x3_s2x2_valid_4x6x4_oc8_outpad1x0", conv2d_transpose(
+    (4, 6, 4), 8, (4, 3), (2, 2), "valid", output_padding=(1, 0), **_RANDOM_BIAS))
+_add("conv2d_transpose_k3x3_s2x2_same_8x8x16_oc16_bias", conv2d_transpose(
+    (8, 8, 16), 16, (3, 3), (2, 2), "same", **_RANDOM_BIAS))
 
 
 def _shared_input_convt(x):

@@ -18,6 +18,7 @@ class OptimizeTosaForTorqPass : public impl::OptimizeTosaForTorqBase<OptimizeTos
     void runOnOperation() override {
         RewritePatternSet patterns(&getContext());
         populateTransposeConvPhaseConvPatterns(&getContext(), patterns);
+        populateTransposeConvStride2PhaseSplitPatterns(&getContext(), patterns);
         // Only apply the patterns: do not fold, CSE constants or simplify regions in the rest of
         // the function.
         GreedyRewriteConfig config;

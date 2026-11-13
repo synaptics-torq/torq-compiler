@@ -61,3 +61,12 @@ test_keras_model_torq[model138_mult_mult_inp1x3x3x1_int16-sim-sr200-v1] synaptic
 test_keras_model_llvm[model138_mult_mult_inp1x3x3x1_int16-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#1390
 test_keras_model_llvm[model138_mult_mult_inp1x3x3x1_int16-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#1390
 test_keras_model_llvm[model138_mult_mult_inp1x3x3x1_int16-sim-sr200-v1] synaptics-torq/torq-compiler-dev#1390
+test_keras_model_llvm[conv2d_transpose_k3x3_s2x2_valid_5x5x4_oc8_outpad1_int16-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#3034
+test_keras_model_llvm[conv2d_transpose_k3x3_s2x2_valid_5x5x4_oc8_outpad1_int16-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#3034
+test_keras_model_llvm[conv2d_transpose_k3x3_s2x2_valid_5x5x4_oc8_outpad1_int16-sim-sr200-v1] synaptics-torq/torq-compiler-dev#3034
+test_keras_model_llvm[conv2d_transpose_k4x3_s2x2_valid_4x6x4_oc8_outpad1x0_int8-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#3034
+test_keras_model_llvm[conv2d_transpose_k4x3_s2x2_valid_4x6x4_oc8_outpad1x0_int8-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#3034
+test_keras_model_llvm[conv2d_transpose_k4x3_s2x2_valid_4x6x4_oc8_outpad1x0_int8-sim-sr200-v1] synaptics-torq/torq-compiler-dev#3034
+test_keras_model_llvm[conv2d_transpose_k4x3_s2x2_valid_4x6x4_oc8_outpad1x0_int16-sim-sl2610-v1] synaptics-torq/torq-compiler-dev#3034
+test_keras_model_llvm[conv2d_transpose_k4x3_s2x2_valid_4x6x4_oc8_outpad1x0_int16-aws_fpga-sr200-v1] synaptics-torq/torq-compiler-dev#3034
+test_keras_model_llvm[conv2d_transpose_k4x3_s2x2_valid_4x6x4_oc8_outpad1x0_int16-sim-sr200-v1] synaptics-torq/torq-compiler-dev#3034
