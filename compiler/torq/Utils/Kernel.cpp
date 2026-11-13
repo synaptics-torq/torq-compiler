@@ -293,6 +293,11 @@ static int getBusScatterGather(NdlType type) {
     return 0;
 }
 
+static const int *acbrValidDataCount() {
+    static const int sValidDataSizes[] = {1, 2, 4, 8, 16, 0};
+    return sValidDataSizes;
+}
+
 // Block info of data as DEDR reads it from LRAM
 static SGBlockInfo sgElementCountDedr(const Shape &shape, DType elementType) {
     return sgElementCount(
@@ -818,6 +823,16 @@ static int normalizeIndex(int i, int rank, bool iCanBeRank) {
         assert(false && "Index out of bounds");
     }
     return normalizedIndex;
+}
+
+// return value rounded up to the next valid value, 0 if too big
+static int roundUp(int value, const int *validValues) {
+    while (int validValue = *validValues++) {
+        if (value <= validValue) {
+            return validValue;
+        }
+    }
+    return 0;
 }
 
 const Indexes &Data::indexes() const { return _ix; }
@@ -1497,6 +1512,11 @@ int SlicePrivate::addMemNdlDims(
         misalignedSplit = groupStride && (*groupStride * elementSize) % 8 != 0;
     }
 
+    if (type == NdlType::DEBR) {
+        // DEBR supports only certain data transfer counts that must match ACBR
+        block.size = roundUp(block.size, acbrValidDataCount());
+    }
+
     // Let's start with LDIMs.
     // We currently handle with LDIMs only the element size and the block.size.
     // Any other dimension will be handled with HDIMs.
@@ -1859,16 +1879,6 @@ void SlicePrivate::actSetNumberFormat(DType dtype) {
     }
 }
 
-// return value rounded up to the next valid value, 0 if too big
-static int roundUp(int value, const int *validValues) {
-    while (int validValue = *validValues++) {
-        if (value <= validValue) {
-            return validValue;
-        }
-    }
-    return 0;
-}
-
 void SlicePrivate::cedr(const IData &idata, uint32_t weightSize, bool transpose) {
     Shape shape = idata.subShape();
     const int elementSize = sizeofType(idata.elementType());
@@ -2093,6 +2103,7 @@ void SlicePrivate::acbr(const BData &bdata) {
     Shape shape = bdata.subShape();
     int elementSize = sizeofType(bdata.elementType()) * backDimCount(shape);
     int blockSize = denseElementCount(shape) / backDimCount(shape);
+    blockSize = roundUp(blockSize, acbrValidDataCount());
     assert(blockSize > 0 && "Block empty or not dense");
 
     // Generate ACBR to load the data from BRAM to ACT
