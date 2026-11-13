@@ -319,6 +319,65 @@ static mlir::Value weights_swap_even_odd(
     return createCompileTimeConstOp(res, rewriter).value_or(res.getResult());
 }
 
+// Puts `top` zero rows above and `bottom` zero rows below the [O, I, KH, KW] `weights`.
+static Value padZeroKernelRows(
+    PatternRewriter &rewriter, Location loc, Value weights, int64_t top, int64_t bottom
+) {
+    if (top == 0 && bottom == 0) {
+        return weights;
+    }
+    auto weightType = cast<RankedTensorType>(weights.getType());
+    SmallVector<int64_t> shape(weightType.getShape());
+    SmallVector<OpFoldResult> sizes = getAsIndexOpFoldResult(rewriter.getContext(), shape);
+    shape[2] += top + bottom;
+    Type elemType = weightType.getElementType();
+    Value zero = arith::ConstantOp::create(rewriter, loc, elemType, rewriter.getZeroAttr(elemType));
+    Value padded = tensor::EmptyOp::create(rewriter, loc, shape, elemType);
+    padded = linalg::FillOp::create(rewriter, loc, zero, padded).getResult(0);
+    SmallVector<OpFoldResult> offsets(4, rewriter.getIndexAttr(0));
+    offsets[2] = rewriter.getIndexAttr(top);
+    SmallVector<OpFoldResult> strides(4, rewriter.getIndexAttr(1));
+    return tensor::InsertSliceOp::create(rewriter, loc, weights, padded, offsets, sizes, strides)
+        .getResult();
+}
+
+// How a conv with stride [sh, 1] runs as a stride-1 conv on the sh row phases of its input.
+struct RowPhaseSplit {
+    // Zero kernel rows above the kernel. They make the top padding a multiple of sh.
+    int64_t extraTop;
+    // Rows of each kernel phase.
+    int64_t kernelRows;
+    // Top and bottom padding of the stride-1 conv.
+    int64_t top, bottom;
+};
+
+// Computes the RowPhaseSplit of a conv with stride [sh, 1], kernel height kh and top padding top.
+// The input has inH rows and the output has outH rows. Kernel row k reads input row
+// sh * o - top + k. When top is not a multiple of sh, kernel phase p reads another input phase.
+// Zero kernel rows above the kernel, with the same number of extra top padding rows, give the same
+// result. Then kernel phase p reads input phase p. The stride-1 HW conv reads at most
+// (kernelRows - 1) / 2 padding rows on top and the remaining border rows at the bottom (see
+// convAdjustPadding). Zero kernel rows below the kernel make the top border larger. Each of them
+// also adds one bottom padding row. The bottom border grows by one row or less. Thus these rows
+// cannot make the bottom padding fit. Returns std::nullopt when the HW cannot run the split.
+static std::optional<RowPhaseSplit>
+getRowPhaseSplit(int64_t sh, int64_t kh, int64_t top, int64_t inH, int64_t outH) {
+    if (inH % sh != 0) {
+        return std::nullopt;
+    }
+    RowPhaseSplit split;
+    split.extraTop = (sh - top % sh) % sh;
+    split.top = (top + split.extraTop) / sh;
+    split.kernelRows = std::max(llvm::divideCeilSigned(kh + split.extraTop, sh), 2 * split.top + 1);
+    // The stride-1 conv gives outH = inH / sh + top + bottom - kernelRows + 1 rows
+    split.bottom = outH - 1 + split.kernelRows - inH / sh - split.top;
+    const int64_t maxBottom = split.kernelRows - 1 - (split.kernelRows - 1) / 2;
+    if (split.bottom < 0 || split.bottom > maxBottom) {
+        return std::nullopt;
+    }
+    return split;
+}
+
 // Pack depthwise 1D weights from [Ch, Kh, Kw] to [(Ch/32), Kh, Kw, 32]
 // Used for depthwise 1D stride=1 special case
 static mlir::Value weights_ChHW_to_ChHW32(
@@ -420,23 +479,39 @@ template <typename ConvOpT> class ConvLikeKernelLayoutPattern : public OpRewrite
         const int wn = weightShape[3];
         std::vector<int64_t> weight_shape{on, in, hn, wn};
 
+        const auto &strides = op.getStride();
+        std::optional<RowPhaseSplit> rowSplit;
+        if (strides[0] > 1 && strides[1] == 1) {
+            auto inputType = cast<RankedTensorType>(op.getInput().getType());
+            auto initType = cast<RankedTensorType>(op.getInit().getType());
+            if (inputType.hasStaticShape() && initType.hasStaticShape()) {
+                rowSplit = getRowPhaseSplit(
+                    strides[0], hn, op.getPad()[2], inputType.getShape()[2], initType.getShape()[2]
+                );
+            }
+            if (!rowSplit) {
+                return op.emitOpError("the stride-1 HW conv cannot run the row phases of this ")
+                       << "stride [" << strides[0] << ", 1] conv";
+            }
+        }
+
         rewriter.modifyOpInPlace(op, [&]() { op.setVectorizationMode(vectorizationMode); });
 
         // Inflate and reorder weights
-        const auto &strides = op.getStride();
         if (isStride2(strides) && weight_shape[3] > 1) {
             // Kernel requires column 1 and column 2 in weights to be swapped
             weights = weights_swap_even_odd(rewriter, op.getLoc(), weights, 3, 2);
         }
-        else if (strides[0] > 1 && strides[1] == 1) {
+        else if (rowSplit) {
             // Conv with stride [SH, 1], input [N, C, H, W] and kernel [KH, KW] is equivalent to
             // one with stride [1, 1], input [N, SH*C, H/SH, W], kernel [O,SH*I,div_ceil(KH,SH), KW]
             // where both the kernel and the input have been segmented (transposed) in SH groups
-            // (in case of SH==2 this means even/odd rows).
-
-            // Pad weights on H dimension to be multiple of sh
+            // (in case of SH==2 this means even/odd rows). See getRowPhaseSplit for the zero
+            // kernel rows and the padding.
             const int sh = strides[0];
-            weights = weights_pad_with_zero(rewriter, op.getLoc(), weights, 2, sh);
+            const int64_t bottomRows = sh * rowSplit->kernelRows - hn - rowSplit->extraTop;
+            weights =
+                padZeroKernelRows(rewriter, op.getLoc(), weights, rowSplit->extraTop, bottomRows);
 
             // Partition kernel rows in sh groups (even/odd rows for sh == 2)
             weights = weights_swap_even_odd(rewriter, op.getLoc(), weights, 2, sh);
@@ -488,8 +563,8 @@ template <typename ConvOpT> class ConvLikeKernelLayoutPattern : public OpRewrite
 
             // Update top and bottom padding. Note: padding is represented as LRTB
             SmallVector<int64_t> padding(op.getPad());
-            padding[2] /= sh;
-            padding[3] /= sh;
+            padding[2] = rowSplit->top;
+            padding[3] = rowSplit->bottom;
             rewriter.modifyOpInPlace(op, [&]() { op.setPad(padding); });
         }
         if constexpr (std::is_same_v<ConvOpT, torq_hl::Conv2DOp>) {
