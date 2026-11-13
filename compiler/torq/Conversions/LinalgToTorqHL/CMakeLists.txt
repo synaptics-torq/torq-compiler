@@ -37,6 +37,7 @@ set(sources
 set(deps
     ::PassesIncGen
     MLIRArithDialect
+    MLIRSCFDialect
     MLIRTensorDialect
     MLIRFunctionInterfaces
     MLIRIR

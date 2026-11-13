@@ -18,6 +18,7 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tosa/IR/TosaOps.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
@@ -347,6 +348,28 @@ struct PoolRescaleInfo {
     int32_t zeroPoint, min, max;
 };
 
+// Signed index intervals only. Arithmetic that could wrap is left unsupported.
+using PoolIndexBounds = std::pair<int64_t, int64_t>;
+
+static std::optional<PoolIndexBounds>
+combinePoolIndexBounds(PoolIndexBounds lhs, PoolIndexBounds rhs, bool subtract) {
+    bool lowerOverflow = false, upperOverflow = false;
+    APInt lower = subtract ? APInt(64, lhs.first).ssub_ov(APInt(64, rhs.second), lowerOverflow)
+                           : APInt(64, lhs.first).sadd_ov(APInt(64, rhs.first), lowerOverflow);
+    APInt upper = subtract ? APInt(64, lhs.second).ssub_ov(APInt(64, rhs.first), upperOverflow)
+                           : APInt(64, lhs.second).sadd_ov(APInt(64, rhs.second), upperOverflow);
+    if (lowerOverflow || upperOverflow)
+        return std::nullopt;
+    return PoolIndexBounds{lower.getSExtValue(), upper.getSExtValue()};
+}
+
+static PoolIndexBounds
+combineMinMaxPoolIndexBounds(PoolIndexBounds lhs, PoolIndexBounds rhs, bool isMin) {
+    if (isMin)
+        return {std::min(lhs.first, rhs.first), std::min(lhs.second, rhs.second)};
+    return {std::max(lhs.first, rhs.first), std::max(lhs.second, rhs.second)};
+}
+
 // Evaluate the original rescale exactly; padded windows may use different divisors.
 class PoolScaleEvaluator {
   public:
@@ -362,6 +385,7 @@ class PoolScaleEvaluator {
         h = y;
         w = x;
         cache.clear(); // Index-derived values change at every output position.
+        boundsCache.clear();
         auto multiplier = evaluate(apply.getMultiplier());
         auto shift = evaluate(apply.getShift());
         if (!multiplier || !shift || multiplier->isNegative() || shift->getSExtValue() < 0 ||
@@ -378,12 +402,125 @@ class PoolScaleEvaluator {
     std::optional<APInt> evaluateAffine(Operation *op, unsigned bits);
     std::optional<APInt> evaluateUnary(Operation *op, unsigned bits);
     std::optional<APInt> evaluateBinary(Operation *op);
+    std::optional<PoolIndexBounds> evaluateIndexBounds(Value value);
+    std::optional<PoolIndexBounds>
+    evaluateAffineBounds(AffineExpr expr, unsigned numDims, ArrayRef<PoolIndexBounds> operands);
 
     tosa::ApplyScaleOp apply;
     unsigned hDim, wDim;
     int64_t h = 0, w = 0;
     DenseMap<Value, APInt> cache;
+    DenseMap<Value, PoolIndexBounds> boundsCache;
 };
+
+std::optional<PoolIndexBounds> PoolScaleEvaluator::evaluateAffineBounds(
+    AffineExpr expr, unsigned numDims, ArrayRef<PoolIndexBounds> operands
+) {
+    if (auto constant = dyn_cast<AffineConstantExpr>(expr))
+        return PoolIndexBounds{constant.getValue(), constant.getValue()};
+    if (auto dim = dyn_cast<AffineDimExpr>(expr))
+        return operands[dim.getPosition()];
+    if (auto symbol = dyn_cast<AffineSymbolExpr>(expr))
+        return operands[numDims + symbol.getPosition()];
+    auto binary = dyn_cast<AffineBinaryOpExpr>(expr);
+    if (!binary)
+        return std::nullopt;
+    auto lhs = evaluateAffineBounds(binary.getLHS(), numDims, operands);
+    auto rhs = evaluateAffineBounds(binary.getRHS(), numDims, operands);
+    if (!lhs || !rhs)
+        return std::nullopt;
+    if (expr.getKind() == AffineExprKind::Add)
+        return combinePoolIndexBounds(*lhs, *rhs, /*subtract=*/false);
+    // Affine subtraction is represented as multiplication by -1 plus addition.
+    if (expr.getKind() == AffineExprKind::Mul && rhs->first == rhs->second) {
+        bool lowerOverflow = false, upperOverflow = false;
+        APInt lower = APInt(64, lhs->first).smul_ov(APInt(64, rhs->first), lowerOverflow);
+        APInt upper = APInt(64, lhs->second).smul_ov(APInt(64, rhs->first), upperOverflow);
+        if (lowerOverflow || upperOverflow)
+            return std::nullopt;
+        int64_t a = lower.getSExtValue(), b = upper.getSExtValue();
+        return PoolIndexBounds{std::min(a, b), std::max(a, b)};
+    }
+    return std::nullopt;
+}
+
+std::optional<PoolIndexBounds> PoolScaleEvaluator::evaluateIndexBounds(Value value) {
+    if (!value.getType().isIndex())
+        return std::nullopt;
+    if (auto it = boundsCache.find(value); it != boundsCache.end())
+        return it->second;
+    if (auto exact = evaluate(value)) {
+        int64_t constant = exact->getSExtValue();
+        return PoolIndexBounds{constant, constant};
+    }
+
+    std::optional<PoolIndexBounds> result;
+    if (auto arg = dyn_cast<BlockArgument>(value)) {
+        auto loop = dyn_cast<scf::ForOp>(arg.getOwner()->getParentOp());
+        if (!loop || value != loop.getInductionVar())
+            return std::nullopt;
+        auto lower = getConstIntValue(loop.getLowerBound());
+        auto upper = getConstIntValue(loop.getUpperBound());
+        auto step = getConstIntValue(loop.getStep());
+        if (!lower || !upper || !step || *step <= 0 || *lower >= *upper)
+            return std::nullopt;
+        // Bound the values reached by the loop. The upper bound is exclusive,
+        // and values between iterations are not induction-variable values.
+        APInt wideLower(128, *lower, /*isSigned=*/true);
+        APInt wideUpper(128, *upper, /*isSigned=*/true);
+        APInt wideStep(128, *step, /*isSigned=*/true);
+        APInt distance = wideUpper - wideLower;
+        APInt tripCount = distance.udiv(wideStep);
+        if (!distance.urem(wideStep).isZero())
+            tripCount += 1;
+        APInt last = wideLower + (tripCount - 1) * wideStep;
+        if (!last.isSignedIntN(64))
+            return std::nullopt;
+        result = PoolIndexBounds{*lower, last.getSExtValue()};
+    }
+    else if (auto op = value.getDefiningOp()) {
+        if (isa<affine::AffineApplyOp, affine::AffineMinOp, affine::AffineMaxOp>(op)) {
+            AffineMap map;
+            if (auto apply = dyn_cast<affine::AffineApplyOp>(op))
+                map = apply.getAffineMap();
+            else if (auto min = dyn_cast<affine::AffineMinOp>(op))
+                map = min.getAffineMap();
+            else
+                map = cast<affine::AffineMaxOp>(op).getAffineMap();
+            SmallVector<PoolIndexBounds> operands;
+            for (Value operand : op->getOperands()) {
+                auto bounds = evaluateIndexBounds(operand);
+                if (!bounds)
+                    return std::nullopt;
+                operands.push_back(*bounds);
+            }
+            for (AffineExpr expr : map.getResults()) {
+                auto bounds = evaluateAffineBounds(expr, map.getNumDims(), operands);
+                if (!bounds)
+                    return std::nullopt;
+                if (!result)
+                    result = bounds;
+                else
+                    result = combineMinMaxPoolIndexBounds(
+                        *result, *bounds, isa<affine::AffineMinOp>(op)
+                    );
+            }
+        }
+        else if (isa<arith::AddIOp, arith::SubIOp, arith::MinSIOp, arith::MaxSIOp>(op)) {
+            auto lhs = evaluateIndexBounds(op->getOperand(0));
+            auto rhs = evaluateIndexBounds(op->getOperand(1));
+            if (!lhs || !rhs)
+                return std::nullopt;
+            if (isa<arith::AddIOp, arith::SubIOp>(op))
+                result = combinePoolIndexBounds(*lhs, *rhs, isa<arith::SubIOp>(op));
+            else
+                result = combineMinMaxPoolIndexBounds(*lhs, *rhs, isa<arith::MinSIOp>(op));
+        }
+    }
+    if (result)
+        boundsCache.try_emplace(value, *result);
+    return result;
+}
 
 std::optional<APInt> PoolScaleEvaluator::evaluate(Value value) {
     if (auto it = cache.find(value); it != cache.end())
@@ -458,7 +595,21 @@ std::optional<APInt> PoolScaleEvaluator::evaluateUnary(Operation *op, unsigned b
 std::optional<APInt> PoolScaleEvaluator::evaluateBinary(Operation *op) {
     auto lhs = evaluate(op->getOperand(0));
     auto rhs = evaluate(op->getOperand(1));
-    if (!lhs || !rhs || lhs->getBitWidth() != rhs->getBitWidth())
+    if (!lhs || !rhs) {
+        // Prove the clamp constant over every enclosing-loop iteration, not
+        // merely at a sampled IV. This removes interior-tile row dependence.
+        if (isa<arith::MinSIOp, arith::MaxSIOp>(op)) {
+            auto a = evaluateIndexBounds(op->getOperand(0));
+            auto b = evaluateIndexBounds(op->getOperand(1));
+            if (a && b) {
+                auto bounds = combineMinMaxPoolIndexBounds(*a, *b, isa<arith::MinSIOp>(op));
+                if (bounds.first == bounds.second)
+                    return APInt(64, bounds.first);
+            }
+        }
+        return std::nullopt;
+    }
+    if (lhs->getBitWidth() != rhs->getBitWidth())
         return std::nullopt;
     if (isa<arith::AddIOp>(op))
         return *lhs + *rhs;

@@ -119,3 +119,50 @@ def test_sliding_pool_accepts_zero_shift(torq_compiler, pass_name):
     assert output.count('"torq_hl.avg_pool2d"') == 1, output
     assert "shift_factor = 0 : i32" in output
     assert "linalg.pooling_nhwc_sum" not in output and "tosa.apply_scale" not in output
+
+
+@pytest.mark.ci
+@pytest.mark.parametrize(
+    "row_start,row_end,step,expect_fused",
+    # Step 4 reaches rows 48 and 52. The old bound includes row 55,
+    # where the padding changes the scale.
+    [(17, 19, 1, True), (0, 2, 1, False), (48, 56, 4, True)],
+)
+def test_sliding_pool_scale_across_scf_loop(
+    torq_compiler, row_start, row_end, step, expect_fused
+):
+    source = (
+        Path(__file__).parent
+        / "testdata"
+        / "sliding_avgpool"
+        / "sliding-avgpool-loop-invariant.mlir"
+    ).read_text()
+    source = source.replace(
+        "%c17 = arith.constant 17 : index", f"%c17 = arith.constant {row_start} : index"
+    )
+    source = source.replace(
+        "%c19 = arith.constant 19 : index", f"%c19 = arith.constant {row_end} : index"
+    )
+    source = source.replace(
+        "%step = arith.constant 1 : index", f"%step = arith.constant {step} : index"
+    )
+    output = convert(
+        torq_compiler,
+        source,
+        "torq-linalg-to-torqhl-pre-conversion,torq-linalg-to-torqhl-conversion",
+    )
+    if expect_fused:
+        assert output.count('"torq_hl.avg_pool2d"') == 1, output
+        assert "linalg.pooling_nhwc_sum" not in output and "tosa.apply_scale" not in output
+        # Both output rows use a full 3x3 window on every loop iteration.
+        # Check the bias, multiplier, and shift for division by nine.
+        packed = re.search(r"dense<\[([^\]]+)\]> : tensor<2xi32>", output)
+        assert packed, output
+        assert [int(value) for value in packed.group(1).split(",")] == [
+            0, (1073741825 << 4) // 9,
+        ], output
+        assert "shift_factor = 34 : i32" in output, output
+        assert "scale_regions" not in output, output
+    else:
+        assert '"torq_hl.avg_pool2d"' not in output
+        assert "linalg.pooling_nhwc_sum" in output and "tosa.apply_scale" in output
