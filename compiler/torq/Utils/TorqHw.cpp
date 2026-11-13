@@ -11,8 +11,8 @@ using namespace std;
 
 namespace mlir::syna::torq {
 
-// The DMA factor 0.65 was measured on SL2610, with 6.4 GB/s of DDR bandwidth. SR200 has
-// approximately 3.2 GB/s, so its factor is adjusted to 0.33 for now.
+// The DMA factor 0.65 was measured on SL2610, with 6.4 GB/s of DDR bandwidth. The SR200 factor
+// 0.5 (3.2 GB/s effective at 800 MHz) matches its board inference times on MobileNetV2 and YOLOv8n.
 llvm::SmallVector<TorqHw, 2> hwTypes = {
     TorqHw(
         "SL2610", 0x0, "Synaptics SL2610 SoC family", 512 * 1024, 2, "coral_v1", "nss_v1", 8, 0.65,
@@ -20,7 +20,7 @@ llvm::SmallVector<TorqHw, 2> hwTypes = {
         "+neon,+crypto,+crc,+dotprod,+rdm,+rcpc,+lse,+fullfp16"
     ),
     TorqHw(
-        "SR200", 0x1, "Synaptics SR200 SoC family", 256 * 1024, 1, "coral_v2", "nss_v2", 8, 0.33,
+        "SR200", 0x1, "Synaptics SR200 SoC family", 256 * 1024, 1, "coral_v2", "nss_v2", 8, 0.5,
         "thumbv8.1m.main-none-eabihf", "cortex-m85", "+mve,+mve.fp,+fp-armv8d16,+fullfp16,+dsp"
     ),
 };

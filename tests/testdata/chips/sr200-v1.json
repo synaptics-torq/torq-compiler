@@ -1,3 +1,4 @@
 {
-    "target": "SR200"
+    "target": "SR200",
+    "npu_frequency_mhz": 800
 }
