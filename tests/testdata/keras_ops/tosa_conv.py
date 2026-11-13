@@ -91,4 +91,13 @@ CASES = {
     "dw_6x6_stride2_valid_12x12x8": _depthwise((12, 12, 8), 6, 2),
     "dw_21x21_odd_frame_stride2": _depthwise((21, 21, 576), 3, 2, bias=False),
     "dw_4x4_stride2": _depthwise((27, 27, 128), 4, 2, "same"),
+    # Stride 2 with a kernel of 1 on one axis or on both, which the compiler thins
+    # (synaptics-torq/torq-compiler-dev#2890)
+    "conv2d_3x1_stride2_same_11x11x4": _conv((11, 11, 4), 8, (3, 1), 2, "same"),
+    "conv2d_3x1_stride2_valid_11x11x4": _conv((11, 11, 4), 8, (3, 1), 2),
+    "conv2d_1x3_stride2_same_11x11x4": _conv((11, 11, 4), 8, (1, 3), 2, "same"),
+    "conv2d_1x3_stride2_valid_11x11x4": _conv((11, 11, 4), 8, (1, 3), 2),
+    "dw_3x1_stride2_same_11x11x8": _depthwise((11, 11, 8), (3, 1), 2, "same"),
+    "dw_3x1_stride2_valid_11x11x8": _depthwise((11, 11, 8), (3, 1), 2),
+    "dw_1x1_stride2_valid_18x14x8": _depthwise((18, 14, 8), 1, 2),
 }

@@ -58,6 +58,7 @@ iree_cc_library(
     FuseReluClampWithTruncfPattern.cpp
     CommonStandardizationPatterns.cpp
     DecomposeConvToSpaceToDepthPass.cpp
+    ThinUnitKernelStride2ConvPattern.cpp
     SplitSmallChannelTransposePass.cpp
     DecomposeConvsForHardwarePass.cpp
     OptimizePowOpPattern.cpp

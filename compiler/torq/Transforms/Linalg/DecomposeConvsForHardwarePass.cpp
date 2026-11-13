@@ -394,6 +394,8 @@ static bool useNativeDilatedConv(const ConvInfo &info, int64_t maxKernelDim) {
     return outBytes * info.inC < kNativeDilatedSmallOutBytesTimesInC;
 }
 
+} // namespace
+
 /// True when the conv image carries backward padding (border zeros in
 /// memory): a tensor.pad, or a fill written by tensor.insert_slice, fed
 /// through any number of extract_slice ops.  Such convs are the EK path's
@@ -401,7 +403,7 @@ static bool useNativeDilatedConv(const ConvInfo &info, int64_t maxKernelDim) {
 /// sub-convs these rewrites emit would end inside the padded region, which
 /// foldBackwardPadding cannot fold.  Mirrors convImageIsPrePadded in
 /// Conversions/LinalgToTorqHL/Conv2DPattern.cpp.
-static bool imageHasBackwardPadding(Value image) {
+bool imageHasBackwardPadding(Value image) {
     Value v = image;
     while (auto extract = v.getDefiningOp<tensor::ExtractSliceOp>())
         v = extract.getSource();
@@ -411,6 +413,8 @@ static bool imageHasBackwardPadding(Value image) {
         return insert.getDest().getDefiningOp<linalg::FillOp>() != nullptr;
     return false;
 }
+
+namespace {
 
 //===----------------------------------------------------------------------===//
 // 1. Dilated conv decomposition (dilate_conv in scripts/mlir.py)

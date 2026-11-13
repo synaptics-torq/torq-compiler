@@ -348,8 +348,13 @@ struct DecomposeConvWithSpaceToDepthPattern : public OpRewritePattern<linalg::Co
         // only s1 and s2 are supported by hardware
         int64_t maxStride = 2;
 
-        if (kH <= HwInfo::nss_max_kernel_height && kW <= HwInfo::nss_max_kernel_width &&
-            sH <= maxStride && sW <= maxStride && sH == sW)
+        // A conv within the HW kernel and stride limits has no residue split:
+        // rewriteNoPadStride takes only a stride above 2 or a kernel above the
+        // stride-2 cap. Thus the cost gate below does not apply to it.
+        const bool withinHwLimits = kH <= HwInfo::nss_max_kernel_height &&
+                                    kW <= HwInfo::nss_max_kernel_width && sH <= maxStride &&
+                                    sW <= maxStride;
+        if (withinHwLimits && sH == sW)
             return rewriter.notifyMatchFailure(
                 convOp, "no S2D decomposition needed (kernel and stride already within HW limit)"
             );
@@ -406,13 +411,19 @@ struct DecomposeConvWithSpaceToDepthPattern : public OpRewritePattern<linalg::Co
         // split: stride/2 when the thinned kernel fits the stride-2 cap,
         // else the full stride (axes with stride 1 never split).  The fold's
         // input padding (up to a multiple of the block) and padded output
-        // are charged at their actual sizes.
-        {
+        // are charged at their actual sizes.  A conv within the HW limits
+        // (stride (2, 1) or (1, 2)) has no split, so it always folds: without
+        // the fold, these strides give wrong results or stop on an assert in
+        // convAdjustPadding.
+        if (!withinHwLimits) {
             int64_t residueCount = 1;
             // Whether every split axis keeps the full stride (sub-convs are
             // all stride-1) or thins to stride 2 (the thinned kernel fits the
             // stride-2 cap).
             bool stride1SubConvs = true;
+            // Whether every sub-kernel of the split is 1. The split takes a
+            // conv whose image has a border in memory only in this case.
+            bool unitSubKernels = true;
             for (int d = 0; d < 2; ++d) {
                 int64_t s = d == 0 ? sH : sW;
                 int64_t k = d == 0 ? kH : kW;
@@ -421,6 +432,8 @@ struct DecomposeConvWithSpaceToDepthPattern : public OpRewritePattern<linalg::Co
                 residueCount *= thinned ? s / 2 : s;
                 if (s > 1 && thinned)
                     stride1SubConvs = false;
+                if (k > (thinned ? s / 2 : s))
+                    unitSubKernels = false;
             }
             double paddedWeightRatio = 1.0;
             if (bH > 1)
@@ -439,7 +452,9 @@ struct DecomposeConvWithSpaceToDepthPattern : public OpRewritePattern<linalg::Co
             int64_t outElems = 1;
             for (int64_t d : outputType.getShape())
                 outElems *= d;
-            if (residueSplitCheaperThanS2dFold(
+            const bool splitTakesConv = unitSubKernels || !imageHasBackwardPadding(input);
+            if (splitTakesConv &&
+                residueSplitCheaperThanS2dFold(
                     inB * e, wtB * e, outB * e, residueCount, paddedWeightRatio,
                     outputType.getElementType(),
                     stride1SubConvs && ((kW == 1 && sW == 1) || (kH == 1 && sH == 1)), outElems
@@ -628,6 +643,12 @@ struct DecomposeConvToSpaceToDepthPass
         populateConv1dPromotionPatterns(
             ctx, patterns, /*minStride=*/3, /*maxStride=*/std::numeric_limits<int64_t>::max()
         );
+
+        // Thin the kernel-1 axes of the stride (2, 2) convs that the stride-2 kernels do not run
+        // correctly. This gives a conv2d with stride (2, 1) or (1, 2), which the S2D pattern
+        // below folds as it does for any other conv2d with these strides. The thinning patterns
+        // have a higher benefit, so they run before the S2D pattern on the same conv.
+        populateThinUnitKernelStride2ConvPatterns(ctx, patterns);
 
         patterns.add<DecomposeConvWithSpaceToDepthPattern>(ctx);
 

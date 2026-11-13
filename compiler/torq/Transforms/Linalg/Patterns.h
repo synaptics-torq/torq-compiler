@@ -27,11 +27,20 @@ void populateOptimizeConv1DPatterns(MLIRContext *ctx, RewritePatternSet &pattern
 // lowers it.
 bool isConv1dMatmulCandidate(linalg::Conv1DNcwFcwOp op);
 
+// True when the conv image has a border in memory: a tensor.pad, or an insert_slice into a fill,
+// under zero or more extract_slice ops. DecomposeConvsForHardwarePass splits such a conv only when
+// all its sub-kernels are 1.
+bool imageHasBackwardPadding(Value image);
+
 // Registers the conv1d->conv2d promotion patterns for strides in
 // [minStride, maxStride]; see the pattern for what the range means.
 void populateConv1dPromotionPatterns(
     MLIRContext *ctx, RewritePatternSet &patterns, int64_t minStride, int64_t maxStride
 );
+
+// Registers the patterns that thin the kernel-1 axes of stride (2, 2) conv2d and depthwise
+// convs; see the patterns for the convs they take.
+void populateThinUnitKernelStride2ConvPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 
 void populateOptimizeElementwiseBinaryOpPatterns(MLIRContext *context, RewritePatternSet &patterns);
 

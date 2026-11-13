@@ -289,6 +289,59 @@ CASES = {
         auto_pad="NOTSET", dilations=[1, 1], group=8, kernel_shape=[5, 5], pads=[0, 0, 1, 1],
         strides=[2, 2],
     ),
+    # Stride (2, 2) with a kernel of 1 on one axis or on both, which the compiler thins
+    # (synaptics-torq/torq-compiler-dev#2890). The 1x3 depthwise conv is not thinned.
+    "conv2d_bf16_8x8x1x3_stride2x2_pads0101_8x1x64": partial(
+        _make_conv, [1, 8, 1, 64], [8, 8, 1, 3], [1, 8, 1, 32], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=1, kernel_shape=[1, 3], pads=[0, 1, 0, 1],
+        strides=[2, 2],
+    ),
+    "conv2d_bf16_8x8x1x3_stride2x2_pads0101_8x32x32": partial(
+        _make_conv, [1, 8, 32, 32], [8, 8, 1, 3], [1, 8, 16, 16], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=1, kernel_shape=[1, 3], pads=[0, 1, 0, 1],
+        strides=[2, 2],
+    ),
+    "conv2d_bf16_8x8x1x3_stride2x2_pad0_8x31x31": partial(
+        _make_conv, [1, 8, 31, 31], [8, 8, 1, 3], [1, 8, 16, 15], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=1, kernel_shape=[1, 3], pads=[0, 0, 0, 0],
+        strides=[2, 2],
+    ),
+    "conv2d_bf16_8x8x3x1_stride2x2_pads1010_8x32x32": partial(
+        _make_conv, [1, 8, 32, 32], [8, 8, 3, 1], [1, 8, 16, 16], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=1, kernel_shape=[3, 1], pads=[1, 0, 1, 0],
+        strides=[2, 2],
+    ),
+    "conv2d_bf16_8x8x3x1_stride2x2_pads1111_8x32x32": partial(
+        _make_conv, [1, 8, 32, 32], [8, 8, 3, 1], [1, 8, 16, 17], weight_range=(-0.5, 0.5),
+        bias_range=(-0.5, 0.5), auto_pad="NOTSET", dilations=[1, 1], group=1, kernel_shape=[3, 1],
+        pads=[1, 1, 1, 1], strides=[2, 2],
+    ),
+    "depthwise_conv2d_bf16_8x3x1_stride2x2_pad0_8x32x32": partial(
+        _make_conv, [1, 8, 32, 32], [8, 1, 3, 1], [1, 8, 15, 16], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=8, kernel_shape=[3, 1], pads=[0, 0, 0, 0],
+        strides=[2, 2],
+    ),
+    # The input does not fit in LRAM, so the conv is tiled by rows.
+    "depthwise_conv2d_bf16_8x3x1_stride2x2_pad0_8x512x1024": partial(
+        _make_conv, [1, 8, 512, 1024], [8, 1, 3, 1], [1, 8, 255, 512], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=8, kernel_shape=[3, 1], pads=[0, 0, 0, 0],
+        strides=[2, 2],
+    ),
+    "depthwise_conv2d_bf16_8x3x1_stride2x2_pads1010_8x31x31": partial(
+        _make_conv, [1, 8, 31, 31], [8, 1, 3, 1], [1, 8, 16, 16], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=8, kernel_shape=[3, 1], pads=[1, 0, 1, 0],
+        strides=[2, 2],
+    ),
+    "depthwise_conv2d_bf16_8x1x3_stride2x2_pads0101_8x32x32": partial(
+        _make_conv, [1, 8, 32, 32], [8, 1, 1, 3], [1, 8, 16, 16], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=8, kernel_shape=[1, 3], pads=[0, 1, 0, 1],
+        strides=[2, 2],
+    ),
+    "depthwise_conv2d_bf16_8x1x1_stride2x2_pad0_8x18x14": partial(
+        _make_conv, [1, 8, 18, 14], [8, 1, 1, 1], [1, 8, 9, 7], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=8, kernel_shape=[1, 1], pads=[0, 0, 0, 0],
+        strides=[2, 2],
+    ),
     "encoder_bf16_layer_Conv_2-sim-sl2610-v1": partial(
         _make_conv, [1, 1, 80000], [288, 1, 127], [1, 288, 1249], weight_range=(-1.6875, 1.71875),
         auto_pad="NOTSET", dilations=[1], group=1, kernel_shape=[127], pads=[0, 0], strides=[64],

@@ -332,15 +332,22 @@ def DecomposeConvToSpaceToDepth :
 
         Preconditions: dilation==1, kH%bH==0, kW%bW==0, sH%bH==0, sW%bW==0,
         H%bH==0, W%bW==0.
+
+        Before that, the pass thins the kernel-1 axes of the stride (2, 2)
+        conv2d and depthwise convs that the stride-2 kernels do not run
+        correctly: the conv reads every second element of these axes with a
+        stride of 1 (ThinUnitKernelStride2ConvPattern.cpp).
     }];
 
     let constructor =
         "mlir::syna::torq::createDecomposeConvToSpaceToDepthPass()";
 
+    // The S2D fold marks its constants with a torq_hl executor attribute.
     let dependentDialects = [
         "linalg::LinalgDialect",
         "tensor::TensorDialect",
-        "arith::ArithDialect"
+        "arith::ArithDialect",
+        "mlir::syna::torq_hl::TorqHLDialect"
     ];
 }
 
