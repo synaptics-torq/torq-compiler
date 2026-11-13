@@ -248,6 +248,10 @@ struct LramBuffer {
     // every op that has the buffer as an operand, and every [start_program, wait_program+1)
     // of an async program that accesses it
     ResidentRanges resident;
+    // Swaps precede an op: its operands are not pinned yet, but an earlier async
+    // start still holds its buffers through (and before) its wait. Keep these
+    // ranges separate: adjacent operand uses in `resident` can merge with a start.
+    ResidentRanges inFlight;
     // ascending by op; an access through a view is an access of the buffer
     struct Access {
         OpIdx opIdx;
@@ -333,6 +337,7 @@ static SmallVector<LramBuffer> collectLramBuffers(FunctionOpInterface funcOp) {
                 .birth = (OpIdx)opIdx,
                 .death = opCount,
                 .resident = {},
+                .inFlight = {},
                 .accesses = {},
             };
             allocToBuffer.insert({buffer.value, std::move(buffer)});
@@ -399,6 +404,7 @@ static SmallVector<LramBuffer> collectLramBuffers(FunctionOpInterface funcOp) {
                     auto ivIt = allocToBuffer.find(getViewBase(buffer));
                     if (ivIt != allocToBuffer.end()) {
                         ivIt->second.resident.add(it->second.first, (OpIdx)opIdx + 1);
+                        ivIt->second.inFlight.add(it->second.first + 1, (OpIdx)opIdx + 1);
                     }
                 }
                 openPrograms.erase(it);
@@ -564,15 +570,17 @@ class PlacementSimulation {
     SmallVector<std::optional<OpIdx>> copyHoldsFrom_;
     // filled buffers deferred at their birth, waiting for free space before their first use
     SmallVector<BufferIdx> deferredFills_;
+    // Last-resort recovery, enabled only after the ordinary replans have failed.
+    bool recoverFragmentation_;
 
     // With `spillFilledAfterUse`, a filled buffer is resident only while in use: it is
     // spilled at the end of each use after its fill and reloaded at the next.
     PlacementSimulation(
         ArrayRef<LramBuffer> buffers, int64_t usable, ArrayRef<Operation *> ops,
-        bool spillFilledAfterUse
+        bool spillFilledAfterUse, bool recoverFragmentation
     )
-        : buffers_(buffers), ops_(ops), occupancy_(buffers, usable),
-          copyHoldsFrom_(buffers.size()) {
+        : buffers_(buffers), ops_(ops), occupancy_(buffers, usable), copyHoldsFrom_(buffers.size()),
+          recoverFragmentation_(recoverFragmentation) {
         for (auto [i, buffer] : llvm::enumerate(buffers_)) {
             events_.push({buffer.birth, EventKind::Birth, (BufferIdx)i});
             events_.push({buffer.death, EventKind::Death, (BufferIdx)i});
@@ -609,6 +617,9 @@ class PlacementSimulation {
     // Place `placeFirst` (-1 for none), then move every buffer not pinned at `opIdx`; one
     // that no longer fits is spilled. False when nothing was movable.
     bool compact(OpIdx opIdx, OpIdx pinnedFirstAt, BufferIdx placeFirst);
+    // Repack the exact failed resident set plus `idx` before the op pins its operands.
+    // Decline if any resident is still held by an earlier asynchronous program.
+    bool repackBeforeOperation(BufferIdx idx, OpIdx opIdx);
     // Record that `idx` cannot be placed at `opIdx`: every resident buffer is pinned there.
     void recordFailure(BufferIdx idx, OpIdx opIdx, PlacementFailure::Cause cause);
     // Whether nothing has read `idx` since its latest fill ran, as of `opIdx`.
@@ -631,8 +642,11 @@ class PlacementSimulation {
     // placement exists.
     static std::optional<Placement>
     run(ArrayRef<LramBuffer> buffers, int64_t usable, ArrayRef<ForcedCompaction> forcedCompactions,
-        PlacementFailure &failure, ArrayRef<Operation *> ops, bool spillFilledAfterUse) {
-        PlacementSimulation simulation(buffers, usable, ops, spillFilledAfterUse);
+        PlacementFailure &failure, ArrayRef<Operation *> ops, bool spillFilledAfterUse,
+        bool recoverFragmentation = false) {
+        PlacementSimulation simulation(
+            buffers, usable, ops, spillFilledAfterUse, recoverFragmentation
+        );
         if (!simulation.sweep(forcedCompactions)) {
             failure = simulation.failure_;
             return std::nullopt;
@@ -718,6 +732,51 @@ bool PlacementSimulation::compact(OpIdx opIdx, OpIdx pinnedFirstAt, BufferIdx pl
             scheduleReload(moved, opIdx);
         }
     }
+    return true;
+}
+
+bool PlacementSimulation::repackBeforeOperation(BufferIdx idx, OpIdx opIdx) {
+    if (occupancy_.bytes() + buffers_[idx].alignedSize() > occupancy_.usable()) {
+        return false;
+    }
+    SmallVector<BufferIdx> repack{idx};
+    for (BufferIdx resident : occupancy_.residents()) {
+        // In particular, do not move a buffer just before wait_program: the wait
+        // has not executed yet. No async operation is reordered by this recovery.
+        if (buffers_[resident].inFlight.contains(opIdx)) {
+            return false;
+        }
+        repack.push_back(resident);
+    }
+    llvm::sort(repack, [&](BufferIdx a, BufferIdx b) {
+        if (buffers_[a].alignedSize() != buffers_[b].alignedSize()) {
+            return buffers_[a].alignedSize() > buffers_[b].alignedSize();
+        }
+        return a < b;
+    });
+    // All checks precede mutation. With no fixed obstacles, the two-ended allocator
+    // packs aligned buffers without holes, so the byte bound above guarantees fit.
+    // Store every live value before reusing ANY of the old addresses. Existing swap
+    // handling also preserves fill sources, re-creates aliases and rewrites deallocs.
+    for (BufferIdx moved : repack) {
+        if (moved != idx) {
+            swapOut(moved, opIdx);
+        }
+    }
+    for (BufferIdx moved : repack) {
+        bool placed = occupancy_.place(moved);
+        assert(placed && "an obstacle-free repack must fit");
+        (void)placed;
+        if (moved != idx) {
+            scheduleSwapIn(moved, opIdx);
+        }
+    }
+    // The caller handles `idx`'s birth or reload; do not materialize an unborn
+    // allocation or schedule its swap-in twice.
+    LLVM_DEBUG(
+        llvm::dbgs() << "LRAM fragmentation recovered by pre-operation repack at op " << opIdx
+                     << " (" << repack.size() << " buffers)\n"
+    );
     return true;
 }
 
@@ -833,7 +892,7 @@ bool PlacementSimulation::place(BufferIdx idx, OpIdx opIdx) {
     }
     while (!placed) {
         if (!spillVictim(idx, opIdx, PlacementFailure::Cause::Fragmentation)) {
-            return false;
+            return recoverFragmentation_ && repackBeforeOperation(idx, opIdx);
         }
         placed = occupancy_.place(idx);
     }
@@ -1079,6 +1138,21 @@ static std::optional<Placement> planPlacement(
         }
         if (!forceCompaction(buffers, failure, forcedCompactions)) {
             break;
+        }
+    }
+    if (replan && failure.cause == PlacementFailure::Cause::Fragmentation) {
+        // Earlier-point compactions can miss a layout because they keep their
+        // own op's operands fixed too. Retry with a snapshot-local repack at an idle
+        // boundary, before those operands become pinned. The usual simulation and
+        // swap schedule still validate every subsequent use and async lifetime.
+        // If it fails too, report the last ordinary replan's failure, not this run's.
+        PlacementFailure recoveryFailure;
+        auto placement = PlacementSimulation::run(
+            buffers, usable, forcedCompactions, recoveryFailure, ops, spillFilledAfterUse,
+            /*recoverFragmentation=*/true
+        );
+        if (placement) {
+            return placement;
         }
     }
     if (lastFailure) {
