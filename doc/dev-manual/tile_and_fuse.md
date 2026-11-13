@@ -84,6 +84,12 @@ The reduction tiling pass may move a marked principal reduction into a new `scf.
 
 In the matmul example, the walk visits the matmul first, and if its full tile does not fit, queues it; the fill is filtered out as a non-output group member and instead fused into the matmul's tile.
 
+### Rechecking residual fuse-group members
+
+Skipping a non-output group member is correct while it can be fused into its group's output, but tiling may leave the original producer live for a consumer outside that group. `runOnOperation` therefore remembers eligible original top-level members and rechecks them after processing the queued groups. It removes trivially dead top-level operation chains first, in reverse order, before probing those residual members. Without this cleanup, a dead reshape can keep its producer apparently live and cause an unnecessary full-size probe (for example, an unused i4-to-bf16 dequantization in a hybrid decoder).
+
+Only surviving candidates that are now independently eligible are checked. Live outside-group users are preserved, and nested operations created inside tile loops are not added to this recheck. The check itself is the named `TileAndFusePass::needsTiling` method; it runs the existing compiled memory-fit probe and the pointwise spatial-tiling check.
+
 For a queued consumer that needs tiling, the main path is:
 
 ```mermaid
@@ -198,5 +204,5 @@ Current limits are static shapes, one reduction dimension per supported generic,
 | Where are the passes ordered? | compiler/torq/Codegen/TORQLowerExecutableTargetPass.cpp: `addSlicePassesWithTileAndFuse` |
 | Which reductions qualify, and how are their tiles chosen? | compiler/torq/Codegen/ReductionTilingPass.cpp: `getSupportedReductionDimAndSize`, `chooseTileSizes`, `tileReduction` |
 | How are group members recognized? | compiler/torq/Conversions/LinalgToTorqHL/PatternUtils.cpp: `markFuseGroupBackward`, `isFuseGroupOutput`, `getFuseGroupPrincipalOpBackward` |
-| How does the main pass queue, probe, and tile? | compiler/torq/Codegen/TileAndFusePass.cpp: `runOnOperation`, `fitTileToMemory`, `tileAndFuse` |
+| How does the main pass queue, probe, and tile? | compiler/torq/Codegen/TileAndFusePass.cpp: `runOnOperation`, `needsTiling`, `fitTileToMemory`, `tileAndFuse` |
 | Where are the shared budget and reduction tile helpers? | compiler/torq/Codegen/TileAndFuseUtils.cpp: `estimateTiledOperandBytes`, `getLramTilingBudget`, `largestReductionTileAtMost` |

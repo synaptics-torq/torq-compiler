@@ -74,6 +74,34 @@ def test_whole_input_producers_stay_out_of_tile_loop(torq_compiler, tmp_path):
     assert "tensor.pad" not in in_loop, f"the input pad is recomputed in the tile loop:\n{dump}"
 
 
+@pytest.mark.ci
+def test_shared_transpose_with_padding_side_user_is_tiled(torq_compiler, tmp_path):
+    """A padding side user must not keep an untiled 394 KB transpose alive."""
+    mlir = (
+        CIN3_CONV.replace("224x224x3xi8", "223x223x3xi8")
+        .replace("224x224x32", "111x111x32")
+        .replace("pad([1, 1, 1, 1])", "pad([0, 0, 0, 0])")
+        .replace("stride([1, 1])", "stride([2, 2])")
+        .replace(
+            "-> tensor<1x111x111x32xi8> {",
+            "-> (tensor<1x55x55x32xi8>, tensor<1x56x56x32xi8>) {",
+        )
+        .replace(
+            "return %r : tensor<1x111x111x32xi8>",
+            """%valid = tosa.max_pool2d %r kernel([3, 3]) stride([2, 2]) pad([0, 0, 0, 0]) : (tensor<1x111x111x32xi8>) -> tensor<1x55x55x32xi8>
+  %padded = tosa.max_pool2d %r kernel([2, 2]) stride([2, 2]) pad([0, 1, 0, 1]) : (tensor<1x111x111x32xi8>) -> tensor<1x56x56x32xi8>
+  return %valid, %padded : tensor<1x55x55x32xi8>, tensor<1x56x56x32xi8>""",
+        )
+    )
+    # This helper also requires full compilation, including LRAM assignment.
+    dump = dispatch_dump_after(torq_compiler, tmp_path, mlir, "torq-tile-and-fuse", timeout=180)
+    assert "linalg.conv_2d_nchw_fchw" in dump, f"shared producer dispatch missing:\n{dump}"
+    assert "scf.for" in dump, f"nothing was tiled:\n{dump}"
+    assert not re.search(r"linalg\.transpose ins\([^)]*tensor<1x32x111x111xi8>", dump), (
+        f"the full-size transpose survived for the padding branch:\n{dump}"
+    )
+
+
 # Two batch matmuls of the same shape. CSE gives them one zero init.
 SHARED_INIT_MATMULS = """
 module {

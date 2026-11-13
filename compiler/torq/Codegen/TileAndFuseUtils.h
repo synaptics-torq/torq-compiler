@@ -138,4 +138,10 @@ int64_t largestReductionTileAtMost(int64_t reductionSize, int64_t requestedTileS
 linalg::GenericOp
 rewriteKeepdimsFuseGroupReduction(mlir::IRRewriter &rewriter, linalg::GenericOp op);
 
+// Variant that also returns all operations created by the rewrite.
+linalg::GenericOp rewriteKeepdimsFuseGroupReduction(
+    mlir::IRRewriter &rewriter, linalg::GenericOp op,
+    llvm::SmallVectorImpl<mlir::Operation *> &replacementOps
+);
+
 } // namespace mlir::syna::torq

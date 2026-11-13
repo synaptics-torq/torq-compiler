@@ -46,6 +46,7 @@
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Visitors.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Interfaces/TilingInterface.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Rewrite/FrozenRewritePatternSet.h"
@@ -1091,6 +1092,8 @@ class TileAndFusePass : public impl::TileAndFuseBase<TileAndFusePass> {
     llvm::LogicalResult runAssignAddressesPipeline(ModuleOp moduleOp, bool optimizeForTileAndFuse);
 
     llvm::FailureOr<bool> checkModuleFitsInMemory(ModuleOp moduleOp, bool optimizeForTileAndFuse);
+
+    bool needsTiling(TilingInterface tiOp);
 
     llvm::FailureOr<bool> checkTileFitsInMemory(
         ModuleOp moduleOp, const TilingInfo &tilingInfo, ArrayRef<OpFoldResult> offsets,
@@ -3504,7 +3507,9 @@ static linalg::GenericOp createReducedReduction(
 // rewrite the op into a non-keepdims reduction (a projected permutation) plus a tensor.expand_shape
 // back to the keepdims shape. Scoped to fuse-group members: a standalone keepdims reduction is
 // never tiled, so leave its accumulation order untouched.
-linalg::GenericOp rewriteKeepdimsFuseGroupReduction(IRRewriter &rewriter, linalg::GenericOp op) {
+linalg::GenericOp rewriteKeepdimsFuseGroupReduction(
+    IRRewriter &rewriter, linalg::GenericOp op, SmallVectorImpl<Operation *> &replacementOps
+) {
     if (!isMarkedFuseGroup(op))
         return nullptr;
     Operation *combine = matchSingleCombineReduction(op);
@@ -3545,6 +3550,7 @@ linalg::GenericOp rewriteKeepdimsFuseGroupReduction(IRRewriter &rewriter, linalg
     // max.
     Value init =
         tensor::CollapseShapeOp::create(rewriter, loc, reducedType, op.getOutputs()[0], reassoc);
+    newOps.push_back(init.getDefiningOp());
     if (accTy != elemTy) {
         auto initW = createTileableCast(rewriter, loc, init, accType);
         newOps.push_back(initW);
@@ -3574,14 +3580,21 @@ linalg::GenericOp rewriteKeepdimsFuseGroupReduction(IRRewriter &rewriter, linalg
         reduceOp->setAttr(TORQ_FUSE_GROUP_ID, fgId);
 
     rewriter.replaceOp(op, expanded.getResult());
+    replacementOps.append(newOps.begin(), newOps.end());
     return reduceOp;
+}
+
+linalg::GenericOp rewriteKeepdimsFuseGroupReduction(IRRewriter &rewriter, linalg::GenericOp op) {
+    SmallVector<Operation *> replacementOps;
+    return rewriteKeepdimsFuseGroupReduction(rewriter, op, replacementOps);
 }
 
 // Only groups that don't fit (their output op landed in orderTi) are about to be tiled, so only
 // those need their keepdims reductions rewritten; groups that fit keep their accumulation
 // order.
 static void rewriteKeepdimsReductionsOfTiledGroups(
-    ArrayRef<TilingInterface> orderTi, FunctionOpInterface funcOp
+    ArrayRef<TilingInterface> orderTi, FunctionOpInterface funcOp,
+    DenseSet<Operation *> &deferredGroupMembers
 ) {
     IRRewriter rewriter(funcOp.getContext());
     for (TilingInterface tiOp : orderTi) {
@@ -3594,12 +3607,40 @@ static void rewriteKeepdimsReductionsOfTiledGroups(
             if (genericOp.getOperation() != outputOp && checkShareFuseGroup(genericOp, outputOp))
                 members.push_back(genericOp);
         });
-        for (linalg::GenericOp genericOp : members)
-            (void)rewriteKeepdimsFuseGroupReduction(rewriter, genericOp);
+        for (linalg::GenericOp genericOp : members) {
+            Operation *originalOp = genericOp.getOperation();
+            bool wasDeferred = deferredGroupMembers.contains(originalOp);
+            SmallVector<Operation *> replacements;
+            linalg::GenericOp reducedOp =
+                rewriteKeepdimsFuseGroupReduction(rewriter, genericOp, replacements);
+            if (!reducedOp || !wasDeferred)
+                continue;
+
+            deferredGroupMembers.erase(originalOp);
+            // Only keep top-level replacement candidates. This rewrite runs before tiling, but
+            // the parent check also prevents future callers from saving ops created in tile loops.
+            for (Operation *replacement : replacements)
+                if (replacement->getParentOp() == funcOp.getOperation() &&
+                    isa<TilingInterface>(replacement))
+                    deferredGroupMembers.insert(replacement);
+        }
     }
 }
 
 namespace {
+
+bool TileAndFusePass::needsTiling(TilingInterface tiOp) {
+    OwningOpRef<ModuleOp> moduleOp = extractOpsForMemoryCheck("check_needs_tiling", tiOp);
+    llvm::FailureOr<bool> opFitsInMemory = checkModuleFitsInMemory(*moduleOp, true);
+    if (failed(opFitsInMemory)) {
+        tiOp->emitWarning(
+            "tile-and-fuse: initial memory overflow check failed, skipping this operation."
+        );
+        LLVM_DEBUG(assert(false));
+        return false;
+    }
+    return !*opFitsInMemory || pointwiseChainNeedsSpatialTile(tiOp);
+}
 
 void TileAndFusePass::runOnOperation() {
     LLVM_DEBUG(llvm::dbgs() << "Tile and Fuse - START\n");
@@ -3642,6 +3683,7 @@ void TileAndFusePass::runOnOperation() {
     // NB: Since tileAndFuse mutates the IR, we can't call it directly from the
     // walk. We first construct a queue, and than iterate over it.
     SmallVector<TilingInterface> orderTi;
+    DenseSet<Operation *> deferredGroupMembers;
     funcOp.walk<WalkOrder::PostOrder, ReverseIterator>([&](TilingInterface tiOp) {
         // The reduction pass has already selected these tiles. The fit probe extracts loop-free
         // IR, so probing them again would also lose values captured from outside the loop.
@@ -3657,8 +3699,14 @@ void TileAndFusePass::runOnOperation() {
 
         // For pattern-fuse-groups, we only tile from the bottom most op, to make
         // sure the whole group is tiled together.
-        if (isMarkedFuseGroup(tiOp) && !isFuseGroupOutput(tiOp))
+        if (isMarkedFuseGroup(tiOp) && !isFuseGroupOutput(tiOp)) {
+            // Group tiling may leave the original producer live for a side user.
+            // Remember only original top-level members, never newly created tiles.
+            if (tiOp->getParentOp() == funcOp.getOperation() &&
+                !isa<tensor::ConcatOp>(tiOp.getOperation()))
+                deferredGroupMembers.insert(tiOp.getOperation());
             return;
+        }
 
         // tensor.concat cannot be sliced by T&F (getIterationDomainTileFromResultTile
         // fails). Leave it full-size; KeepConcatInLram pins it only when it fits.
@@ -3666,20 +3714,8 @@ void TileAndFusePass::runOnOperation() {
             return;
 
         // Check if tiOp already fits in memory.
-        OwningOpRef<ModuleOp> moduleOp = extractOpsForMemoryCheck("check_needs_tiling", tiOp);
-        llvm::FailureOr<bool> opFitsInMemory = checkModuleFitsInMemory(*moduleOp, true);
-        if (failed(opFitsInMemory)) {
-            tiOp->emitWarning(
-                "tile-and-fuse: initial memory overflow check failed, skipping this operation."
-            );
-            LLVM_DEBUG(assert(false));
-            return;
-        }
-
-        if (*opFitsInMemory && !pointwiseChainNeedsSpatialTile(tiOp))
-            return;
-
-        orderTi.push_back(tiOp);
+        if (needsTiling(tiOp))
+            orderTi.push_back(tiOp);
     });
 
     LLVM_DEBUG({
@@ -3687,29 +3723,74 @@ void TileAndFusePass::runOnOperation() {
         for (TilingInterface tiOp : orderTi)
             llvm::dbgs() << "  " << tiOp.getOperation()->getName() << "\n";
     });
-    DenseSet<TilingInterface> toTileOps(orderTi.begin(), orderTi.end());
-
-    // Rewrite keepdims reductions for fuse groups that are about to be tiled.
-    rewriteKeepdimsReductionsOfTiledGroups(orderTi, funcOp);
-
     untiledTiledOps_.reserve(orderTi.size());
 
-    for (auto [count, tiOp] : llvm::enumerate(orderTi)) {
-        LLVM_DEBUG({
-            if (orderTi.size() > 50)
-                llvm::dbgs() << "Processing TI op: " << count << "/" << orderTi.size() << "\n";
-        });
+    // Each residual member is checked at most once, after group cleanup exposes
+    // it. Further rounds only handle original members exposed by that round.
+    while (!orderTi.empty()) {
+        DenseSet<TilingInterface> toTileOps(orderTi.begin(), orderTi.end());
+        rewriteKeepdimsReductionsOfTiledGroups(orderTi, funcOp, deferredGroupMembers);
+        // Top-level producers of the ops erased in this round: only their chains can have
+        // become dead here.
+        SetVector<Operation *> releasedProducers;
+        auto releaseProducers = [&](Operation *erased) {
+            erased->walk([&](Operation *nested) {
+                for (Value operand : nested->getOperands()) {
+                    Operation *producer = operand.getDefiningOp();
+                    if (producer && producer->getParentOp() == funcOp.getOperation())
+                        releasedProducers.insert(producer);
+                }
+            });
+        };
 
-        if (!tiOp->use_empty())
-            tileAndFuse(tiOp, toTileOps);
+        for (auto [count, tiOp] : llvm::enumerate(orderTi)) {
+            LLVM_DEBUG({
+                if (orderTi.size() > 50)
+                    llvm::dbgs() << "Processing TI op: " << count << "/" << orderTi.size() << "\n";
+            });
 
-        if (tiOp->use_empty()) {
-            if (auto fuseGroup = isFuseGroupOutput(tiOp)) {
-                removeFuseGroupMarkingBackwards(tiOp, *fuseGroup);
+            if (!tiOp->use_empty())
+                tileAndFuse(tiOp, toTileOps);
+
+            if (tiOp->use_empty()) {
+                if (auto fuseGroup = isFuseGroupOutput(tiOp)) {
+                    removeFuseGroupMarkingBackwards(tiOp, *fuseGroup);
+                }
+
+                releasedProducers.remove(tiOp.getOperation());
+                releaseProducers(tiOp);
+                tiOp->erase();
             }
-
-            tiOp->erase();
         }
+
+        orderTi.clear();
+        if (deferredGroupMembers.empty())
+            break;
+        // Erase the chains left dead by this round before probing residual producers. A dead
+        // reshape still counts as a use of its producer: probing that producer first would
+        // compile an otherwise unused full-size dequantization on CSS. Ops that were dead
+        // before the pass ran are left alone.
+        while (!releasedProducers.empty()) {
+            Operation *op = releasedProducers.pop_back_val();
+            if (!isOpTriviallyDead(op))
+                continue;
+            if (auto fuseGroup = isFuseGroupOutput(op))
+                removeFuseGroupMarkingBackwards(op, *fuseGroup);
+            deferredGroupMembers.erase(op);
+            releaseProducers(op);
+            op->erase();
+        }
+        funcOp.walk<WalkOrder::PostOrder, ReverseIterator>([&](TilingInterface tiOp) {
+            if (tiOp->getParentOp() != funcOp.getOperation() ||
+                !deferredGroupMembers.contains(tiOp.getOperation()) ||
+                (isMarkedFuseGroup(tiOp) && !isFuseGroupOutput(tiOp)))
+                return;
+            deferredGroupMembers.erase(tiOp.getOperation());
+            // Queue dead originals too: erasing them releases their producers
+            // and removes any remaining group markings in the normal cleanup.
+            if (tiOp->use_empty() || needsTiling(tiOp))
+                orderTi.push_back(tiOp);
+        });
     }
 
     LLVM_DEBUG(llvm::dbgs() << "Tile and Fuse - DONE\n");
