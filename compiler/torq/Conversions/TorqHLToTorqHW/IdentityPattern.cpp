@@ -41,12 +41,17 @@ LogicalResult IdentityPattern::transform(torq_hl::IdentityOp op, PatternRewriter
         int actBlockSize = 16;
         int g = 4; // This example only works with g == 4
 
-        LData input({{g, -(blockSize / g)}, blockSize / g}, elementType);
-        LData output({blockSize / actBlockSize, actBlockSize}, elementType);
+        LData input(op.getInput());
+        LData output(op.getInit());
+
+        // Use shape of rank 3 to take advantage of gather in DEDR.
+        // Use negative stride to check that gather from non-sequential addresses works correctly
+        input.setShape({1, {g, -(blockSize / g)}, blockSize / g});
+        output.setShape({blockSize / actBlockSize, actBlockSize});
         input.setOffset(blockSize - blockSize / g);
 
         IData idata = slice.iram.load(input);
-        PData pdata = slice.alu.load(idata);
+        PData pdata = slice.alu.accumulate(idata, Alu::Mode::bitOr);
         For(auto a = slice.iterate(blockSize / actBlockSize)) {
             QData res = slice.act.load(pdata[a]);
             slice.store(output[a.reverse()], res);

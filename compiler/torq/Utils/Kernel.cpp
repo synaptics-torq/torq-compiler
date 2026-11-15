@@ -146,7 +146,7 @@ sgElementCount(const Shape &dims, int busWidthItems, int sgMax = -1, bool fuse =
 
     //  If the first dimension has a non-natural stride get the stride and the number of groups
     const auto &dim = dims[isRank3 ? 1 : 0];
-    if (dim.stride.exprVal.has_value() || !fuse ||
+    if (dim.stride.exprVal.has_value() || (!fuse && dims.size() >= 2) ||
         (dim.stride.intVal.has_value() && dim.stride.intVal.value() != count)) {
         // Non-natural stride specified
         if (sgMax >= 0 && dim.count <= sgMax && count <= busWidthItems / dim.count) {
@@ -157,7 +157,6 @@ sgElementCount(const Shape &dims, int busWidthItems, int sgMax = -1, bool fuse =
         }
         else {
             // Cannot use scatter-gather, use outer dim
-            assert(count <= busWidthItems && "Inner dimension larger than bus width");
             blockInfo.size = count;
             blockInfo.outerGroups = dim.count;
             blockInfo.outerStride = dim.stride;
@@ -180,7 +179,7 @@ sgElementCount(const Shape &dims, int busWidthItems, int sgMax = -1, bool fuse =
         blockInfo.outerGroups = dims[0].count;
         blockInfo.outerStride = dims[0].stride;
     }
-    else if (blockInfo.size > busWidthItems) {
+    else if (blockInfo.size > busWidthItems && fuse) {
         // TODO: actually the 1st target here is to limit the number of transfers
         // the 2nd target (lower priority) is to limit the number of bytes read.
         // It should be ok if the last block goes beyond the actual data count (except for DEQW).
@@ -267,7 +266,7 @@ static Shape getSubShape(const Shape &shape, const Indexes &ix) {
 static int getBusWidth(NdlType type, DType dataType) {
     switch (type) {
     case NdlType::DEDR:
-        return HwInfo::iram_seg_width;
+        return HwInfo::max_input; // HwInfo::iram_seg_width;
     case NdlType::DEWR:
         return HwInfo::wram_seg_width;
     case NdlType::DEBR:
@@ -302,7 +301,7 @@ static const int *acbrValidDataCount() {
 static SGBlockInfo sgElementCountDedr(const Shape &shape, DType elementType) {
     return sgElementCount(
         shape, getBusWidth(NdlType::DEDR, elementType) / sizeofType(elementType),
-        getBusScatterGather(NdlType::DEDR)
+        getBusScatterGather(NdlType::DEDR), false
     );
 }
 
@@ -1304,7 +1303,7 @@ struct SlicePrivate {
     void cedr(const IData &idata, uint32_t weightSize, bool transpose);
     void cedw(const IData &idata, int setId);
 
-    void cewr(const WData &wdata, bool outer = false, bool repeatWeight = false);
+    void cewr(const WData &wdata, bool outer = false, bool repeatWeight = false, Shape *iShape = 0);
     void ceww(const WData &wdata, bool transpose);
 
     void acbr(const BData &bdata);
@@ -1882,8 +1881,10 @@ void SlicePrivate::actSetNumberFormat(DType dtype) {
 void SlicePrivate::cedr(const IData &idata, uint32_t weightSize, bool transpose) {
     Shape shape = idata.subShape();
     const int elementSize = sizeofType(idata.elementType());
-    SGBlockInfo bi = sgElementCountDedr(shape, idata.elementType());
     int biCount = elementSize;
+    int sgGroups = shape.size() == 2 && shape[0].stride.intVal.has_value() ? shape[0].count : 1;
+    int outerGroups = shape.size() == 2 && !shape[0].stride.intVal.has_value() ? shape[0].count : 1;
+    int size = backDimCount(shape);
 
     // Generate CEDR to load the data from IRAM to ALU
     // For integer operations with 16b weights each data bytes in the block is duplicated so that
@@ -1897,14 +1898,25 @@ void SlicePrivate::cedr(const IData &idata, uint32_t weightSize, bool transpose)
     else if (idata.getRepeat() > 1) {
         cedrDims.push_back({DimType::L, RegDimTag::I, idata.getRepeat()});
     }
-    bi.size /= idata.getRepeat();
+    size /= idata.getRepeat();
     cedrDims.push_back({DimType::L, RegDimTag::B, elementSize, 1});
     static const int sValidDataCount[] = {8, 16, 32, 64, 0};
-    int dCount = biCount * bi.size;
+    int dCount = biCount * size;
     int dSize = roundUp(dCount, sValidDataCount) / biCount;
     if (!dSize) {
         llvm::errs() << "Invalid CEDR block size: " << dSize << "\n";
         assert(false && "Invalid CEDR block size");
+    }
+
+    if (sgGroups > 1) {
+        // Gathered data: the HW derives the number of ALU groups from the D size
+        // (groups = 256 bytes / D bytes) and splits each IRAM segment in groups / 4 parts, one per
+        // gathered block. So D must cover one part, not just the data: a smaller D gives more
+        // groups than blocks, with parts that don't match the blocks in IRAM.
+        assert((sgGroups == 2 || sgGroups == 4) && "Only 2 or 4 gathered blocks are possible");
+        int partBytes = HwInfo::max_input / sgGroups;
+        assert(dCount <= partBytes && "Gathered block larger than its part of the ALU group");
+        dSize = partBytes / biCount;
     }
 
     cedrDims.push_back({DimType::L, RegDimTag::D, dSize, elementSize});
@@ -1914,22 +1926,20 @@ void SlicePrivate::cedr(const IData &idata, uint32_t weightSize, bool transpose)
         cedrDims[1].stride = 36;
         cedrDims[1].count = 8;
         // Force G dimension to 32
-        bi.outerGroups = 32 / elementSize;
+        outerGroups = 32 / elementSize;
     }
 
-    if (bi.sgGroups > 1 || bi.outerGroups > 1) {
-        // Not sure if stride is actually used by HW here
-        int stride = (bi.stride.intVal.has_value() ? bi.stride.intVal.value() : 1) * elementSize;
+    if (sgGroups > 1 || outerGroups > 1) {
         static const int sValidGroupCount[] = {1, 4, 8, 16, 32, 0};
         // TODO: see how we can combine sgGroups with outerGroups
-        int iramWidth = HwInfo::iram_seg * getBusWidth(NdlType::DEDR, idata.elementType());
-        int groupCount = bi.sgGroups > 1 ? iramWidth / stride : bi.outerGroups;
+        int groupCount = sgGroups > 1 ? sgGroups * HwInfo::iram_seg : outerGroups;
         groupCount = roundUp(groupCount, sValidGroupCount);
         if (!groupCount) {
             llvm::errs() << "Invalid CEDR group size: " << groupCount << "\n";
             assert(false && "Invalid CEDR group size");
         }
-        cedrDims.push_back({DimType::L, RegDimTag::G, groupCount, stride});
+        // Not sure if stride is actually used by HW here
+        cedrDims.push_back({DimType::L, RegDimTag::G, groupCount, HwInfo::iram_seg_width});
     }
 
     // Now add hdims for each loop deeper the iram load
@@ -1973,7 +1983,7 @@ void SlicePrivate::cedw(const IData &idata, int setId) {
     _ndls.add(NdlType::CEDW, regDims, setId);
 }
 
-void SlicePrivate::cewr(const WData &wdata, bool outer, bool repeatWeight) {
+void SlicePrivate::cewr(const WData &wdata, bool outer, bool repeatWeight, Shape *iShape) {
     Shape shape = wdata.subShape();
     const int weightSize = sizeofType(wdata.elementType());
     const int weightBlockSize = backDimCount(shape);
@@ -2025,6 +2035,11 @@ void SlicePrivate::cewr(const WData &wdata, bool outer, bool repeatWeight) {
         // will produce some extra computation on junk data that will just be thrown away
         static const int sValidGroupSize[] = {1, 4, 8, 16, 0};
         repeat = roundUp(repeat, sValidGroupSize);
+        if (iShape->size() == 2 && (*iShape)[0].stride.intVal.has_value()) {
+            // This is a gathered load. Adjust the repead by the gather factor.
+            repeat *= (*iShape)[0].count;
+        }
+
         cewrDims.push_back({DimType::L, RegDimTag::G, repeat, weightSize});
         if (repeat != weightBlockSize) {
             // If the group size has been adjusted we have to also adjust the count in wdata shape
@@ -2418,7 +2433,7 @@ static void verifyNdlBankAlignment(const MemNdlData *ndl, int64_t bankBytes) {
 }
 
 void SlicePrivate::dedr(const LData &data, NdlSyncMode syncMode) {
-    _ndls.add(memNdl(NdlType::DEDR, data, true, syncMode));
+    _ndls.add(memNdl(NdlType::DEDR, data, false, syncMode));
 }
 
 void SlicePrivate::dewr(const LData &data, bool fuse) {
@@ -2721,7 +2736,7 @@ PData SlicePrivate::aluProductAccumulate(
     }
 
     cedr(idata, weightSize, false);
-    cewr(wdata, outer, repeatWeight);
+    cewr(wdata, outer, repeatWeight, &iShape);
 
     // Save a copy of current stack, will be needed later to add N and T dimensions
     _stackCopy = _forStack;
@@ -2754,6 +2769,10 @@ PData SlicePrivate::aluProductAccumulate(
     if (outer) {
         // In this case pram.shape becomes 3D
         int outerStride = HwInfo::max_input * (HwInfo::pdat_width / sizeofType(resType));
+        if (iShape.size() == 2 && iShape[0].stride.intVal.has_value()) {
+            // This is a gathered load. The outer stride will be inside the first 64 ALU partials.
+            outerStride = HwInfo::max_input / iShape[0].count;
+        }
         pramShape.insert(pramShape.begin(), ShapeItem(weightBlockSize, Stride(outerStride)));
         if (pramShape[0].count > 1 && pramShape[1].count > 1) {
             // ACPR can't handle two strided dimensions, so we are forced to use a dense dim[1]

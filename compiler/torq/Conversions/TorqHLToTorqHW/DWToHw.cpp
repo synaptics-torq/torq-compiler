@@ -313,6 +313,7 @@ static Operation *lowerDwStride2ToHw(
     // Note that we don't have to limit the vector size to the segment size (H*W/4)
     const int alukw = slice.alu.kerWidth();
     int vectStride = slice.alu.iWidth(input.elementType(), weight.elementType(), outChVectSize);
+    vectStride = std::min(vectStride, input.dim(Dim::H) * input.dim(Dim::W) / 4);
 
     int vectSize = vectStride + std::min(kernelBorder.left /* + kernelBorder.right */, alukw - 1);
     input.fuse({Dim::H, Dim::W}).reshapeDim(Dim::H, {2, 2, -1}).vectorize(vectSize, vectStride);
@@ -404,7 +405,10 @@ static Operation *lowerDwStride2ToHw(
                                     IData idata = slice.iram.load(
                                         input[n][ocv][":"][ic][qr][qc][kh / 2][kw / (alukw * 2)][iv]
                                     );
-                                    idata.setShape({{alukw, Stride(1)}, idata.dim(0), vectStride});
+                                    idata.setShape({
+                                        {alukw, Stride(1)}, idata.shape()[0], vectStride
+                                        // idata.dim(1) - (kernelDim.w - 1)
+                                    });
                                     pdata = slice.alu.multiScalarProductAccumulate(
                                         idata[kw % 2], wdata
                                     );
@@ -483,6 +487,7 @@ lowerToHw(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter, int chOffset
     // After the split input.dim(Dim::C) will be equal to output.dim(Dim::C) as for normal dw convs.
     // For standard depthwise convs each group contains exactly 1 input channel.
     int inChGroupSize = weight.dim(Weight::IC);
+    vectStride = std::min(vectStride, input.dim(Dim::H) * input.dim(Dim::W));
     assert(input.dim(Dim::C) % inChGroupSize == 0 && "Input channels not multiple of group");
     input.reshapeDim(Dim::C, {-1, inChGroupSize});
 
@@ -523,7 +528,12 @@ lowerToHw(torq_hl::DepthwiseConv2DOp op, PatternRewriter &rewriter, int chOffset
                             // Load vectors from neighboring channels
                             IData idata =
                                 slice.iram.load(input[n][ocv][":"][ic][kh][kw / alukw][iv]);
-                            idata.setShape({{alukw, Stride(1)}, idata.dim(0), vectStride});
+                            idata.setShape(
+                                {{alukw, Stride(1)},
+                                 idata.shape()[0],
+                                 // idata.dim(1) - std::min(alukw - 1, kernelDim.w - 1)
+                                 vectStride}
+                            );
                             pdata =
                                 slice.alu.multiScalarProductAccumulate(idata[kw % alukw], wdata);
                         }
