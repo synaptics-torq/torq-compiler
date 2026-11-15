@@ -1,5 +1,42 @@
 # Release Notes
 
+## Version 2.3.1 (2026-11-15)
+
+### Torq changes since v2.3.0
+
+#### Highlights
+- The Torq runtime can be built for Zephyr on Astra Machina, and a new C++ library loads a model and runs inference
+  with the same code on Linux and Zephyr.
+- On SL2610 boards, inference times no longer change from run to run because of the NPU frequency boost, and the first
+  inference of a model is as fast as the next ones.
+- SR200 compile-time estimates now match the board.
+
+#### Added
+- Zephyr build of the Torq runtime for Astra Machina: configure with `-DTORQ_OS_RTOS=ON`. The default build is still
+  Linux.
+- Torq Network Framework (`runtime/fw`): a C++17 API to load a VMFB and run inference on Linux and Zephyr
+  (`torq::Network`: `load_model()`, then assign each input and call `predict()`). It takes tensor shapes and types
+  from the model, and manages the tensor buffers and device synchronization. Two optional libraries help prepare inputs
+  (`torq::preprocess`) and process outputs (`torq::postprocess`, with classifiers and detectors). See
+  `runtime/fw/README.md`.
+- `torq_cli` Linux sample (`-DTORQ_BUILD_CLI=ON`): runs a model on a raw input tensor with the Network Framework and
+  prints the inference time and the top five classes. See `runtime/app/torq_cli/README.md`.
+- New user manual page, "NPU Kernel Driver", with the frequency boost and its parameter.
+
+#### Changed
+- SL2610: the NPU frequency boost stays on for 100 ms after the last job (new `syna_npu` module parameter
+  `boost_hold_ms`, default 100; `0` gives the previous behaviour). It is also requested when the runtime loads a model.
+  Before, a job could wait about 3.6 ms for the boost, so the NPU time of short models took one of two values (for
+  example about 4 ms or 8 ms for MobileNetV2), and the first inference waited about 1.9 ms more than the next ones
+  (MobileNetV2 on an Astra Machina board: 4.46 ms for the first inference, now 2.57 ms). The NPU stays at 1 GHz for up
+  to 100 ms after each burst of jobs.
+- SR200: the DMA factor goes from 0.33 to 0.5, which matches the measured board times. The compile-time estimates are
+  now within 2% of the board: MobileNetV2 5.06 ms (board 5.13 ms), YOLOv8n OD 15.72 ms (board 15.47 ms). Before, they
+  were 6.47 ms and 18.85 ms. The factor also drives the constant-load prefetch, so SR200 executables can change.
+
+**Full Changelog**: https://github.com/synaptics-torq/torq-compiler/compare/v2.3.0...v2.3.1
+
+
 ## Version 2.3.0 (2026-10-19)
 
 ### Torq changes since v2.2.1
