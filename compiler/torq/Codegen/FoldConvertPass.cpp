@@ -1200,22 +1200,30 @@ static bool isSliceInvariantLoad(torq_hl::ConvertOp op, scf::ForallOp forallOp) 
 // Only loads nobody writes to move. A kernel that took the converted value as its init would
 // write the shared buffer from every slice at once.
 //
-// Only a forall whose slices run a single kernel qualifies. In a chain of kernels (a coalesced
-// elementwise chain, say) the per-slice load lives only around the kernel that reads it, while
-// the shared one stays resident across the whole chain, and the extra residency makes the LRAM
-// planner spill.
+// Only a forall whose slices run one kernel, not counting the table lookups after it, or one
+// table lookup alone qualifies. In a chain of kernels (a coalesced elementwise chain, say) the
+// per-slice load lives only around the kernel that reads it, while the shared one stays resident
+// across the whole chain, and the extra residency makes the LRAM planner spill. A lookup after the
+// kernel (the SiLU in the fuse group of a conv) only reads the slice output, and its LUT is in the
+// slice configuration, not in LRAM: keeping the shared load resident across it costs less than one
+// copy of the load per slice. A lookup alone shares only its small scale and bias loads.
 //
 // The default LICM (moveLoopInvariantCode on the loop interface) would also move every pure op,
 // including the tensor.empty output inits of the kernels, and all slices would then write one
 // buffer. So only these loads and their inits move.
 static size_t hoistSliceInvariantLoads(Operation *root) {
     size_t numMoved = 0;
-    auto isKernel = [](Operation &op) {
-        return isa<torq_hl::KernelInterface>(op) && !isa<torq_hl::ConvertOp>(op);
-    };
 
     root->walk([&](scf::ForallOp forallOp) {
-        if (llvm::count_if(forallOp.getBody()->without_terminator(), isKernel) != 1) {
+        size_t kernels = 0;
+        size_t lookups = 0;
+        for (Operation &op : forallOp.getBody()->without_terminator()) {
+            if (isa<torq_hl::TableOp>(op))
+                ++lookups;
+            else if (isa<torq_hl::KernelInterface>(op) && !isa<torq_hl::ConvertOp>(op))
+                ++kernels;
+        }
+        if (kernels != 1 && !(kernels == 0 && lookups == 1)) {
             return;
         }
 
