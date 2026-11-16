@@ -23,4 +23,6 @@ CASES = {
     "add-9x511-bf16": partial(_make_add, [9, 511], [9, 511]),
     "add-nss-25x511-bf16": partial(_make_add, [25, 511], [25, 511]),
     "add_scalar_into_unit_dim": partial(_make_add, [], [1, 256], dtype=np.int32, opset=19),
+    # Ported from tests/testdata/tosa_ops, with the name of the MLIR file
+    "add-bf16": partial(_make_add, [1, 56, 56, 24], [1, 56, 56, 24]),
 }

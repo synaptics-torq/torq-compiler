@@ -186,6 +186,10 @@ CASES = {
         _make_int4_matmul, 128, (0.0101318359375, 0.10009765625), (-3, 4)
     ),
     "matmul_dql_q4_0": partial(_make_int4_matmul, 640, (0.0050048828125, 0.02001953125), (-8, 8)),
+    # Ported from tests/testdata/tosa_ops, with the names of the MLIR files: batched matmuls of
+    # two inputs
+    "matmul-notile-m3-k127-n80-bf16": partial(_make_matmul, [2, 3, 127], [2, 127, 80]),
+    "matmul-notile-m7-k113-n80-bf16": partial(_make_matmul, [2, 7, 113], [2, 113, 80]),
 }
 
 # matmul_dql: block quantization rounds at block boundaries, which amplifies the relative error
@@ -193,6 +197,13 @@ CASES = {
 # matmulinteger: ONNX DynamicQuantizeLinear tensors are always f32, so the DQL -> MatMulInteger
 # -> dequant chain is only reachable in a bf16 pipeline with --torq-convert-dtypes.
 CONFIG = {
+    # The tolerances of the MLIR files. For m7, the llvmcpu reference is less accurate than the
+    # NPU (up to ~200 vs ~60 absolute error against a float64 matmul): the gate ignores
+    # near-zero outputs where this is large relatively.
+    "matmul-notile-m3-k127-n80-bf16": {"comparison": {"fp_max_tol": 0.7, "epsilon": 1e-3}},
+    "matmul-notile-m7-k113-n80-bf16": {
+        "comparison": {"fp_max_tol": 0.05, "use_abs_tol_gate": 1.0, "fp_abs_tol_frac": 0.01},
+    },
     "dequant_matmul_zp_n6": {"comparison": {"fp_max_tol": 0.1, "allowed_wrong": 0.1}},
     "dequant_matmul_zp_nested_tile": {"comparison": {"fp_max_tol": 0.1, "allowed_wrong": 0.1}},
     "dequant_matmul_zp_wide_n": {"comparison": {"fp_max_tol": 0.1, "allowed_wrong": 0.1}},
