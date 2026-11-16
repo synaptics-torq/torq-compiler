@@ -18,6 +18,7 @@ from .torch_ops_models import (
 )
 
 from torq.testing.comparison import compare_test_results
+from torq.testing.numpy import _run_ort_fp32
 from torq.testing.versioned_fixtures import (
     versioned_generated_file_fixture,
     versioned_unhashable_object_fixture,
@@ -72,6 +73,13 @@ def torch_ops_torch_mlir_model_file(request, versioned_file, torch_ops_torch_mod
     importer.import_frozen_program(exported)
     with open(versioned_file, "w") as f:
         f.write(str(importer.module))
+
+
+@versioned_unhashable_object_fixture
+def onnx_fp32_reference_results(torch_ops_onnx_model, input_data):
+    """The outputs of onnxruntime, which has no bf16 kernels, on the ONNX model of the case cast to
+    fp32, rounded to bf16. For cases whose llvm-cpu reference is wrong."""
+    return _run_ort_fp32(torch_ops_onnx_model, input_data)
 
 
 @pytest.fixture

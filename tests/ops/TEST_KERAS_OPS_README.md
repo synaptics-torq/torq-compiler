@@ -83,8 +83,14 @@ Each case runs with int8 and int16 quantization, as `<case>_int8` and `<case>_in
 
 The `tosa_*` modules hold cases ported from `tests/testdata/tosa_ops`: each keeps the name of the
 MLIR file it replaced and its quantization (`QUANTIZE = "int8"`, with a few int16 cases in
-`CONFIG`), and `DEFAULT_CONFIG` makes them run on the slices only, as `test_tosa_ops` does. Port a
-tosa_ops case only when Keras and TFLite produce the same TOSA ops and attributes (pads, strides,
-perms, axes); keep the MLIR file when it tests explicit pads, constants, scales or zero points, an
-op TFLite never emits, or bf16.
+`CONFIG`), and `DEFAULT_CONFIG` makes them run on the slices only, as `test_tosa_ops` does.
+
+A port must not lose test coverage: the generated case must still test what the MLIR case was
+written for (see its comment and the PR or issue that added it). Its TOSA doesn't have to match
+the MLIR file exactly: an extra or different op is fine when other cases already test it. Pads
+that Keras "same" can't give are a `ZeroPadding2D` before a VALID conv or pool: TFLite folds it
+into the pads of the op. Keep the MLIR file when other tests read it, when it tests an op TFLite
+never emits, or when its point is a scale, shift, zero point or rounding mode that Keras can't
+produce. TFLite has no bf16: bf16 cases go to `tests/testdata/torch_ops`, as NCHW ONNX ops, under
+the same rule.
 

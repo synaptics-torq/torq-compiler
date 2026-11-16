@@ -1,8 +1,8 @@
 """Keras test models: max pools ported from tests/testdata/tosa_ops.
 
 Each case keeps the name of the MLIR file it replaces and its quantization. The pads are those of
-Keras "same" (the extra row or column at the end) or "valid"; MLIR files with other pads stay in
-tests/testdata/tosa_ops.
+Keras "same" (the extra row or column at the end) or "valid", or a ZeroPadding2D before a VALID
+pool, which TFLite folds into the pads of the pool.
 """
 
 import tensorflow as tf
@@ -31,14 +31,15 @@ def _maxpools(shape, *pools, concat=False):
 
 
 def _padded_maxpool(shape, pad, pool_size, strides):
-    """A VALID max pool after a ZeroPadding2D of ((top, bottom), (left, right)). The inputs are
-    calibrated on [0, 1), so a zero pad is the lowest value and the pad folds into the pool."""
+    """A VALID max pool after a ZeroPadding2D of ((top, bottom), (left, right)), which TFLite folds
+    into the pads of the pool. The inputs are calibrated on [0, 1), so a zero pad is the lowest
+    value, as the pads of a pool are."""
     return functional(shape, lambda x: tf.keras.layers.MaxPooling2D(
         pool_size=pool_size, strides=strides)(tf.keras.layers.ZeroPadding2D(pad)(x)))
 
 
-# Not ported: maxpool2d-stride1-k3x3-32x32x4 and maxpool_int16_batch1_3x3_stride1x1_16x4
-# (test_tile_fit_probe uses their MLIR files).
+# Not ported: maxpool2d-stride1-k3x3-32x32x4, maxpool2d-stride2-k3x3-mixed-phase-pad-32x32x8 and
+# maxpool_int16_batch1_3x3_stride1x1_16x4 (test_tile_fit_probe uses their MLIR files).
 CASES = {
     "maxpool-seg-tile-1": _maxpool((28, 28, 512), 2, 2),
     "maxpool-seg-tile": _maxpool((56, 56, 256), 2, 2),
@@ -101,6 +102,18 @@ CASES = {
     "maxpool_spp_5_9_13_20x20x16": _maxpools(
         (20, 20, 16), (5, 1, "same"), (9, 1, "same"), (13, 1, "same"), concat=True,
     ),
+    # More padding before than after on an axis (synaptics-torq/torq-compiler-dev#2717)
+    "maxpool2d-stride2-k3x3-top-left-pad": _padded_maxpool((8, 8, 16), ((1, 0), (1, 0)), 3, 2),
+    "maxpool_f5_s2_top_left_pad_10x10x4": _padded_maxpool((10, 10, 4), ((2, 1), (2, 1)), 5, 2),
+    "maxpool_f7_s2_top_left_pad_10x10x4": _padded_maxpool((10, 10, 4), ((3, 2), (3, 2)), 7, 2),
+    "maxpool_k2_s1_pad10_16x16x8": _padded_maxpool((16, 16, 8), ((1, 0), (1, 0)), 2, 1),
+    "maxpool_k2x3_s1_pad1011_16x16x8": _padded_maxpool((16, 16, 8), ((1, 0), (1, 1)), (2, 3), 1),
+    "maxpool_k3_s1x2_16x16x8": _padded_maxpool((16, 16, 8), ((1, 1), (1, 0)), 3, (1, 2)),
+    "maxpool_k3_s2x1_16x16x8": _padded_maxpool((16, 16, 8), ((1, 0), (1, 1)), 3, (2, 1)),
+    "maxpool_k3_s4_18x18x8": _padded_maxpool((18, 18, 8), ((1, 0), (1, 0)), 3, 4),
+    "maxpool_k3x2_s1_pad1110_16x16x8": _padded_maxpool((16, 16, 8), ((1, 1), (1, 0)), (3, 2), 1),
+    "maxpool_k4_s1_pad21_16x16x8": _padded_maxpool((16, 16, 8), ((2, 1), (2, 1)), 4, 1),
+    "maxpool_k4_s2_pad21_21x21x8": _padded_maxpool((21, 21, 8), ((2, 1), (2, 1)), 4, 2),
 }
 
 CONFIG = {name: {"quantize": "int16"} for name in (

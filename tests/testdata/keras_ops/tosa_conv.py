@@ -2,11 +2,11 @@
 tests/testdata/tosa_ops.
 
 Each case keeps the name of the MLIR file it replaces and its quantization. The pads are those of
-Keras "same" or "valid", and the biases are random where the MLIR file had a non-zero bias. The
-inputs are calibrated on [0, 1), so their int8 zero point is -128, as in most of the MLIR files.
-Not ported: a separate pad before a conv equal to its "same" pads (TFLite folds ZeroPadding2D into
-the conv) and int16 depthwise convs (the TFLite converter fails to quantize them). Other pads stay
-a separate TFLite pad, which the compiler folds into the conv (the *_pad_w_only cases).
+Keras "same" or "valid", or a ZeroPadding2D before a VALID conv, which TFLite folds into the pads
+of the conv. The biases are random where the MLIR file had a non-zero bias. The inputs are
+calibrated on [0, 1), so their int8 zero point is -128, as in most of the MLIR files.
+Not ported: a separate pad op before a conv (TFLite folds it into the conv) and int16 depthwise
+convs (the TFLite converter fails to quantize them).
 """
 
 import tensorflow as tf
@@ -47,7 +47,22 @@ def _pool_then_dense(shape, units):
         tf.keras.layers.GlobalAveragePooling2D()(x)))
 
 
-# Not ported: dw_peeling (test_torqrt uses its MLIR file).
+def _padded_conv(shape, pad, filters, kernel_size):
+    """A stride-2 conv with pads ((top, bottom), (left, right)): a ZeroPadding2D, then a VALID
+    conv."""
+    return _padded(shape, pad, lambda: tf.keras.layers.Conv2D(filters, kernel_size, strides=2,
+                                                              **_BIAS))
+
+
+def _padded_depthwise(shape, pad, kernel_size):
+    """A stride-2 depthwise conv with pads ((top, bottom), (left, right)): a ZeroPadding2D, then a
+    VALID depthwise conv."""
+    return _padded(shape, pad, lambda: tf.keras.layers.DepthwiseConv2D(kernel_size, strides=2,
+                                                                       **_BIAS))
+
+
+# Not ported: dw_peeling (test_torqrt uses its MLIR file), dw_3x5_stride2_mixed_phase_i8 and
+# dw_4x4_stride2_pad21_11x11x8 (test_constant_evaluator uses their MLIR files).
 CASES = {
     "conv2d_3x5_stride2_same_11x11x4": _conv((11, 11, 4), 8, (3, 5), 2, "same"),
     # From synaptics-torq/torq-compiler-dev#2743: stride 2, H VALID and W padded with the W kernel
@@ -100,4 +115,17 @@ CASES = {
     "dw_3x1_stride2_same_11x11x8": _depthwise((11, 11, 8), (3, 1), 2, "same"),
     "dw_3x1_stride2_valid_11x11x8": _depthwise((11, 11, 8), (3, 1), 2),
     "dw_1x1_stride2_valid_18x14x8": _depthwise((18, 14, 8), 1, 2),
+    "dw_2x3_stride2_pad0111_11x11x8": _depthwise((11, 11, 8), (2, 3), 2, "same"),
+    # A frame of one row, padded on the right only
+    "dw_1x3_stride2_h1_asym_pad_i8": _depthwise((1, 8, 4), (1, 3), 2, "same", bias=False),
+    # Stride 2 with more padding before than after on an axis
+    # (synaptics-torq/torq-compiler-dev#2717)
+    "conv2d_4x4_stride2_pad01_11x11x4": _padded_conv((11, 11, 4), ((0, 1), (0, 1)), 8, 4),
+    "conv2d_4x4_stride2_pad21_11x11x4": _padded_conv((11, 11, 4), ((2, 1), (2, 1)), 8, 4),
+    "conv2d_6x6_stride2_pad32_11x11x4": _padded_conv((11, 11, 4), ((3, 2), (3, 2)), 8, 6),
+    "dw_2x2_stride2_pad10_11x11x8": _padded_depthwise((11, 11, 8), ((1, 0), (1, 0)), 2),
+    "dw_4x3_stride2_pad2111_11x11x8": _padded_depthwise((11, 11, 8), ((2, 1), (1, 1)), (4, 3)),
+    "dw_4x4_stride2_pad01_11x11x8": _padded_depthwise((11, 11, 8), ((0, 1), (0, 1)), 4),
+    "dw_4x4_stride2_pad10_11x11x8": _padded_depthwise((11, 11, 8), ((1, 0), (1, 0)), 4),
+    "dw_6x6_stride2_pad32_11x11x8": _padded_depthwise((11, 11, 8), ((3, 2), (3, 2)), 6),
 }

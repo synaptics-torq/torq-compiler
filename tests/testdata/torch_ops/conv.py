@@ -210,6 +210,31 @@ def make_conv2d_bf16_chain_k5s2_k3s2_k3s2():
     return g.export(y)
 
 
+# Weights per channel of the 2-channel depthwise convs, from the tosa_ops MLIR files they replace
+# (dw_16x16-bf16 and dw_f5_16x16-bf16)
+_DW_3X3_WEIGHTS = [[[15, 18, 12], [14, 9, 8], [16, 11, 19.25]],
+                   [[7, 8, 8.5], [4, 9, 6], [9.5, 6, 7]]]
+_DW_5X5_WEIGHTS = [[[15, 18, 12, 15, 17], [14, 9, 10, 2, 8], [16, 11, 19.25, 16, 1],
+                    [15, 18, 12, 5, 17], [15, 18, 12, 10, 17]],
+                   [[7, 8, 8.5, 18, 12.5], [4, 9, 9, 4.5, 6], [9.5, 6, 7, 6, 3.5],
+                    [7, 8, 8.5, 18, 1.5], [17, 8, 18.5, 18, 12.5]]]
+
+
+def _make_depthwise_16x16(weights, channels):
+    """A stride-1 SAME depthwise conv of a 16x16 frame, with the per-channel weights repeated
+    over the channels and a bias of 11, 22, 33, ..."""
+    g = OnnxGraph(opset=22)
+    shape = [1, channels, 16, 16]
+    k = len(weights[0])
+    x = g.input("x", BF16, shape)
+    w = np.resize(np.asarray(weights), (channels, k, k))[:, None]
+    bias = 11 * np.arange(1, channels + 1)
+    y = g.op("Conv", x, g.const(w, BF16), g.const(bias, BF16), dilations=[1, 1],
+             group=channels, kernel_shape=[k, k], pads=[k // 2] * 4, strides=[1, 1], dtype=BF16,
+             shape=shape)
+    return g.export(y)
+
+
 # Conv attributes as the original models spelled them out.
 _CONV_3X3_ATTRS = {"auto_pad": "NOTSET", "dilations": [1, 1], "kernel_shape": [3, 3],
                "pads": [1, 1, 1, 1]}
@@ -537,9 +562,20 @@ CASES = {
         bias_range=(-0.77734375, 3.390625), weight_range=(-3.8125, 1.203125),
         auto_pad="NOTSET", dilations=[1], group=1, kernel_shape=[3], pads=[0, 0], strides=[2],
     ),
+    # NCHW versions of the former tosa_ops cases dw_16x16-bf16 and dw_f5_16x16-bf16, and the
+    # same convs with 4 channels
+    "depthwise_conv2d_bf16_2x3x3_pad1_2x16x16": partial(_make_depthwise_16x16, _DW_3X3_WEIGHTS, 2),
+    "depthwise_conv2d_bf16_2x5x5_pad2_2x16x16": partial(_make_depthwise_16x16, _DW_5X5_WEIGHTS, 2),
+    "depthwise_conv2d_bf16_4x3x3_pad1_4x16x16": partial(_make_depthwise_16x16, _DW_3X3_WEIGHTS, 4),
+    "depthwise_conv2d_bf16_4x5x5_pad2_4x16x16": partial(_make_depthwise_16x16, _DW_5X5_WEIGHTS, 4),
 }
 
 CONFIG = {
+    # The llvm-cpu reference reads the 2-element bf16 bias as [11, 11]
+    # (synaptics-torq/torq-compiler-dev#3053).
+    "depthwise_conv2d_bf16_2x3x3_pad1_2x16x16": {"reference": "onnx_fp32_reference_results"},
+    "depthwise_conv2d_bf16_2x5x5_pad2_2x16x16": {"reference": "onnx_fp32_reference_results"},
+    "depthwise_conv2d_bf16_4x3x3_pad1_4x16x16": {"comparison": {"fp_max_tol": 0.05}},
     # bf16 intermediates: ~0.1% of the outputs are 1 ULP off after each of the first two convs,
     # which the next convs amplify past the default tolerance on near-cancelling outputs.
     "conv2d_bf16_chain_k5s2_k3s2_k3s2_32x240x320": {"comparison": {"allowed_wrong": 0.002}},
