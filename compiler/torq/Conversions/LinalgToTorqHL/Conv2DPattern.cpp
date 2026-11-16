@@ -561,6 +561,27 @@ template <typename MatchFn> static auto shapeMatchOrPass(MatchFn matchFn) {
 
 } // namespace
 
+// The result of an int8 table lookup that is the only user of `fusedOutput`, or `fusedOutput` when
+// there is none. `fusedOutput` is the output of the conv after its fused epilogue (rescale,
+// transpose), not the raw conv result. The lookup is an elementwise generic that reads a constant
+// LUT with tensor.extract: any int8 lookup after a conv or a depthwise conv, e.g. the SiLU after
+// each conv of YOLO or a folded batch norm. Marked in the fuse group of the conv, the lookup is
+// tiled and sliced with the conv, so it reads that output from LRAM.
+static Value lookupAfterConvOutput(Value fusedOutput) {
+    if (!fusedOutput.hasOneUse())
+        return fusedOutput;
+    auto generic = dyn_cast<linalg::GenericOp>(*fusedOutput.getUsers().begin());
+    if (!generic || !linalg::isElementwise(generic) || generic.getNumDpsInputs() != 1 ||
+        generic.getNumResults() != 1 || generic.getDpsInputs()[0] != fusedOutput)
+        return fusedOutput;
+    auto inType = dyn_cast<RankedTensorType>(fusedOutput.getType());
+    auto outType = dyn_cast<RankedTensorType>(generic->getResult(0).getType());
+    if (!inType || !outType || !inType.getElementType().isInteger(8) ||
+        !outType.getElementType().isInteger(8))
+        return fusedOutput;
+    return isConstantTableLookup(generic) ? generic->getResult(0) : fusedOutput;
+}
+
 template <class LinalgConvOp, class TorqConvOp>
 struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
   private:
@@ -691,6 +712,14 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
                 if (succeeded(truncated))
                     markRoot = truncated->getFusedOutput();
             }
+            // A table lookup that reads the conv output joins the fuse group of the conv. The
+            // conversion keeps it as a separate torq_hl.table: the group only decides what
+            // TileAndFuse and LinalgSlicing tile and slice together. The lookup is elementwise on
+            // the conv output, so it takes the tile and the slice of that output and reads it from
+            // LRAM; the conv stays the principal op of the group. The transpose cut above is
+            // different: a transpose changes the layout, so its tiles do not match those of the
+            // conv.
+            markRoot = lookupAfterConvOutput(markRoot);
             if (!markFuseGroupBackward(
                     markRoot, {peelPadAndReshapeSource(input), weights}, rewriter,
                     convOp->template getAttrOfType<IntegerAttr>(TORQ_FUSE_GROUP_ID)

@@ -469,3 +469,67 @@ def test_fixed_slices_outside_tile_loop_are_not_charged(torq_compiler, tmp_path)
     assert re.search(transpose_loop, dump), (
         f"the transpose is not tiled in rows of 24:\n{dump}"
     )
+
+
+# A 3x3 conv, the int8 rescale of its output, and an int8 table lookup of that output: the SiLU
+# after each conv of YOLO. "second-use" also returns the rescale output, so the lookup is not its
+# only user.
+LOOKUP_LUT_I8 = ", ".join(str((i * 37) % 256 - 128) for i in range(256))
+
+
+def conv_lookup(variant):
+    results = "%t, %r" if variant == "second-use" else "%t"
+    result_types = (
+        "tensor<1x8x8x16xi8>, tensor<1x8x8x16xi8>" if variant == "second-use" else "tensor<1x8x8x16xi8>"
+    )
+    return f"""
+module {{
+  func.func @main(%x: tensor<1x8x8x16xi8>) -> ({result_types}) {{
+    %w = tosa.const values(dense<1> : tensor<16x3x3x16xi8>) : () -> tensor<16x3x3x16xi8>
+    %b = tosa.const values(dense<5> : tensor<16xi32>) : () -> tensor<16xi32>
+    %zp8 = tosa.const values(dense<0> : tensor<1xi8>) : () -> tensor<1xi8>
+    %zp32 = tosa.const values(dense<0> : tensor<1xi32>) : () -> tensor<1xi32>
+    %m = tosa.const values(dense<1073741824> : tensor<16xi32>) : () -> tensor<16xi32>
+    %s = tosa.const values(dense<38> : tensor<16xi8>) : () -> tensor<16xi8>
+    %lut = tosa.const values(dense<[{LOOKUP_LUT_I8}]> : tensor<256xi8>) : () -> tensor<256xi8>
+    %c = tosa.conv2d %x, %w, %b, %zp8, %zp8 pad([1, 1, 1, 1]) stride([1, 1]) dilation([1, 1]) acc_type(i32) local_bound(false) : (tensor<1x8x8x16xi8>, tensor<16x3x3x16xi8>, tensor<16xi32>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x8x8x16xi32>
+    %r = tosa.rescale %c, %m, %s, %zp32, %zp8 scale32(true) rounding_mode<DOUBLE_ROUND> per_channel(true) input_unsigned(false) output_unsigned(false) : (tensor<1x8x8x16xi32>, tensor<16xi32>, tensor<16xi8>, tensor<1xi32>, tensor<1xi8>) -> tensor<1x8x8x16xi8>
+    %t = tosa.table %r, %lut : (tensor<1x8x8x16xi8>, tensor<256xi8>) -> tensor<1x8x8x16xi8>
+    return {results} : {result_types}
+  }}
+}}
+"""
+
+
+def lookup_in_conv_group(dump):
+    """True when the table lookup (the linalg.generic that reads with tensor.extract) is in the
+    fuse group of the conv."""
+    conv = re.search(r'linalg\.conv_2d\S* .*"torq-fuse-group-id" = (\d+)', dump)
+    assert conv, f"no marked conv in the dump:\n{dump}"
+    lines = dump.split("\n")
+    lookups = []
+    for i, line in enumerate(lines):
+        if "= linalg.generic" not in line:
+            continue
+        end = i
+        while not lines[end].lstrip().startswith("} ->"):
+            end += 1
+        if any("tensor.extract" in body for body in lines[i : end + 1]):
+            lookups.append(line)
+    assert len(lookups) == 1, f"expected one table lookup, found {len(lookups)}:\n{dump}"
+    group = re.search(r'"torq-fuse-group" = \[([0-9, ]*)\]', lookups[0])
+    return bool(group) and conv.group(1) in [g.strip() for g in group.group(1).split(",")]
+
+
+@pytest.mark.ci
+@pytest.mark.parametrize("variant,joins", [("single-use", True), ("second-use", False)])
+def test_lookup_after_conv_fuse_group(torq_compiler, tmp_path, variant, joins):
+    """An int8 table lookup that is the only user of the conv output joins the fuse group of the
+    conv, so it is tiled and sliced with the conv and reads the conv output from LRAM. A lookup
+    with a second user of its input stays out."""
+    dump = dispatch_dump_after(
+        torq_compiler, tmp_path, conv_lookup(variant), "torq-mark-patterns-for-tile-and-fuse"
+    )
+    assert lookup_in_conv_group(dump) == joins, (
+        f"the {variant} lookup {'is not' if joins else 'is'} in the fuse group of the conv:\n{dump}"
+    )
