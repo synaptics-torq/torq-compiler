@@ -258,12 +258,6 @@ static int iterationCount(const MemNdlData *ndl) {
     return iterationCount(ndl->dims);
 }
 
-// Extract a subshape from the original shape with the given indexes
-static Shape getSubShape(const Shape &shape, const Indexes &ix) {
-    assert(ix.size() <= shape.size());
-    return Shape(&shape[ix.size()], &shape[shape.size()]);
-}
-
 // return bus width in bytes
 static int getBusWidth(NdlType type, DType dataType) {
     switch (type) {

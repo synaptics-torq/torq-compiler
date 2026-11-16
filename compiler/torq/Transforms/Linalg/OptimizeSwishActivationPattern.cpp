@@ -419,55 +419,6 @@ static bool matchOutputRescale(linalg::GenericOp op, int32_t &outZp) {
     return true;
 }
 
-/// Check if a linalg.generic is a "subi with constant" operation:
-///   ^bb0(%in: iN, %out: iN):
-///     %0 = arith.subi %in, %cst : iN
-///     linalg.yield %0 : iN
-/// Returns true if matched, and sets outZp to the constant subtracted.
-static bool matchSubiRescale(linalg::GenericOp op, int64_t &outZp) {
-    LLVM_DEBUG(llvm::dbgs() << "[FuseMul] Checking if op is a subi rescale...\n");
-
-    if (op.getNumDpsInputs() != 1 || op.getNumDpsInits() != 1) {
-        LLVM_DEBUG(llvm::dbgs() << "[FuseMul]   -> Not a subi rescale: expected 1 input, 1 init\n");
-        return false;
-    }
-
-    if (op.getNumParallelLoops() != op.getNumLoops()) {
-        LLVM_DEBUG(llvm::dbgs() << "[FuseMul]   -> Not a subi rescale: not all loops parallel\n");
-        return false;
-    }
-
-    auto yieldOp = dyn_cast<linalg::YieldOp>(op.getBody()->getTerminator());
-    if (!yieldOp || yieldOp.getNumOperands() != 1) {
-        LLVM_DEBUG(llvm::dbgs() << "[FuseMul]   -> Not a subi rescale: bad yield\n");
-        return false;
-    }
-
-    auto subiOp = yieldOp.getOperand(0).getDefiningOp<arith::SubIOp>();
-    if (!subiOp) {
-        LLVM_DEBUG(llvm::dbgs() << "[FuseMul]   -> Not a subi rescale: yield is not subi\n");
-        return false;
-    }
-
-    // LHS should be block argument, RHS should be constant
-    if (!isa<BlockArgument>(subiOp.getLhs())) {
-        LLVM_DEBUG(
-            llvm::dbgs() << "[FuseMul]   -> Not a subi rescale: subi lhs is not block arg\n"
-        );
-        return false;
-    }
-
-    auto maybeZp = getConstIntValue(subiOp.getRhs());
-    if (!maybeZp) {
-        LLVM_DEBUG(llvm::dbgs() << "[FuseMul]   -> Not a subi rescale: subi rhs is not constant\n");
-        return false;
-    }
-
-    outZp = *maybeZp;
-    LLVM_DEBUG(llvm::dbgs() << "[FuseMul]   -> Matched subi rescale! zp=" << outZp << "\n");
-    return true;
-}
-
 /// ============================================================================
 /// SwishActivationOpPattern
 /// ============================================================================

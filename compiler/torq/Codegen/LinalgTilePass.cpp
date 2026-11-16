@@ -125,26 +125,6 @@ static FailureOr<int> getMemoryRequirements(linalg::SoftmaxOp op) {
     return 2 * (*inputMemReq) + (*outputMemReq);
 }
 
-// Estimate tile memory requirements for SoftmaxOp
-static FailureOr<int>
-getSoftmaxTileMemoryRequirements(linalg::SoftmaxOp op, const SmallVector<int64_t> &tile) {
-    auto inputType = cast<RankedTensorType>(op.getInput().getType());
-    int64_t elementSize = div_ceil(inputType.getElementTypeBitWidth(), 8);
-
-    int64_t numElements = 1;
-    for (size_t i = 0; i < tile.size(); i++) {
-        if (tile[i] == 0) {
-            numElements *= inputType.getDimSize(i);
-        }
-        else {
-            numElements *= tile[i];
-        }
-    }
-
-    // 2*input + output for softmax
-    return 3 * numElements * elementSize;
-}
-
 static FailureOr<int>
 getTileMemoryRequirements(linalg::LinalgOp op, const SmallVector<int64_t> &tile) {
     auto loopRanges = op.getStaticLoopRanges();
@@ -291,86 +271,6 @@ static FailureOr<SmallVector<int64_t>> findValidParallelTile(linalg::LinalgOp sr
         }
 
         LLVM_DEBUG({ llvm::dbgs() << "Estimated memory requirements: " << *maybeMemReq << "\n"; });
-
-        if (*maybeMemReq <= maxSize) {
-            return tileVector;
-        }
-    }
-
-    return failure();
-}
-
-// Find a valid tile for SoftmaxOp that fits in maxSize memory
-// Does not tile the reduction dimension (softmax dimension)
-static FailureOr<SmallVector<int64_t>> findValidSoftmaxTile(linalg::SoftmaxOp op, int maxSize) {
-    auto inputType = cast<RankedTensorType>(op.getInput().getType());
-    int64_t rank = inputType.getRank();
-    int64_t reductionDim = op.getDimension();
-
-    // Check for static shape
-    if (!inputType.hasStaticShape()) {
-        return failure();
-    }
-
-    SmallVector<int64_t> tileVector(rank, 0);
-
-    // Initialize tile vector - don't tile reduction dimension
-    for (int64_t i = 0; i < rank; i++) {
-        if (i == reductionDim || inputType.getDimSize(i) == 1) {
-            tileVector[i] = 0; // Don't tile this dimension
-        }
-        else {
-            tileVector[i] = inputType.getDimSize(i);
-        }
-    }
-
-    // Check if we have any parallel dimensions to tile
-    bool hasParallelDim = false;
-    for (int64_t i = 0; i < rank; i++) {
-        if (tileVector[i] > 0) {
-            hasParallelDim = true;
-            break;
-        }
-    }
-    if (!hasParallelDim) {
-        return failure();
-    }
-
-    // Try to find a tile that fits in memory
-    while (true) {
-        bool found = false;
-        for (int64_t idx = 0; idx < rank; idx++) {
-            if (tileVector[idx] <= 1) {
-                continue;
-            }
-            // Halve the tile size
-            tileVector[idx] = std::max(tileVector[idx] / 2, int64_t(1));
-            found = true;
-            break;
-        }
-
-        LLVM_DEBUG({
-            llvm::dbgs() << "Softmax tiling vector: [";
-            for (auto size : tileVector) {
-                llvm::dbgs() << size << ", ";
-            }
-            llvm::dbgs() << "]\n";
-        });
-
-        if (!found) {
-            LLVM_DEBUG({
-                llvm::dbgs(
-                ) << "Failed to find valid tile for softmax (cannot make tile small enough)\n";
-            });
-            return failure();
-        }
-
-        auto maybeMemReq = getSoftmaxTileMemoryRequirements(op, tileVector);
-        if (failed(maybeMemReq)) {
-            return failure();
-        }
-
-        LLVM_DEBUG({ llvm::dbgs() << "Softmax estimated memory: " << *maybeMemReq << "\n"; });
 
         if (*maybeMemReq <= maxSize) {
             return tileVector;

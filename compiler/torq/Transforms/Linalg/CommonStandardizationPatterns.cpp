@@ -29,58 +29,6 @@
 
 namespace mlir::syna::torq {
 
-namespace {
-
-// True for a rank-1 single-element input with source map `(d...) -> (0)`,
-// as emitted by upstream's `tosa-to-linalg-named` lowering.
-bool isUnitConstSrcInput(linalg::GenericOp op, OpOperand &input) {
-    assert(input.getOwner() == op.getOperation() && "input must be an operand of op");
-    auto rtt = dyn_cast<RankedTensorType>(input.get().getType());
-    if (!rtt || rtt.getRank() != 1 || !rtt.hasStaticShape() || rtt.getDimSize(0) != 1)
-        return false;
-    AffineMap srcMap = op.getMatchingIndexingMap(&input);
-    if (srcMap.getNumResults() != 1)
-        return false;
-    auto cst = dyn_cast<AffineConstantExpr>(srcMap.getResult(0));
-    return cst && cst.getValue() == 0;
-}
-
-bool isElementwiseNIn1Out(linalg::GenericOp srcOp) {
-    if (srcOp.getNumResults() != 1) {
-        return false;
-    }
-    if (srcOp.getNumDpsInits() != 1) {
-        return false;
-    }
-    if (srcOp.getNumReductionLoops() != 0) {
-        return false;
-    }
-    if (srcOp.getNumParallelLoops() != srcOp.getNumLoops()) {
-        return false;
-    }
-
-    AffineMap outMap = srcOp.getMatchingIndexingMap(srcOp.getDpsInitOperand(0));
-
-    for (OpOperand *inputOperand : srcOp.getDpsInputOperands()) {
-        Value v = inputOperand->get();
-        auto rtt = dyn_cast<RankedTensorType>(v.getType());
-        if (!rtt) {
-            return false;
-        }
-        if (rtt.getRank() == 0) {
-            continue;
-        }
-        if (isUnitConstSrcInput(srcOp, *inputOperand)) {
-            continue;
-        }
-        if (srcOp.getMatchingIndexingMap(inputOperand) != outMap) {
-            return false;
-        }
-    }
-    return true;
-}
-} // namespace
-
 /// The reshape that consumes `value` as its source as its only use, or null.
 static Operation *nextReshapeInChain(Value value) {
     if (!value.hasOneUse() || value.use_begin()->getOperandNumber() != 0)

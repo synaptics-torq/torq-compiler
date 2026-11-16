@@ -267,39 +267,6 @@ KernelEncoding TransposeOp::getKernelEncoding() {
 static KernelEncoding getDenseEncoding() { return {{}, {{}, 64, true}}; }
 static KernelEncoding getNoEncoding() { return {{}, {{}, 0}}; }
 
-template <typename OpT> static KernelEncoding getDenseTwoInputEncoding(OpT op) {
-    auto req = getDenseEncoding();
-
-    req.equalEncodingOperands = {
-        {op.getInput1Mutable().getOperandNumber(), op.getInput2Mutable().getOperandNumber()}
-    };
-
-    /// add padding for small outputs
-    constexpr size_t KERNEL_W_SZ = 64;
-    const RankedTensorType resultType = cast<RankedTensorType>(op->getResult(0).getType());
-    const auto numElements = resultType.getNumElements();
-    assert(resultType.hasStaticShape() && "Output 0 has non-static shape");
-    assert(numElements != ShapedType::kDynamic && "Output 0 has a dynamic number of elements");
-    const auto outSizeBytes = numElements * getScalarSizeBytes(resultType.getElementType());
-    if (outSizeBytes < static_cast<int64_t>(KERNEL_W_SZ)) {
-        req.outputEncoding.paddingAlign = KERNEL_W_SZ;
-    }
-
-#if 0
-    // Actually this method is not requiring the two inputs to be dense, just to have the same enc.
-    // But this request doesn't seem to work. We could try to explicitly requirign each input
-    // to be dense but this also doesn't work (nobody checks the denseOnly flag).
-    // So let's keep this disabled for now, all this can be removed once we have proper support
-    // for elementwise ops with different input strides.
-    KernelTensorEncoding denseTensorEncoding = {{}, 0, true};
-    req.inputEncodings = {
-        {op.getInput1Mutable().getOperandNumber(), denseTensorEncoding},
-        {op.getInput2Mutable().getOperandNumber(), denseTensorEncoding}
-    };
-#endif
-    return req;
-}
-
 static KernelEncoding getDefault1InputEncoding(Operation *op) {
     auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
     return {{}, defaultEncoding(resultType)};

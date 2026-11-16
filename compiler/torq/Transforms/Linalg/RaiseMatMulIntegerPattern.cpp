@@ -329,22 +329,6 @@ static Value peelFoldedWideConstant(Value v, bool &isUnsigned) {
         .getResult();
 }
 
-// Extract a scalar float constant.
-static std::optional<APFloat> getScalarFloatConst(Value v) {
-    auto cst = v.getDefiningOp<arith::ConstantOp>();
-    if (!cst)
-        return std::nullopt;
-    if (auto fa = dyn_cast<FloatAttr>(cst.getValue()))
-        return fa.getValue();
-    if (auto dense = dyn_cast<DenseFPElementsAttr>(cst.getValue())) {
-        if (dense.isSplat())
-            return dense.getSplatValue<APFloat>();
-        if (dense.getNumElements() == 1)
-            return *dense.getValues<APFloat>().begin();
-    }
-    return std::nullopt;
-}
-
 // Extract a scalar or splat integer constant. MLIR integers are signless, so the caller says
 // how to read a narrow one; a value the front end already widened to si32 reads the
 // same either way.

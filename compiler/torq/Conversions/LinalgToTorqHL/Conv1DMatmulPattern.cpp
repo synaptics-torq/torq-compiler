@@ -171,12 +171,6 @@ bool isRaisedMatmulRowsumAuxiliary(linalg::MatmulOp matmulOp) {
            resTy.getShape()[0] == srcTy.getShape()[0];
 }
 
-bool hasConv1DExpandReassociation(tensor::ExpandShapeOp expandOp) {
-    auto reassociation = expandOp.getReassociationIndices();
-    return reassociation.size() == 2 && reassociation[0].size() == 2 && reassociation[0][0] == 0 &&
-           reassociation[0][1] == 1 && reassociation[1].size() == 1 && reassociation[1][0] == 2;
-}
-
 // Lower a rank-2 `linalg.matmul` to torq_hl.fully_connected when its output feeds a
 // pointwise epilogue chain (per-channel bias and any truncf/clamp or
 // requantize/clamp, with optional transpose/expand_shape layout steps), folding that

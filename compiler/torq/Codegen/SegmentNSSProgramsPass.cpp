@@ -71,34 +71,6 @@ static SmallVector<Operation *> computeSplitPoints(Block &block) {
     return splitPoints;
 }
 
-// Helper to compute live-ins for a block: values used in the block but defined elsewhere.
-static void appendLiveIns(Block *blk, SmallVectorImpl<Value> &liveIns) {
-    DenseSet<Value> seen;
-
-    for (auto val : liveIns) {
-        seen.insert(val);
-    }
-
-    for (Operation &innerOp : blk->getOperations()) {
-        for (Value operand : innerOp.getOperands()) {
-            // If operand is defined outside this block or is a block argument of a different block,
-            // it is a live-in.
-            bool definedHere = false;
-            if (auto defOp = operand.getDefiningOp()) {
-                definedHere = (defOp->getBlock() == blk);
-            }
-            else if (auto barg = dyn_cast<BlockArgument>(operand)) {
-                definedHere = (barg.getOwner() == blk);
-            }
-
-            if (!definedHere && !seen.contains(operand)) {
-                seen.insert(operand);
-                liveIns.push_back(operand);
-            }
-        }
-    }
-}
-
 static FailureOr<torq_hl::LoadOp>
 getloadOfNextProgramOp(torq_hl::ProgramOp programOp, Value inactiveLramCodeArea) {
     torq_hl::LoadOp loadNextProgramOp = nullptr;

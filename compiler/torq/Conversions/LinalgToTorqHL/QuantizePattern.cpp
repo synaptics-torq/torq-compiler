@@ -29,10 +29,6 @@ namespace mlir::syna::torq {
 
 namespace {
 
-static bool isHostExecutor(linalg::GenericOp op) {
-    return op && getTargetExecutor(op) == torq_hl::Executor::Host;
-}
-
 static APFloat doubleToAPFloat(double value, const llvm::fltSemantics &semantics) {
     APFloat result(static_cast<float>(value));
     if (&semantics != &llvm::APFloat::IEEEsingle()) {
@@ -49,13 +45,6 @@ createFloatScalarConst(PatternRewriter &rewriter, Operation &op, Type elemType, 
                                         : doubleToAPFloat(value, llvm::APFloat::IEEEsingle());
     auto attr = DenseFPElementsAttr::get(tensorType, apValue);
     return arith::ConstantOp::create(rewriter, op.getLoc(), attr);
-}
-
-static int32_t floatBits(float value) {
-    int32_t bits;
-    static_assert(sizeof(bits) == sizeof(value), "size mismatch");
-    std::memcpy(&bits, &value, sizeof(bits));
-    return bits;
 }
 
 static Value createActOp(
