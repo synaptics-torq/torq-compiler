@@ -16,7 +16,11 @@
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallVectorExtras.h"
 #include "llvm/Support/Debug.h"
+
+#include <cmath>
+#include <limits>
 
 #define DEBUG_TYPE "torq-cast-i32-mul-pattern"
 
@@ -99,92 +103,127 @@ static linalg::GenericOp traceToRescaleOp(Value input) {
     return nullptr;
 }
 
-// Check if all users of an operation (transitively through reshapes/broadcasts) are mul ops
-static bool allUsersAreMuls(Operation *op, llvm::DenseSet<Operation *> &visited) {
-    if (visited.contains(op))
+// True when `user` only reshapes or broadcasts `value`: a collapse_shape, expand_shape or
+// reshape of it, or a one-input generic that reads it and yields the input element unchanged.
+static bool isPassThroughOf(Operation *user, Value value) {
+    if (isa<tensor::CollapseShapeOp, tensor::ExpandShapeOp>(user))
         return true;
-    visited.insert(op);
-
-    for (auto user : op->getUsers()) {
-        // Check if user is a mul
-        if (auto mulOp = dyn_cast<linalg::GenericOp>(user)) {
-            if (isMulOp(mulOp))
-                continue;
-        }
-
-        // Check if user is an intermediate op (reshape, broadcast)
-        if (isa<tensor::CollapseShapeOp, tensor::ExpandShapeOp, tensor::ReshapeOp>(user)) {
-            if (!allUsersAreMuls(user, visited))
-                return false;
-            continue;
-        }
-
-        // Check if it's a broadcast-like generic
-        if (auto genericOp = dyn_cast<linalg::GenericOp>(user)) {
-            auto yieldOp = dyn_cast<linalg::YieldOp>(genericOp.getBody()->getTerminator());
-            if (yieldOp && yieldOp.getNumOperands() == 1 &&
-                isa<BlockArgument>(yieldOp.getOperand(0))) {
-                if (!allUsersAreMuls(user, visited))
-                    return false;
-                continue;
-            }
-        }
-
-        // Any other user disqualifies this rescale
+    if (auto reshapeOp = dyn_cast<tensor::ReshapeOp>(user))
+        return reshapeOp.getSource() == value;
+    auto genericOp = dyn_cast<linalg::GenericOp>(user);
+    if (!genericOp || genericOp.getNumDpsInputs() != 1 || genericOp.getInputs()[0] != value)
         return false;
-    }
+    Block *body = genericOp.getBody();
+    Operation *yieldOp = body->getTerminator();
+    return yieldOp->getNumOperands() == 1 && yieldOp->getOperand(0) == body->getArgument(0);
+}
 
+// True when every use of `value` ends at an op for which `isEnd` is true, directly or through
+// reshapes and broadcasts (see isPassThroughOf). `visited` holds the reshapes and broadcasts
+// already walked.
+static bool allUsesEndAt(
+    Value value, function_ref<bool(Operation *)> isEnd, llvm::DenseSet<Operation *> &visited
+) {
+    for (Operation *user : value.getUsers()) {
+        if (isEnd(user))
+            continue;
+        if (!isPassThroughOf(user, value))
+            return false;
+        if (visited.insert(user).second && !allUsesEndAt(user->getResult(0), isEnd, visited))
+            return false;
+    }
     return true;
 }
 
-// Check if rescale's multiplier/shift allows safe i16 conversion
-// input(int8) - zeroPoint(int8) = int9
-// Validates: (int9 × multiplier / shift) fits in int16
+// True when every use of `rescaleOp`, through reshapes and broadcasts, is an elementwise mul
+static bool allUsersAreMuls(linalg::GenericOp rescaleOp) {
+    auto isMulUser = [](Operation *user) {
+        auto genericOp = dyn_cast<linalg::GenericOp>(user);
+        return genericOp && isMulOp(genericOp);
+    };
+    llvm::DenseSet<Operation *> visited;
+    return allUsesEndAt(rescaleOp.getResult(0), isMulUser, visited);
+}
+
+// True when every use of `value`, through reshapes and broadcasts, is `consumer`
+static bool onlyFeeds(Value value, Operation *consumer) {
+    llvm::DenseSet<Operation *> visited;
+    return allUsesEndAt(value, [&](Operation *user) { return user == consumer; }, visited);
+}
+
+static std::optional<int64_t> getRescaleChainMaxAbs(linalg::GenericOp rescaleOp);
+
+// Return the largest |value - zp|, or std::nullopt. `value` is the apply_scale input of
+// `rescaleOp` before the zero-point subtraction: a constant, integer data read through extsi,
+// or the result of an earlier rescale.
+static std::optional<int64_t>
+getRescaleInputMaxAbs(linalg::GenericOp rescaleOp, Value value, int64_t zp) {
+    if (std::optional<int64_t> constant = getConstIntValue(value))
+        return std::abs(*constant - zp);
+
+    auto extendOp = value.getDefiningOp<arith::ExtSIOp>();
+    auto blockArg = dyn_cast<BlockArgument>(extendOp ? extendOp.getIn() : value);
+    if (!blockArg || blockArg.getOwner() != rescaleOp.getBody() ||
+        blockArg.getArgNumber() >= rescaleOp.getNumDpsInputs())
+        return std::nullopt;
+
+    if (extendOp) {
+        unsigned width = blockArg.getType().getIntOrFloatBitWidth();
+        int64_t minValue = -(int64_t(1) << (width - 1));
+        int64_t maxValue = (int64_t(1) << (width - 1)) - 1;
+        return std::max(std::abs(minValue - zp), std::abs(maxValue - zp));
+    }
+
+    Value input = rescaleOp.getMatchingOpOperand(blockArg)->get();
+    linalg::GenericOp inputRescaleOp = traceToRescaleOp(input);
+    std::optional<int64_t> inputMaxAbs =
+        inputRescaleOp ? getRescaleChainMaxAbs(inputRescaleOp) : std::nullopt;
+    if (!inputMaxAbs)
+        return std::nullopt;
+    return *inputMaxAbs + std::abs(zp);
+}
+
+// Return the largest |value| that the rescale chain ending at `rescaleOp` can produce, or
+// std::nullopt. Each rescale yields apply_scale(x - zp, m, shift) with a constant zp and one
+// constant m and shift. Each apply_scale adds 1 for its rounding.
+static std::optional<int64_t> getRescaleChainMaxAbs(linalg::GenericOp rescaleOp) {
+    auto yieldOp = cast<linalg::YieldOp>(rescaleOp.getBody()->getTerminator());
+    auto applyScale = yieldOp.getValues()[0].getDefiningOp<tosa::ApplyScaleOp>();
+    if (!applyScale)
+        return std::nullopt;
+    MultiplierShiftInfo ms = getMultiplierAndShift(rescaleOp, applyScale, 1, /*quiet=*/true);
+    if (!ms)
+        return std::nullopt;
+
+    Value value = applyScale.getValue();
+    int64_t zp = 0;
+    if (auto sub = value.getDefiningOp<arith::SubIOp>()) {
+        auto subZp = getConstIntValue(sub.getRhs());
+        if (!subZp)
+            return std::nullopt;
+        zp = *subZp;
+        value = sub.getLhs();
+    }
+    std::optional<int64_t> inputMaxAbs = getRescaleInputMaxAbs(rescaleOp, value, zp);
+    if (!inputMaxAbs)
+        return std::nullopt;
+
+    double scaled =
+        std::ldexp(double(*inputMaxAbs) * std::abs(double(ms.multiplier[0])), -int(ms.shift[0]));
+    return static_cast<int64_t>(std::ceil(scaled)) + 1;
+}
+
+// True when every value of the rescale chain ending at `rescaleOp` fits in i16
 static bool isRescaleSafeForI16(linalg::GenericOp rescaleOp) {
-    auto yieldOp = dyn_cast<linalg::YieldOp>(rescaleOp.getBody()->getTerminator());
-    if (!yieldOp || yieldOp.getValues().size() != 1) {
-        LLVM_DEBUG({ llvm::dbgs() << "Yield op has wrong number of values\n"; });
-        return false;
-    }
-
-    // Find apply_scale op
-    tosa::ApplyScaleOp applyScaleOp = nullptr;
-    for (auto &op : rescaleOp.getBody()->without_terminator()) {
-        if (auto applyScale = dyn_cast<tosa::ApplyScaleOp>(op)) {
-            applyScaleOp = applyScale;
-            break;
-        }
-    }
-    if (!applyScaleOp) {
-        LLVM_DEBUG({ llvm::dbgs() << "No apply_scale op found in rescale op\n"; });
-        return false;
-    }
-
-    auto ms = getMultiplierAndShift(rescaleOp, applyScaleOp, 1);
-    if (!ms || ms.multiplier.empty() || ms.shift.empty()) {
-        LLVM_DEBUG({ llvm::dbgs() << "Failed to extract multiplier and shift\n"; });
-        return false;
-    }
-
-    // Check: max(int9) × |multiplier| / 2^shift <= max(int16)
-    // i.e., 255 × |multiplier| <= 32767 × 2^shift
-    int64_t maxInput = 255;    // max magnitude of (i8 - i8)
-    int64_t maxOutput = 32767; // max magnitude for i16
-    int64_t absMultiplier = std::abs(static_cast<int64_t>(ms.multiplier[0]));
-    int64_t shiftValue = 1LL << ms.shift[0];
-
+    std::optional<int64_t> maxAbs = getRescaleChainMaxAbs(rescaleOp);
     LLVM_DEBUG({
-        llvm::dbgs() << "Rescale unsafe for i16: multiplier=" << ms.multiplier[0]
-                     << ", shift=" << static_cast<int>(ms.shift[0])
-                     << ", effective_scale=" << (double(absMultiplier) / shiftValue) << "\n";
+        llvm::dbgs() << "Rescale chain max |value|: ";
+        if (maxAbs)
+            llvm::dbgs() << *maxAbs << "\n";
+        else
+            llvm::dbgs() << "unknown\n";
     });
-
-    if (maxInput * absMultiplier > maxOutput * shiftValue) {
-        LLVM_DEBUG({ llvm::dbgs() << "Effective scale exceeds i16 range\n"; });
-        return false;
-    }
-
-    return true;
+    return maxAbs && *maxAbs <= std::numeric_limits<int16_t>::max();
 }
 
 // Convert rescale op from i32 to i16
@@ -245,7 +284,8 @@ static linalg::GenericOp convertRescaleToI16(linalg::GenericOp rescaleOp, IRRewr
             auto newApplyScale = tosa::ApplyScaleOp::create(
                 rewriter, op.getLoc(), rewriter.getIntegerType(32), newOperands, op.getAttrs()
             );
-            // Truncate i32 -> i16 (safe because isRescaleSafeForI16 already validated range)
+            // Truncate i32 -> i16. The caller checked with getRescaleChainMaxAbs that the
+            // values fit in i16.
             auto truncOp = arith::TruncIOp::create(
                 rewriter, op.getLoc(), rewriter.getIntegerType(16), newApplyScale.getResult()
             );
@@ -312,7 +352,10 @@ void updateMulToI16(linalg::GenericOp mulOp, IRRewriter &rewriter) {
             Value lhs = mapping.lookupOrDefault(mulI.getLhs());
             Value rhs = mapping.lookupOrDefault(mulI.getRhs());
 
-            // If operands are now i16, create i16*i16->i16 multiply
+            // If operands are now i16, create i16*i16->i16 multiply. This muli does not wrap:
+            // its type only tells the backend that the operands fit in i16. MulPattern lowers
+            // muli + extsi to one widening i16 x i16 -> i32 hardware multiply, and code that
+            // evaluates this body must read it the same way (see PreCalcI8TablePattern).
             if (lhs.getType().isInteger(16) && rhs.getType().isInteger(16)) {
                 Value mul16 = arith::MulIOp::create(
                     rewriter, mulI.getLoc(), rewriter.getIntegerType(16), lhs, rhs,
@@ -346,9 +389,46 @@ void updateMulToI16(linalg::GenericOp mulOp, IRRewriter &rewriter) {
     rewriter.replaceOp(mulOp, newMulOp.getResults());
 }
 
+// Rebuild the generic `op` on the current types of its inputs, with an i16 result. The body
+// is cloned, and each i32 result in it becomes i16. So the body must only pass on or add and
+// subtract its inputs, which are already i16: a broadcast, an addi or a subi.
+static linalg::GenericOp rebuildGenericAsI16(linalg::GenericOp op, IRRewriter &rewriter) {
+    Type i16 = rewriter.getIntegerType(16);
+    auto resultType = cast<RankedTensorType>(op.getResult(0).getType()).clone(i16);
+    Location loc = op.getLoc();
+
+    rewriter.setInsertionPoint(op);
+    Value init = tensor::EmptyOp::create(rewriter, loc, resultType.getShape(), i16);
+    auto newOp = linalg::GenericOp::create(
+        rewriter, loc, TypeRange{resultType}, op.getInputs(), ValueRange{init},
+        op.getIndexingMapsArray(), op.getIteratorTypesArray()
+    );
+    SmallVector<Type> argTypes = llvm::map_to_vector(op.getInputs(), [](Value input) {
+        return getElementTypeOrSelf(input.getType());
+    });
+    argTypes.push_back(i16);
+    Block *newBlock = rewriter.createBlock(
+        &newOp.getRegion(), newOp.getRegion().end(), argTypes,
+        SmallVector<Location>(argTypes.size(), loc)
+    );
+
+    IRMapping mapping;
+    mapping.map(op.getBody()->getArguments(), newBlock->getArguments());
+    for (Operation &bodyOp : *op.getBody()) {
+        Operation *newBodyOp = rewriter.clone(bodyOp, mapping);
+        for (OpResult result : newBodyOp->getResults()) {
+            if (result.getType().isInteger(32))
+                result.setType(i16);
+        }
+    }
+
+    rewriter.replaceOp(op, newOp.getResult(0));
+    return newOp;
+}
+
 } // namespace
 
-// Update intermediate ops (collapse_shape, broadcasts) to use i16
+// Update intermediate ops (collapse_shape, expand_shape, reshape, broadcasts) to use i16
 void updateIntermediateOps(
     Operation *op, IRRewriter &rewriter, llvm::DenseSet<Operation *> &processed
 ) {
@@ -394,76 +474,26 @@ void updateIntermediateOps(
                 updateIntermediateOps(newExpandOp.getOperation(), rewriter, processed);
             }
         }
+        // Update reshape
+        else if (auto reshapeOp = dyn_cast<tensor::ReshapeOp>(user)) {
+            if (isPassThroughOf(reshapeOp, op->getResult(0))) {
+                auto newResultType =
+                    cast<RankedTensorType>(reshapeOp.getType()).clone(rewriter.getIntegerType(16));
+
+                rewriter.setInsertionPoint(reshapeOp);
+                auto newReshapeOp = tensor::ReshapeOp::create(
+                    rewriter, reshapeOp.getLoc(), newResultType, reshapeOp.getSource(),
+                    reshapeOp.getShape()
+                );
+                rewriter.replaceOp(reshapeOp, newReshapeOp.getResult());
+                updateIntermediateOps(newReshapeOp.getOperation(), rewriter, processed);
+            }
+        }
         // Update broadcast-like generic
         else if (auto genericOp = dyn_cast<linalg::GenericOp>(user)) {
-            auto yieldOp = dyn_cast<linalg::YieldOp>(genericOp.getBody()->getTerminator());
-            if (yieldOp && yieldOp.getNumOperands() == 1 &&
-                isa<BlockArgument>(yieldOp.getOperand(0))) {
-                // Check if input is i16
-                bool hasI16Input = false;
-                for (auto input : genericOp.getInputs()) {
-                    auto inputType = dyn_cast<RankedTensorType>(input.getType());
-                    if (inputType && inputType.getElementType().isInteger(16)) {
-                        hasI16Input = true;
-                        break;
-                    }
-                }
-
-                if (hasI16Input) {
-                    auto resultType = cast<RankedTensorType>(genericOp.getResult(0).getType());
-                    auto newResultType =
-                        RankedTensorType::get(resultType.getShape(), rewriter.getIntegerType(16));
-
-                    rewriter.setInsertionPoint(genericOp);
-
-                    // Create new output tensor
-                    Value newInit = tensor::EmptyOp::create(
-                        rewriter, genericOp.getLoc(), newResultType.getShape(),
-                        newResultType.getElementType()
-                    );
-
-                    auto newGenericOp = linalg::GenericOp::create(
-                        rewriter, genericOp.getLoc(), TypeRange{newResultType},
-                        genericOp.getInputs(), ValueRange{newInit},
-                        genericOp.getIndexingMapsArray(), genericOp.getIteratorTypesArray()
-                    );
-
-                    // Clone body with updated types
-                    Block &oldBlock = genericOp.getRegion().front();
-                    SmallVector<Type> argTypes;
-                    for (auto arg : oldBlock.getArguments()) {
-                        if (arg.getArgNumber() < genericOp.getNumDpsInputs()) {
-                            auto inputType = cast<RankedTensorType>(
-                                genericOp.getInputs()[arg.getArgNumber()].getType()
-                            );
-                            argTypes.push_back(inputType.getElementType());
-                        }
-                        else {
-                            argTypes.push_back(rewriter.getIntegerType(16));
-                        }
-                    }
-
-                    Block *newBlock = rewriter.createBlock(
-                        &newGenericOp.getRegion(), newGenericOp.getRegion().end(), argTypes,
-                        SmallVector<Location>(argTypes.size(), genericOp.getLoc())
-                    );
-                    IRMapping mapping;
-                    for (auto [oldArg, newArg] :
-                         llvm::zip(oldBlock.getArguments(), newBlock->getArguments())) {
-                        mapping.map(oldArg, newArg);
-                    }
-
-                    rewriter.setInsertionPointToStart(newBlock);
-                    auto oldYield = cast<linalg::YieldOp>(oldBlock.getTerminator());
-                    SmallVector<Value> newYields;
-                    for (auto val : oldYield.getValues()) {
-                        newYields.push_back(mapping.lookup(val));
-                    }
-                    linalg::YieldOp::create(rewriter, oldYield.getLoc(), newYields);
-
-                    rewriter.replaceOp(genericOp, newGenericOp.getResult(0));
-                    updateIntermediateOps(newGenericOp.getOperation(), rewriter, processed);
-                }
+            if (isPassThroughOf(genericOp, op->getResult(0))) {
+                auto newGenericOp = rebuildGenericAsI16(genericOp, rewriter);
+                updateIntermediateOps(newGenericOp.getOperation(), rewriter, processed);
             }
         }
     }
@@ -567,14 +597,13 @@ void convertRescaleI32ToI16ForMul(FunctionOpInterface funcOp, IRRewriter &rewrit
         }
 
         for (auto rescaleOp : inputRescaleOps) {
-            llvm::DenseSet<Operation *> visited;
             // Check that all these rescale ops are ONLY used by elementwise mul ops
             // (possibly through intermediate reshape/broadcast operations)
-            if (!allUsersAreMuls(rescaleOp.getOperation(), visited)) {
+            if (!allUsersAreMuls(rescaleOp)) {
                 LLVM_DEBUG({ llvm::dbgs() << "Rescale op has non-mul users\n"; });
                 return;
             }
-            // Verify rescale outputs fit in i16: (int9 × multiplier/shift) <= int16
+            // Verify rescale outputs fit in i16
             if (!isRescaleSafeForI16(rescaleOp)) {
                 LLVM_DEBUG({ llvm::dbgs() << "Rescale produces values exceeding i16 range\n"; });
                 return;
@@ -600,6 +629,109 @@ void convertRescaleI32ToI16ForMul(FunctionOpInterface funcOp, IRRewriter &rewrit
     // Update mul operations to use i16 inputs
     for (auto mulOp : mulOpsToUpdate) {
         updateMulToI16(mulOp, rewriter);
+    }
+}
+
+// Return the elementwise addi or subi generic with two i32 block-argument operands that
+// defines `value`, or null.
+static linalg::GenericOp getI32AddSubOp(Value value) {
+    auto op = value.getDefiningOp<linalg::GenericOp>();
+    if (!op || op.getNumDpsInputs() != 2 ||
+        !isa_and_nonnull<arith::AddIOp, arith::SubIOp>(getElementwiseBinaryOp(op)))
+        return {};
+    if (!llvm::all_of(op.getDpsInputs(), [](Value input) {
+            return getElementTypeOrSelf(input.getType()).isInteger(32);
+        }))
+        return {};
+    return op;
+}
+
+// Return the input that the elementwise mul `mulOp` multiplies by itself, or null. Both muli
+// operands must read the same tensor through the same indexing map.
+static Value getSquaredInput(linalg::GenericOp mulOp) {
+    auto mulI = dyn_cast_or_null<arith::MulIOp>(getElementwiseBinaryOp(mulOp));
+    if (!mulI)
+        return {};
+    auto lhs = dyn_cast<BlockArgument>(mulI.getLhs());
+    auto rhs = dyn_cast<BlockArgument>(mulI.getRhs());
+    if (!lhs || !rhs || lhs.getArgNumber() >= mulOp.getNumDpsInputs() ||
+        rhs.getArgNumber() >= mulOp.getNumDpsInputs())
+        return {};
+    OpOperand *lhsOperand = mulOp.getMatchingOpOperand(lhs);
+    OpOperand *rhsOperand = mulOp.getMatchingOpOperand(rhs);
+    if (lhsOperand->get() != rhsOperand->get() ||
+        mulOp.getMatchingIndexingMap(lhsOperand) != mulOp.getMatchingIndexingMap(rhsOperand))
+        return {};
+    return lhsOperand->get();
+}
+
+// A mul of a sum or difference with itself, and the two rescales that feed the sum or difference.
+struct SquaredAddSub {
+    linalg::GenericOp mulOp;
+    linalg::GenericOp addSubOp;
+    SmallVector<linalg::GenericOp> rescaleOps;
+};
+
+// Return the square `mulOp` computes when its range fits in i16, or std::nullopt:
+//   %a = rescale(...) : i32   %b = rescale(...) : i32
+//   %d = subi(%a, %b) : i32   %m = muli(%d, %d) : i32
+static std::optional<SquaredAddSub> matchSquaredAddSub(linalg::GenericOp mulOp) {
+    Value squaredInput = getSquaredInput(mulOp);
+    linalg::GenericOp addSubOp = squaredInput ? getI32AddSubOp(squaredInput) : nullptr;
+    if (!addSubOp)
+        return std::nullopt;
+    if (!llvm::all_of(addSubOp->getUsers(), [&](Operation *user) { return user == mulOp; })) {
+        LLVM_DEBUG(llvm::dbgs() << "Squared add/sub has other users\n");
+        return std::nullopt;
+    }
+
+    SmallVector<linalg::GenericOp> rescaleOps;
+    int64_t maxAbs = 0;
+    for (Value input : addSubOp.getInputs()) {
+        linalg::GenericOp rescaleOp = traceToRescaleOp(input);
+        std::optional<int64_t> inputMaxAbs =
+            rescaleOp ? getRescaleChainMaxAbs(rescaleOp) : std::nullopt;
+        if (!inputMaxAbs || !onlyFeeds(rescaleOp.getResult(0), addSubOp)) {
+            LLVM_DEBUG(
+                llvm::dbgs() << "Squared add/sub input is not a rescale chain of known range "
+                                "that only feeds the add/sub\n"
+            );
+            return std::nullopt;
+        }
+        rescaleOps.push_back(rescaleOp);
+        maxAbs += *inputMaxAbs;
+    }
+    if (rescaleOps[0] == rescaleOps[1]) {
+        LLVM_DEBUG(llvm::dbgs() << "Squared add/sub reads the same rescale twice\n");
+        return std::nullopt;
+    }
+    if (maxAbs > std::numeric_limits<int16_t>::max()) {
+        LLVM_DEBUG(llvm::dbgs() << "Squared add/sub can exceed i16: " << maxAbs << "\n");
+        return std::nullopt;
+    }
+    return SquaredAddSub{mulOp, addSubOp, rescaleOps};
+}
+
+// Narrow the square of a sum or difference of two rescales to i16 when its range allows.
+// The NPU cannot multiply two i32 tensors. When |%a| + |%b| fits in i16 (see
+// matchSquaredAddSub), %a, %b and %d become i16, and the mul takes the same form as
+// convertRescaleI32ToI16ForMul gives it. The square can need up to 30 bits; the i16 muli
+// widens (see updateMulToI16).
+void convertSquaredAddSubToI16(FunctionOpInterface funcOp, IRRewriter &rewriter) {
+    SmallVector<SquaredAddSub> squares;
+    funcOp.walk([&](linalg::GenericOp mulOp) {
+        if (std::optional<SquaredAddSub> square = matchSquaredAddSub(mulOp))
+            squares.push_back(std::move(*square));
+    });
+
+    for (SquaredAddSub &square : squares) {
+        llvm::DenseSet<Operation *> processedOps;
+        for (linalg::GenericOp rescaleOp : square.rescaleOps) {
+            auto newRescaleOp = convertRescaleToI16(rescaleOp, rewriter);
+            updateIntermediateOps(newRescaleOp.getOperation(), rewriter, processedOps);
+        }
+        rebuildGenericAsI16(square.addSubOp, rewriter);
+        updateMulToI16(square.mulOp, rewriter);
     }
 }
 
@@ -756,6 +888,7 @@ static void foldMulInputZeroPoints(FunctionOpInterface funcOp, IRRewriter &rewri
 
 void populateCastI32MulPatterns(FunctionOpInterface funcOp, IRRewriter &rewriter) {
     convertRescaleI32ToI16ForMul(funcOp, rewriter);
+    convertSquaredAddSubToI16(funcOp, rewriter);
     if (clFoldMulInputZp)
         foldMulInputZeroPoints(funcOp, rewriter);
 }

@@ -101,6 +101,11 @@ CASES = {
     "model472_mult16x8_neg_s2v": _lambda((10, 10, 3), lambda x: x * -2.0),
     "model473_mult16x8_pos_v2s": _lambda((10, 10, 3), lambda x: x * 2.0),
     "model474_sub16x8_pos_v2s": _lambda((10, 10, 3), lambda t: t - 1.0),
+    # (x - mean(x))^2 of a LayerNorm: an int8 SQUARED_DIFFERENCE that imports as an i32 x i32 mul
+    "squared_difference_mean_1x1x238": _lambda(
+        (1, 1, 238),
+        lambda t: tf.math.squared_difference(t, tf.reduce_mean(t, axis=-1, keepdims=True)),
+    ),
 }
 
 # The int8 variants of these cases compile to a single table lookup, which other
@@ -121,4 +126,6 @@ CONFIG = {
     "model472_mult16x8_neg_s2v": {"quantize": ("int16",)},
     "model473_mult16x8_pos_v2s": {"quantize": ("int16",)},
     "model474_sub16x8_pos_v2s": {"quantize": ("int16",)},
+    # The TFLite to TOSA converter has no int16 SQUARED_DIFFERENCE
+    "squared_difference_mean_1x1x238": {"quantize": ("int8",)},
 }
