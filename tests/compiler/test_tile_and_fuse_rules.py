@@ -4,6 +4,8 @@ import subprocess
 
 import pytest
 
+from torq.testing.iree import MODELS_DIR
+
 # IR checks for fusion and slicing decisions that otherwise only show up as
 # compile-time profile regressions. Each test compiles a small model and reads
 # one pass's IR dump for the real dispatch (not the tile-fit probe copies).
@@ -210,6 +212,58 @@ def test_silu_gate_is_sliced(torq_compiler, tmp_path):
     layers on one slice, 1.5x main."""
     dump = dispatch_dump_after(torq_compiler, tmp_path, SILU, "torq-linalg-slicing")
     assert "scf.forall" in dump, f"the SiLU group was not sliced:\n{dump}"
+
+
+# Ops that read a table with tensor.extract. "i8-table" is the lookup that ExtractOpPattern lowers
+# to an int8 torq_hl.table: index_cast(x) + 128 into a constant int8 table, on a shape with a
+# dimension that the slices divide evenly. "no-divisible-dim" changes the shape, and "i16-table"
+# the table type (I16ExtractTableOpPattern). "dynamic-gather" is the existing tosa.gather test of a
+# table argument (a torq_hl.gather).
+def table_extract(variant):
+    if variant == "dynamic-gather":
+        return (MODELS_DIR / "tosa_ops" / "gather-i32.mlir").read_text()
+    shape = "1x3x10x10" if variant == "no-divisible-dim" else "1x32x8x8"
+    out_type = "i16" if variant == "i16-table" else "i8"
+    lut_values = ", ".join(str((i * 37) % 256 - 128) for i in range(256))
+    return f"""
+#map = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
+module {{
+  func.func @main(%x: tensor<{shape}xi8>) -> tensor<{shape}x{out_type}> {{
+    %cst = arith.constant dense<[{lut_values}]> : tensor<256x{out_type}>
+    %c128 = arith.constant 128 : index
+    %e = tensor.empty() : tensor<{shape}x{out_type}>
+    %y = linalg.generic {{indexing_maps = [#map, #map], iterator_types = ["parallel", "parallel", "parallel", "parallel"]}} ins(%x : tensor<{shape}xi8>) outs(%e : tensor<{shape}x{out_type}>) {{
+    ^bb0(%in: i8, %out: {out_type}):
+      %i = arith.index_cast %in : i8 to index
+      %j = arith.addi %i, %c128 : index
+      %v = tensor.extract %cst[%j] : tensor<256x{out_type}>
+      linalg.yield %v : {out_type}
+    }} -> tensor<{shape}x{out_type}>
+    return %y : tensor<{shape}x{out_type}>
+  }}
+}}
+"""
+
+
+@pytest.mark.ci
+@pytest.mark.parametrize(
+    "variant,sliced",
+    [
+        ("i8-table", True),
+        ("no-divisible-dim", False),
+        ("i16-table", False),
+        ("dynamic-gather", False),
+    ],
+)
+def test_table_lookup_slicing(torq_compiler, tmp_path, variant, sliced):
+    """A lookup that becomes an int8 torq_hl.table is split across the slices: its LUT is in the
+    slice configuration, not in LRAM. A gather reads its table from memory and an int16 lookup
+    has its own lowering, so they stay on one slice, and so does a lookup with no dimension that
+    the slices divide evenly. A constant gather has no NSS lowering, so it is not in the test."""
+    dump = dispatch_dump_after(torq_compiler, tmp_path, table_extract(variant), "torq-linalg-slicing")
+    assert ("scf.forall" in dump) == sliced, (
+        f"the {variant} op is {'not ' if sliced else ''}sliced:\n{dump}"
+    )
 
 
 RECIPROCAL = """

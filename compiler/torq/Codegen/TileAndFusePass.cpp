@@ -2431,7 +2431,8 @@ static int64_t makeSliceAlignedTileSize(int64_t sliceCount, int64_t domainSize, 
 // nullopt if LinalgSlicing leaves the principal on one slice. The slicing checks
 // are shared with ElementwisePattern, ReciprocalPattern and ConvPattern.
 static std::optional<int64_t> getSlicedDomain(
-    Operation *principalOp, TilingInterface consumerOp, ArrayRef<int64_t> iterDomainSizes
+    Operation *principalOp, TilingInterface consumerOp, ArrayRef<int64_t> iterDomainSizes,
+    int64_t sliceCount
 ) {
     std::optional<int64_t> dim;
     if (std::optional<int64_t> convDim = getConvSlicingDim(principalOp)) {
@@ -2446,7 +2447,7 @@ static std::optional<int64_t> getSlicedDomain(
             dim = *pos;
     }
     else {
-        dim = getElementwiseSlicingDim(principalOp);
+        dim = getElementwiseSlicingDim(principalOp, sliceCount);
     }
     if (!dim)
         return std::nullopt;
@@ -2481,7 +2482,7 @@ static void applySliceAlignedTiles(
         if (Operation *found = getFuseGroupPrincipalOpBackward(tiOp))
             principalOp = found;
 
-    std::optional<int64_t> dim = getSlicedDomain(principalOp, tiOp, iterDomainSizes);
+    std::optional<int64_t> dim = getSlicedDomain(principalOp, tiOp, iterDomainSizes, sliceCount);
     if (!dim || !tilingInfo.tilingOrder.contains(*dim))
         return;
     int64_t domainSize = iterDomainSizes[*dim];

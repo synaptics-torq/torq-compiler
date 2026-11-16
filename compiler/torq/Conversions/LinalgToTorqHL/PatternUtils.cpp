@@ -3436,6 +3436,65 @@ LogicalResult foldForwardDepthToSpace(
     return success();
 }
 
+LogicalResult detectTableOp(
+    linalg::GenericOp op, tensor::ExtractOp extract, Type inputElementType, bool &isTableOp,
+    StringRef *reason
+) {
+    isTableOp = false;
+
+    auto indices = extract.getIndices();
+    if (indices.empty())
+        return success();
+
+    auto addOp = indices[0].getDefiningOp<arith::AddIOp>();
+    if (!addOp)
+        return success();
+
+    isTableOp = true;
+
+    if (!inputElementType.isInteger(8)) {
+        if (reason)
+            *reason = "Only i8 TableOp supported";
+        return failure();
+    }
+
+    // If the LUT is i16 (from swish table fusion), defer to I16ExtractTableOpPattern.
+    auto tableType = dyn_cast<RankedTensorType>(extract.getTensor().getType());
+    if (tableType && !tableType.getElementType().isInteger(8)) {
+        if (reason)
+            *reason = "Table tensor is not i8; deferring to I16ExtractTableOpPattern";
+        return failure();
+    }
+
+    auto indexCastOp = dyn_cast<arith::IndexCastOp>(op.getBody()->front());
+    if (!indexCastOp) {
+        if (reason)
+            *reason = "Expected firstOp is a arith.indexCast op";
+        return failure();
+    }
+
+    // One operand of addOp must be the indexCastOp result.
+    Value indexCastResult = indexCastOp.getResult();
+    if (indexCastResult != addOp.getLhs() && indexCastResult != addOp.getRhs()) {
+        if (reason)
+            *reason = "we expect one addOp operand from indexCastOp";
+        return failure();
+    }
+
+    return success();
+}
+
+bool isConstantTableLookup(linalg::GenericOp op) {
+    if (op.getNumDpsInputs() != 1 || op->getNumResults() != 1)
+        return false;
+    auto extract = op.getBody()->getTerminator()->getOperand(0).getDefiningOp<tensor::ExtractOp>();
+    if (!extract || !extract.getTensor().getDefiningOp<arith::ConstantOp>())
+        return false;
+    Type inputElementType = cast<ShapedType>(op.getDpsInputs()[0].getType()).getElementType();
+    bool isTableOp = false;
+    return succeeded(detectTableOp(op, extract, inputElementType, isTableOp)) && isTableOp;
+}
+
 bool isRoundingRightShiftOp(linalg::GenericOp op, arith::ShRSIOp &shrsiOp1) {
     if (op.getNumDpsInputs() > 2 || op.getNumDpsInits() != 1) {
         return false;

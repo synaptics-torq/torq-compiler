@@ -131,55 +131,6 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
         return success();
     }
 
-    // Detect whether `tensorExtractOp` is a table-lookup (LUT) op by checking
-    // that the extract index is produced by an addi whose one operand is the
-    // result of the index_cast at the top of the block (the +128 bias pattern).
-    // Sets `isTableOp` to true when the pattern is recognised and validates:
-    //   - input element type is i8,
-    //   - the LUT tensor element type is i8 (non-i8 defers to I16ExtractTableOpPattern),
-    //   - the first body op is an index_cast whose result feeds the addi.
-    // Returns failure() if the pattern is partially recognised but invalid.
-    // Returns success() with isTableOp=false when the pattern is absent.
-    LogicalResult detectTableOp(
-        linalg::GenericOp srcOp, tensor::ExtractOp tensorExtractOp, Type inputElementType,
-        Operation &firstOp, PatternRewriter &rewriter, bool &isTableOp
-    ) const {
-        isTableOp = false;
-
-        auto indices = tensorExtractOp.getIndices();
-        if (indices.empty())
-            return success();
-
-        auto addOp = indices[0].getDefiningOp<arith::AddIOp>();
-        if (!addOp)
-            return success();
-
-        isTableOp = true;
-
-        if (!inputElementType.isInteger(8))
-            return rewriter.notifyMatchFailure(srcOp, "Only i8 TableOp supported");
-
-        // If the LUT is i16 (from swish table fusion), defer to I16ExtractTableOpPattern.
-        auto tableType = dyn_cast<RankedTensorType>(tensorExtractOp.getTensor().getType());
-        if (tableType && !tableType.getElementType().isInteger(8))
-            return rewriter.notifyMatchFailure(
-                srcOp, "Table tensor is not i8; deferring to I16ExtractTableOpPattern"
-            );
-
-        auto indexCastOp = dyn_cast<arith::IndexCastOp>(firstOp);
-        if (!indexCastOp)
-            return rewriter.notifyMatchFailure(srcOp, "Expected firstOp is a arith.indexCast op");
-
-        // One operand of addOp must be the indexCastOp result.
-        Value indexCastResult = indexCastOp.getResult();
-        if (indexCastResult != addOp.getLhs() && indexCastResult != addOp.getRhs())
-            return rewriter.notifyMatchFailure(
-                srcOp, "we expect one addOp operand from indexCastOp"
-            );
-
-        return success();
-    }
-
     LogicalResult demoteGatherIndicesToI32(
         linalg::GenericOp srcOp, Value indices, PatternRewriter &rewriter, Value &demotedIndices
     ) const {
@@ -480,14 +431,10 @@ class ExtractOpPattern : public OpRewritePattern<linalg::GenericOp> {
         auto inputType = dyn_cast<RankedTensorType>(input.getType());
         auto inputElementType = inputType.getElementType();
 
-        auto &block = srcOp.getRegion().front();
-        auto &firstOp = block.front();
-
         bool isTableOp = false;
-        if (failed(detectTableOp(
-                srcOp, tensorExtractOp, inputElementType, firstOp, rewriter, isTableOp
-            )))
-            return failure();
+        StringRef reason;
+        if (failed(detectTableOp(srcOp, tensorExtractOp, inputElementType, isTableOp, &reason)))
+            return rewriter.notifyMatchFailure(srcOp, reason);
 
         auto maybeConst = outlineAndReturnOps(valuesTensor);
         bool valuesAreConstant = succeeded(maybeConst);

@@ -417,6 +417,27 @@ LogicalResult foldForwardDepthToSpace(
 
 bool isRoundingRightShiftOp(linalg::GenericOp op, arith::ShRSIOp &shrsiOp1);
 
+// Detect whether `extract` (in the body of `op`) is a table-lookup (LUT) op by checking that the
+// extract index is produced by an addi whose one operand is the result of the index_cast at the
+// top of the block (the +128 bias pattern). Sets `isTableOp` to true when the pattern is
+// recognised and validates:
+//   - input element type is i8,
+//   - the LUT tensor element type is i8 (non-i8 defers to I16ExtractTableOpPattern),
+//   - the first body op is an index_cast whose result feeds the addi.
+// Returns failure() (with `reason`) if the pattern is partially recognised but invalid.
+// Returns success() with isTableOp=false when the pattern is absent.
+// ExtractOpPattern lowers a table-lookup op to a torq_hl.table, and other constant extracts to a
+// torq_hl.gather; LinalgSlicing uses the same detection (isConstantTableLookup).
+LogicalResult detectTableOp(
+    linalg::GenericOp op, tensor::ExtractOp extract, Type inputElementType, bool &isTableOp,
+    StringRef *reason = nullptr
+);
+
+// True when `op` becomes an int8 torq_hl.table (see ExtractOpPattern): it has one int8 input and
+// one result, and it yields a tensor.extract from a constant table that detectTableOp accepts as
+// a table-lookup op. Constant gathers and lookups in an int16 table do not qualify.
+bool isConstantTableLookup(linalg::GenericOp op);
+
 struct LinalgTableMatchInfo {
     Value input;                  // i16 input being looked up
     DenseIntElementsAttr lutData; // tensor<513xi16> LUT

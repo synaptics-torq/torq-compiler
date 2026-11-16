@@ -34,9 +34,11 @@ std::optional<size_t> getSlicingIterationDomainIndex(Operation *op);
 
 // The dimension LinalgSlicing slices `op` on when `op` is the principal of an
 // elementwise generic or reciprocal group that it slices, or nullopt (with the
-// reason) when it leaves `op` on one slice. TileAndFusePass uses it to round tile
-// sizes only for ops that are sliced. Defined in LinalgSlicingPass.cpp.
-std::optional<int64_t> getElementwiseSlicingDim(Operation *op, StringRef *reason = nullptr);
+// reason) when it leaves `op` on one slice. `sliceCount` is the number of slices
+// that share the work. TileAndFusePass uses it to round tile sizes only for ops
+// that are sliced. Defined in LinalgSlicingPass.cpp.
+std::optional<int64_t>
+getElementwiseSlicingDim(Operation *op, int64_t sliceCount, StringRef *reason = nullptr);
 
 // The iteration-domain dimension LinalgSlicing slices `op` on when `op` is a conv, depthwise conv
 // or pool principal that its ConvPattern slices, or nullopt. Defined in LinalgSlicingPass.cpp.

@@ -607,7 +607,8 @@ std::optional<int64_t> getConvSlicingDim(Operation *op) {
     return *dim;
 }
 
-std::optional<int64_t> getElementwiseSlicingDim(Operation *op, StringRef *reason) {
+std::optional<int64_t>
+getElementwiseSlicingDim(Operation *op, int64_t sliceCount, StringRef *reason) {
     auto skip = [&](StringRef why) -> std::optional<int64_t> {
         if (reason)
             *reason = why;
@@ -649,11 +650,18 @@ std::optional<int64_t> getElementwiseSlicingDim(Operation *op, StringRef *reason
         // tiling here would read the whole extracted tensor per tile. Leave them
         // un-tiled so LinalgToTorqHL lowers them to torq_hl.gather/torq_hl.table,
         // which the downstream NSS lowering tiles to the LRAM/DTCM budget.
-        bool hasExtract =
-            genericOp.getBody()->walk([](tensor::ExtractOp) { return WalkResult::interrupt(); }
-            ).wasInterrupted();
-        if (hasExtract)
-            return skip("gather/table extract is not sliceable as elementwise, skipping slicing");
+        // A lookup in a constant table (torq_hl.table) is sliced: its table is a static ACT
+        // LUT in the slice configuration, not a tensor that each tile loads. It goes through the
+        // checks below like any elementwise op; only its slicing dimension differs (see the
+        // end of this function).
+        if (!isConstantTableLookup(genericOp)) {
+            bool hasExtract =
+                genericOp.getBody()->walk([](tensor::ExtractOp) { return WalkResult::interrupt(); }
+                ).wasInterrupted();
+            if (hasExtract)
+                return skip("gather/table extract is not sliceable as elementwise, skipping slicing"
+                );
+        }
 
         // Skip linalg.generic ops that contain a narrowing integer/float
         // truncation (arith.trunci / arith.truncf) and are not part of any
@@ -685,11 +693,18 @@ std::optional<int64_t> getElementwiseSlicingDim(Operation *op, StringRef *reason
         if (groupHasResidualAdd(op, fuseGroup))
             return skip("skip slicing fuse group that includes a residual add");
 
-    // Resolve the slicing dimension: leftmost non-unit.
+    // Resolve the slicing dimension: leftmost non-unit. A table lookup costs one program and
+    // one LUT load per piece, and a dimension that the slices do not divide evenly is peeled
+    // into more pieces than the second slice saves, so a lookup takes the leftmost dimension
+    // that divides evenly.
+    auto genericOp = dyn_cast<linalg::GenericOp>(op);
+    bool isLookup = genericOp && isConstantTableLookup(genericOp);
     ArrayRef<int64_t> shape = cast<ShapedType>(op->getResultTypes()[0]).getShape();
     for (auto [i, size] : llvm::enumerate(shape))
-        if (size > 1)
+        if (size > 1 && (!isLookup || size % (sliceCount * kGrouping) == 0))
             return i;
+    if (isLookup)
+        return skip("table lookup with no evenly divisible dimension, skipping slicing");
     return skip("no dimension to slice");
 }
 
@@ -706,7 +721,8 @@ struct ElementwisePattern : public OpRewritePattern<linalg::GenericOp> {
     LogicalResult
     matchAndRewrite(linalg::GenericOp genericOp, PatternRewriter &rewriter) const override {
         StringRef reason;
-        std::optional<int64_t> slicingIter = getElementwiseSlicingDim(genericOp, &reason);
+        std::optional<int64_t> slicingIter =
+            getElementwiseSlicingDim(genericOp, sliceCount_, &reason);
         if (!slicingIter)
             return rewriter.notifyMatchFailure(genericOp, reason);
         return peelAndSlice(rewriter, genericOp, *slicingIter, kGrouping, sliceCount_);
@@ -728,7 +744,8 @@ struct ReciprocalPattern : public OpRewritePattern<linalg::ElementwiseOp> {
         if (reciprocalOp.getKind() != linalg::ElementwiseKind::reciprocal)
             return rewriter.notifyMatchFailure(reciprocalOp, "not a reciprocal");
         StringRef reason;
-        std::optional<int64_t> slicingIter = getElementwiseSlicingDim(reciprocalOp, &reason);
+        std::optional<int64_t> slicingIter =
+            getElementwiseSlicingDim(reciprocalOp, sliceCount_, &reason);
         if (!slicingIter)
             return rewriter.notifyMatchFailure(reciprocalOp, reason);
         return peelAndSlice(rewriter, reciprocalOp, *slicingIter, kGrouping, sliceCount_);
