@@ -586,6 +586,8 @@ class IRam : public SliceRam {
 
   public:
     // Load the IRAM with (input) data.
+    // The rows of a strided outer dim are loaded in one transfer (gathered) when they fit (see
+    // gather()). The ALU then reads them one after the other.
     IData load(const LData &data);
 
     // Load the rows of a table selected by indices (gather).
@@ -602,9 +604,8 @@ class IRam : public SliceRam {
     //   an accumulation loop
     IData load(const GLData &data);
 
-    // Get max gathering supported in the load() operation
-    // Gathering indicates the max number of different addresses that can be generated in parallel.
-    // Note: only blocks of specific sizes can be gathered (16, 32).
+    // Max number of rows load() can read in one transfer (gather): the outer dim of the data must
+    // have 2 or 4 rows, at any stride, and each row must fit in 64 / rows bytes (32 or 16).
     int gather() const;
 
     const char *name() const override;

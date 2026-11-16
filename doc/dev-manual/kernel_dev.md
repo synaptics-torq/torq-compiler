@@ -919,10 +919,11 @@ int32 partials as two halves, the values in the first half and the shift amounts
 both packed at the element size (4 int8, 2 int16 or 1 int32 per partial).
 
 To build such a row, stack the two inputs with `LData::stack()` and load them with
-`iram.load()`. When the *outer* dimension of the loaded data has up to `gather()` rows, at any
-stride, `iram.load()` gathers them in one transfer, and the *ALU* reads the rows one after the
-other: with 2 rows of 8 int32 words, `alu.load()` returns the 8 words of the first row then the 8
-words of the second one.
+`iram.load()`. When the *outer* dimension of the loaded data has 2 or 4 rows (up to `gather()`),
+at any stride, and each row fits in 64 / rows bytes (32 or 16), `iram.load()` gathers them in one
+transfer, and the *ALU* reads the rows one after the other: with 2 rows of 8 int32 words,
+`alu.load()` returns the 8 words of the first row then the 8 words of the second one.
+Other rows are loaded one transfer per row.
 The stacked dimension must be the outermost one, so index the other dimensions after it:
 
 ```{code} C++
@@ -940,6 +941,10 @@ For(auto iv = slice.iterate(input.dim(1))) {
 `act.shift()` rounds as set with `act.setRoundingMode()`. If no mode is set the *Act* rounds to
 nearest, so a plain shift must set `Act::Rounding::off`. See `ElementWiseShiftPattern.cpp` for the
 complete kernel, including non-dense tensors and how the inputs are rounded up to whole vectors.
+
+`alu.multiScalarProductAccumulate()` also works on gathered rows, with one weight per row. The
+depthwise kernels in `DWToHw.cpp` use it to process the short vectors of 4 neighbouring channels
+of a small input at once.
 
 
 #### Indexed loads and stores (gather and scatter)

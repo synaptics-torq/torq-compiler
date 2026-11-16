@@ -149,7 +149,9 @@ sgElementCount(const Shape &dims, int busWidthItems, int sgMax = -1, bool fuse =
     if (dim.stride.exprVal.has_value() || (!fuse && dims.size() >= 2) ||
         (dim.stride.intVal.has_value() && dim.stride.intVal.value() != count)) {
         // Non-natural stride specified
-        if (sgMax >= 0 && dim.count <= sgMax && count <= busWidthItems / dim.count) {
+        // The HW gathers 1, 2 or 4 blocks per transfer, not 3
+        if (sgMax >= 0 && dim.count <= sgMax && dim.count != 3 &&
+            count <= busWidthItems / dim.count) {
             // Use scatter-gather
             blockInfo.sgGroups = dim.count;
             blockInfo.size = count;
