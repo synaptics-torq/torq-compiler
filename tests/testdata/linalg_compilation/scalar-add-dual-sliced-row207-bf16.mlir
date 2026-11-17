@@ -17,14 +17,10 @@
 // row and, for the last row, past the end of the 59616-byte view; the DEQW
 // bounds check (SliceTaskOp::verify) then rejected the dispatch (maximum
 // address 59617 >= 59616) and compilation of the moonshine encoder failed.
-// The tiling hazard is gone from the non-dense builder (it now splits rows
-// into equal exact blocks, #2702), but the misrouting remains: without this
-// fix the adds below lower as 69 blocks of 3 items per row, instead of the
-// efficient single sweep. The fix routes physically contiguous inputs
-// (identity or packed strided subviews) with a contiguous output to the
-// dense/linear builder, whose DEQW uses the XY view (A(H) [3728] + X(S)
-// [29808] here) that discards the unaligned tail — the NDL form the
-// pre-regression build emitted.
+// The non-dense builder is removed (#2756). One builder now lowers all scalar
+// adds. It fuses the dense dimensions of these subviews into a single sweep.
+// Its DEQW uses the XY view (A(H) [3728] + X(S) [29808] here), which discards
+// the unaligned tail.
 //
 // This case is compile-only (see tests/test_linalg_compilation.py): its
 // numerics are not validatable within the suite's tolerances on the available

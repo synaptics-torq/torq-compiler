@@ -19,15 +19,11 @@
 
 namespace mlir::syna::torq {
 
-// Non-dense Input 1 is loaded from the data path, and Input 2, which is a scalar constant,
-// is loaded once as bias/scale. The ALU multiplies Input 1 by the scalar weight (-1 for
-// `c - x`).
-FailureOr<Operation *> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
-
-// Dense Input 1 is loaded from the data path, and Input 2, which is a scalar constant,
-// is loaded once as bias/scale. The ALU multiplies Input 1 by the scalar weight (-1 for
-// `c - x`).
-FailureOr<Operation *> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
+// Input 1 is loaded from the data path, and Input 2, which is a scalar constant, is loaded
+// once as bias/scale. The ALU multiplies Input 1 by the scalar weight (-1 for `c - x`).
+// The dense inner dimensions of Input 1 are vectorized, and the other dimensions are
+// iterated with their own strides.
+FailureOr<Operation *> buildScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &params);
 
 // ALU is working with MUL and ACC operations on 32 input pixels at a time.
 // The 2 inputs are loaded from 2 different addresses. For non-fp32 data, each
@@ -68,34 +64,11 @@ LogicalResult AddPattern::transform(torq_hl::AddOp addOp, PatternRewriter &rewri
     FailureOr<Operation *> sliceTaskOp = failure();
 
     if (addOp.getRhsIsScalar() && params.input2Shape.size() == 1) {
-        // The dense path streams input1 as one linear block and writes the output as a single
-        // sweep; the DEQW it generates uses the XY view (S dims), which discards any unaligned
-        // tail, so it is safe for any physically contiguous data. isDenseInMemory only
-        // recognizes identity layouts, but packed strided subviews (e.g. the halves of a
-        // channel-sliced activation) are contiguous too, so accept both layouts when the data
-        // is packed. The output must be packed for the sweep route; the identity-input route
-        // keeps not checking the output: the non-dense fallback assumes the output is laid out
-        // like input1 (it must not see a gapped one), while the dense builder derives its
-        // write NDL from the output's own layout, which the DEQW bounds check verifies.
-        bool is_dense = isDenseInMemory(params.type1) || (isContiguousInMemory(params.type1) &&
-                                                          isContiguousInMemory(params.outputType));
-        if (!is_dense) {
-            // Case 1: Input2 is scalar and Input1 is non-contiguous.
-            // In this path, we use the least efficient implementation.
-            // Throughput is limited by the number of elements in the last dimension,
-            // and we access each dimention using the associated stride.
-            // Input2 is treated as bias/scale.
-            sliceTaskOp = buildScalarNonDenseTaskOp(params);
-        }
-        else {
-            // Case 2: Input2 is scalar and Input1 is contiguous.
-            // This allows an efficient implementation: Input1 is streamed from the data bus,
-            // Input2 is treated as bias/scale.
-            sliceTaskOp = buildScalarDenseTaskOp(params);
-        }
+        // Case 1: Input2 is scalar and is treated as bias/scale.
+        sliceTaskOp = buildScalarTaskOp(params);
     }
     else {
-        // Case 3: Both inputs are non-scalar tensors.
+        // Case 2: Both inputs are non-scalar tensors.
         // input2 is loaded as a data tensor here, so element types must match.
         if (params.type1.getElementType() != params.type2.getElementType())
             return addOp.emitError("Add input element types must match");
@@ -125,7 +98,7 @@ static LData scalarBiasScale(BinaryOpParams<torq_hl::AddOp> &params) {
     return LData(params.op.getScaleBias()).subviewDim(0, 0, biasNum);
 }
 
-FailureOr<Operation *> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
+FailureOr<Operation *> buildScalarTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
     Slice slice(params.op.getName().str());
 
     auto shift = params.op.getShiftFactor();
@@ -158,58 +131,6 @@ FailureOr<Operation *> buildScalarDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &pa
                 QData res = slice.act.rescaleClamp(pdata[av], bdata, shift, zp, min, max);
                 slice.append(output[ndd], res);
             }
-        }
-    }
-
-    return slice.createOp(params.rewriter, params.loc);
-}
-
-// The largest block size not above `maxBlock` that divides `size`.
-static int largestDivisorAtMost(int size, int maxBlock) {
-    for (int block = std::min(size, maxBlock); block > 1; --block) {
-        if (size % block == 0) {
-            return block;
-        }
-    }
-    return 1;
-}
-
-FailureOr<Operation *> buildScalarNonDenseTaskOp(BinaryOpParams<torq_hl::AddOp> &params) {
-    Slice slice(params.op.getName().str());
-    DType elementType = getDType(params.inputElementType);
-
-    auto shift = params.op.getShiftFactor();
-    auto min = params.op.getOutputMin();
-    auto max = params.op.getOutputMax();
-    auto zp = params.op.getOutputZp();
-
-    int lastDimSize = params.input1Shape.back();
-    // The input is multiplied by the scalar weight, as in buildScalarDenseTaskOp: it is
-    // -1 for `c - x`, which a plain ALU load would turn into `x + c`.
-    DType weightType = params.inputElementType.isInteger(32) ? DType::int8 : elementType;
-
-    // A last dimension larger than the act width is split into equal blocks: a
-    // partial last block would make the NDLs read and write past the end of the row.
-    // The width depends on the weight type: one activation pass holds 4 int16 x int16
-    // or int32 x int8 products, but 8 bf16 or 16 int8 ones.
-    int blockSize = largestDivisorAtMost(lastDimSize, slice.act.width(elementType, weightType));
-    LData input(params.op.getInput1());
-    LData output(params.op.getInit());
-    if (blockSize != lastDimSize) {
-        input.reshapeDim(-1, {-1, blockSize});
-        output.reshapeDim(-1, {-1, blockSize});
-    }
-    LData weights = scalarWeight(params);
-    LData biasScale = scalarBiasScale(params);
-    WData wdata = slice.wram.load(weights);
-    BData bdata = slice.bram.load(biasScale);
-
-    For(auto ii = slice.iterate(input.dims(0, -1))) {
-        IData idata = slice.iram.load(input[ii]);
-        PData pdata = slice.alu.scalarProductAccumulate(idata, wdata);
-        For(auto av = slice.iterate(pdata.dim(PData::Vectors))) {
-            QData res = slice.act.rescaleClamp(pdata[av], bdata, shift, zp, min, max);
-            slice.append(output[ii], res);
         }
     }
 
