@@ -27,7 +27,7 @@ namespace io {
 
 const char* FLAG_torq_hw_type      = DEF_HW_TYPE;
 bool        FLAG_torq_step_by_step = false;
-bool        FLAG_torq_clear_memory = false;
+const char* FLAG_torq_fill_memory  = "";
 bool        FLAG_torq_explicit_dmabuf_sync = false;
 bool        FLAG_torq_enable_css_logs = false;
 
@@ -44,11 +44,12 @@ IREE_STATIC_INITIALIZER(iree_flag_register_torq_step_by_step) {
                      iree_make_cstring_view("torq_step_by_step"),
                      iree_make_cstring_view("Enable step-by-step NPU debug mode"));
 }
-IREE_STATIC_INITIALIZER(iree_flag_register_torq_clear_memory) {
-  iree_flag_register(__FILE__, __LINE__, IREE_FLAG_TYPE_bool,
-                     (void*)&FLAG_torq_clear_memory, NULL, NULL,
-                     iree_make_cstring_view("torq_clear_memory"),
-                     iree_make_cstring_view("Zero XRAM and LRAM before execution"));
+IREE_STATIC_INITIALIZER(iree_flag_register_torq_fill_memory) {
+  iree_flag_register(__FILE__, __LINE__, IREE_FLAG_TYPE_string,
+                     (void*)&FLAG_torq_fill_memory, NULL, NULL,
+                     iree_make_cstring_view("torq_fill_memory"),
+                     iree_make_cstring_view("Fill LRAM and XRAM with this byte value before execution, e.g. 0, "
+                                            "or 0xff (NaN in bf16 and f32) to find reads of memory that no task writes"));
 }
 IREE_STATIC_INITIALIZER(iree_flag_register_torq_explicit_dmabuf_sync) {
   iree_flag_register(__FILE__, __LINE__, IREE_FLAG_TYPE_bool,
@@ -68,7 +69,7 @@ IREE_STATIC_INITIALIZER(iree_flag_register_torq_enable_css_logs) {
 
 const char* FLAG_torq_hw_type      = DEF_HW_TYPE;
 bool        FLAG_torq_step_by_step = false;
-bool        FLAG_torq_clear_memory = false;
+const char* FLAG_torq_fill_memory  = "";
 bool        FLAG_torq_explicit_dmabuf_sync = false;
 bool        FLAG_torq_enable_css_logs = false;
 

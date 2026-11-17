@@ -1233,6 +1233,7 @@ LogicalResult Serializer::serializeFunction(mlir::FunctionOpInterface funcOp) {
     }
 
     auto hwId = TorqHw::get().getHwId();
+    uint32_t lramSize = TorqHw::get().getLramSize();
 
     // mark the file to ensure that models are not the same as v1.5 models even if
     // that runtime doesn't check the version number
@@ -1240,7 +1241,7 @@ LogicalResult Serializer::serializeFunction(mlir::FunctionOpInterface funcOp) {
 
     iree_hal_torq_ExecutableDef_create_as_root(
         _builder, executableName, codeRef, bindingRef, *maybeRuntimeProgram, bufferDebugInfo,
-        *maybeHostCode, runtimeVersion, hwId
+        *maybeHostCode, runtimeVersion, hwId, lramSize
     );
 
     return success();

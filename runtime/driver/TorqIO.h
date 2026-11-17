@@ -54,7 +54,7 @@ private:
 
 extern const char* FLAG_torq_hw_type;
 extern bool        FLAG_torq_step_by_step;
-extern bool        FLAG_torq_clear_memory;
+extern const char* FLAG_torq_fill_memory;
 extern bool        FLAG_torq_explicit_dmabuf_sync;
 extern bool        FLAG_torq_enable_css_logs;
 

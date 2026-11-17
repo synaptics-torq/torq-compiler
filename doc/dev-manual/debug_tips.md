@@ -52,6 +52,17 @@
 
   Where `${TEST_PATTERN}` is a pattern to match the test that need to be run.
 
+- The simulator starts with LRAM set to zeros, while the FPGA and the boards keep the data of the
+  model that ran before. So a model that reads memory that no task writes can pass on the simulator
+  and fail on hardware. To find these reads on the simulator, fill LRAM and the XRAM of the model
+  before the run, for example with 0xff (a NaN in bf16 and f32):
+
+  ```{code} shell
+  $ pytest -k ${TEST_PATTERN} --extra-torq-runtime-options="--torq_fill_memory=0xff"
+  ```
+
+  `--torq_fill_memory=0` zeroes the same memory.
+
 - To trace the contents of all buffers during model execution use the following command line:
 
   ```{code} shell

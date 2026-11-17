@@ -17,7 +17,7 @@
 
 using synaptics::io::FLAG_torq_hw_type;
 using synaptics::io::FLAG_torq_step_by_step;
-using synaptics::io::FLAG_torq_clear_memory;
+using synaptics::io::FLAG_torq_fill_memory;
 using synaptics::dump::FLAG_torq_dump_bus_logs;
 using synaptics::io::FLAG_torq_explicit_dmabuf_sync;
 using synaptics::io::FLAG_torq_enable_css_logs;
@@ -49,6 +49,23 @@ static EventType toEventType(ns(HostActionParams_union_type_t) paramsType) {
     default:
       assert(false && "unknown host action type");
   }
+}
+
+// Returns in fill the byte given by --torq_fill_memory, or -1 when the flag is not set.
+static iree_status_t getMemoryFill(int* fill) {
+  *fill = -1;
+  if (FLAG_torq_fill_memory[0] == '\0') {
+    return iree_ok_status();
+  }
+  char* end = nullptr;
+  unsigned long value = strtoul(FLAG_torq_fill_memory, &end, 0);
+  if (*end != '\0' || value > 0xff) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "--torq_fill_memory must be a byte value such as 0 or 0xff, got '%s'",
+                            FLAG_torq_fill_memory);
+  }
+  *fill = static_cast<int>(value);
+  return iree_ok_status();
 }
 
 
@@ -775,14 +792,27 @@ iree_status_t TorqExecutable::initialize() {
       return iree_make_status(IREE_STATUS_INTERNAL, "failed to open TorqHw");
   }
 
-  if (FLAG_torq_clear_memory) {
+  // Fill LRAM and the XRAM of the executable with a byte, so that a read of memory that no task
+  // writes gives a visible error (for example 0xff, a NaN in bf16 and f32) instead of the zeros of
+  // the simulator.
+  int fill;
+  IREE_RETURN_IF_ERROR(getMemoryFill(&fill));
+  if (fill >= 0) {
+    uint32_t lramSize = ns(ExecutableDef_lram_size_get(executableDef));
+    if (lramSize == 0) {
+      return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+                              "--torq_fill_memory needs the LRAM size, which this executable does "
+                              "not have: compile it again");
+    }
     TORQ_ADD_PROFILING_EVENT_BEGIN(eventLog, EventType::INIT_CLEAR_MEMORY);
-    std::vector<uint8_t> zeros(512 * 1024, 0);
-    torq_->writeLram(0, zeros.size(), zeros.data());
-
-    std::vector<uint8_t> zeros1(xram_size, 0);
-    torq_->writeXram(xram_base, zeros1.size(), zeros1.data());
+    std::vector<uint8_t> lramData(lramSize, static_cast<uint8_t>(fill));
+    bool written = torq_->writeLram(0, lramData.size(), lramData.data());
+    std::vector<uint8_t> xramData(xram_size, static_cast<uint8_t>(fill));
+    written = written && torq_->writeXram(xram_base, xramData.size(), xramData.data());
     TORQ_ADD_PROFILING_EVENT_END(eventLog, EventType::INIT_CLEAR_MEMORY);
+    if (!written) {
+      return iree_make_status(IREE_STATUS_INTERNAL, "failed to fill LRAM and XRAM");
+    }
   }
 
   testVectorWriter_ = dump::createTestVectorWriter(executableName());
@@ -1959,8 +1989,10 @@ iree_status_t TorqExecutable::processStartHostAction(ns(HostAction_table_t) acti
 
     LOGD << "action: Allocating buffer #" << id << ": " << ns(BufferType_name(bufferType)) << "[" << address << "] of size " << size;
 
-    if (FLAG_torq_clear_memory) {
-      std::vector<uint8_t> bufferData(size, 0);
+    int fill;
+    IREE_RETURN_IF_ERROR(getMemoryFill(&fill));
+    if (fill >= 0) {
+      std::vector<uint8_t> bufferData(size, static_cast<uint8_t>(fill));
 
       if (ns(BufferType_XRAM) == bufferType) {
 

@@ -210,6 +210,9 @@ table ExecutableDef {
   // hardware required to run this executable
   hw_id: uint32 = 0;
 
+  // LRAM size of the target hardware in bytes (0 in executables compiled before this field)
+  lram_size: uint32 = 0;
+
 }
 
 root_type ExecutableDef;
