@@ -29,7 +29,9 @@ CONFIG = {
             "--torq-disable-host", "--torq-disable-css", "--torq-convert-dtypes",
             "--torq-convert-io-dtype",
         ],
+        "reference": "onnx_fp32_reference_results",
     },
+    # Torq is off by 2 on ~11% of the outputs against both references.
     "dynamicquantize_large": {
         "compiler_options": [
             "--torq-disable-host", "--torq-disable-css", "--torq-convert-dtypes",

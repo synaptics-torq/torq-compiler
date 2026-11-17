@@ -256,17 +256,40 @@ def _cast_bf16_model_to_fp32(model):
     return m
 
 
+# onnxruntime type strings of the input types a model cast to fp32 can have.
+_ORT_TENSOR_TYPES = {
+    "tensor(float)": TensorProto.FLOAT,
+    "tensor(double)": TensorProto.DOUBLE,
+    "tensor(float16)": TensorProto.FLOAT16,
+    "tensor(bool)": TensorProto.BOOL,
+    "tensor(int8)": TensorProto.INT8,
+    "tensor(int16)": TensorProto.INT16,
+    "tensor(int32)": TensorProto.INT32,
+    "tensor(int64)": TensorProto.INT64,
+    "tensor(uint8)": TensorProto.UINT8,
+    "tensor(uint16)": TensorProto.UINT16,
+    "tensor(uint32)": TensorProto.UINT32,
+    "tensor(uint64)": TensorProto.UINT64,
+}
+
+
 def _run_ort_fp32(onnx_model, input_data):
-    """Cast a bf16 model to fp32 and run it through onnxruntime, casting inputs to
-    fp32 as needed. Returns the outputs rounded back to bf16 precision so the
-    comparison against the (bf16) torq result is bf16-vs-bf16."""
+    """Cast a bf16 model to fp32 and run it through onnxruntime. Each input is cast to the type
+    the session expects. The float outputs are rounded back to bf16 precision so the comparison
+    against the (bf16) torq result is bf16-vs-bf16; integer and bool outputs are returned as
+    they are."""
     fp32_model = _cast_bf16_model_to_fp32(onnx_model)
     ort_session = onnxruntime.InferenceSession(fp32_model.SerializeToString())
     ort_inputs = {}
     for i, inp in enumerate(ort_session.get_inputs()):
         data = input_data[i]
-        if hasattr(data, "astype"):
-            data = data.astype(np.float32)
+        elem_type = _ORT_TENSOR_TYPES.get(inp.type)
+        if hasattr(data, "astype") and elem_type is not None:
+            data = data.astype(onnx.helper.tensor_dtype_to_np_dtype(elem_type))
         ort_inputs[inp.name] = data
-    outputs = ort_session.run(None, ort_inputs)
-    return [np.asarray(o).astype(ml_dtypes.bfloat16).astype(np.float32) for o in outputs]
+    outputs = [np.asarray(o) for o in ort_session.run(None, ort_inputs)]
+    return [
+        o.astype(ml_dtypes.bfloat16).astype(np.float32) if np.issubdtype(o.dtype, np.floating)
+        else o
+        for o in outputs
+    ]

@@ -205,6 +205,14 @@ CONFIG = {
         "reference": "onnx_fp32_reference_results",
     },
     "matmul-1x128x768x3072-bf16": {"reference": "numpy_matmul_const_weight_reference_results"},
+    # Integer weights fed as inputs: same result as llvm-cpu with the default tolerances, and
+    # the same on every host.
+    "dequant_matmul_zp_n6": {"reference": "onnx_fp32_reference_results"},
+    "dequant_matmul_zp_nested_tile": {"reference": "onnx_fp32_reference_results"},
+    "dequant_matmul_zp_wide_n": {"reference": "onnx_fp32_reference_results"},
+    "matmul_dql_q8_0_odd_tile": {"reference": "onnx_fp32_reference_results"},
+    "matmul_dql_q8_0_zp_splat_tiled": {"reference": "onnx_fp32_reference_results"},
+    "matmul_dql_q8_0_zp_zero_tiled": {"reference": "onnx_fp32_reference_results"},
     "matmulinteger_depthwise_conv": {
         "compiler_options": [
             "--torq-disable-host", "--torq-disable-css", "--torq-convert-dtypes",
