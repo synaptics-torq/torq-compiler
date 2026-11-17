@@ -137,6 +137,19 @@ LogicalResult getConvPoolKernelSize(TorqConvPoolOp op, int64_t &ksizeH, int64_t 
     }
 }
 
+// True for an op with an NHWC input. The patterns of this file read the input and the weights as
+// NCHW, so they leave these ops as they are. These ops are depthwise convs: the 1D stride-1 one,
+// and the one whose kernel covers the whole image, which its lowering takes without padding,
+// whatever the stride.
+template <class TorqConvPoolOp> bool hasNhwcInput(TorqConvPoolOp op) {
+    if constexpr (std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp>) {
+        return false;
+    }
+    else {
+        return op.getNhwcInput();
+    }
+}
+
 // Stride-2 conv/depthwise convs that LegalizeStride2ConvPadPattern rewrites from their own pads
 // with the kernels' window model; the older padding patterns leave them alone.
 template <class TorqConvPoolOp> bool isPlannedStride2Conv(TorqConvPoolOp op) {
@@ -199,6 +212,8 @@ TorqConvPoolOp createWithPadding(
     PatternRewriter &rewriter, TorqConvPoolOp op, Value input, ArrayRef<int64_t> pads,
     ArrayRef<int64_t> outShape, std::optional<int32_t> inputZp = std::nullopt
 ) {
+    // The new op has an NCHW input (nhwc_input is false).
+    assert(!hasNhwcInput(op) && "the padding patterns take only NCHW ops");
     Location loc = op.getLoc();
     Type elemType = cast<RankedTensorType>(op.getInit().getType()).getElementType();
     auto outType = RankedTensorType::get(outShape, elemType);
@@ -265,7 +280,7 @@ class ConvertConvValidPadToSamePadPattern : public OpRewritePattern<TorqConvPool
     using OpRewritePattern<TorqConvPoolOp>::OpRewritePattern;
 
     LogicalResult matchAndRewrite(TorqConvPoolOp op, PatternRewriter &rewriter) const override {
-        if (isPlannedStride2Conv(op))
+        if (hasNhwcInput(op) || isPlannedStride2Conv(op))
             return failure();
 
         auto inputType = llvm::cast<RankedTensorType>(op.getInput().getType());
@@ -450,6 +465,9 @@ class AlignEvenKernelStride2PaddingPattern : public OpRewritePattern<TorqConvPoo
     using OpRewritePattern<TorqConvPoolOp>::OpRewritePattern;
 
     LogicalResult matchAndRewrite(TorqConvPoolOp op, PatternRewriter &rewriter) const override {
+        if (hasNhwcInput(op)) {
+            return failure();
+        }
         auto inputType = llvm::dyn_cast<RankedTensorType>(op.getInput().getType());
         auto outputType = llvm::dyn_cast<RankedTensorType>(op.getResult(0).getType());
         if (!inputType || inputType.getRank() != 4 || !inputType.hasStaticShape() || !outputType ||
@@ -581,7 +599,7 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
     using OpRewritePattern<TorqConvPoolOp>::OpRewritePattern;
 
     LogicalResult matchAndRewrite(TorqConvPoolOp op, PatternRewriter &rewriter) const override {
-        if (isPlannedStride2Conv(op))
+        if (hasNhwcInput(op) || isPlannedStride2Conv(op))
             return failure();
         auto inputType = llvm::cast<RankedTensorType>(op.getInput().getType());
         if (!inputType || inputType.getRank() != 4)

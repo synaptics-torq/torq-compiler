@@ -20,18 +20,36 @@ _LAYERS = [
 ]
 
 
-def _name(shape, kernel, padding, after=""):
+def _name(shape, kernel, padding, after="", strides=(1, 1)):
     h, w, c = shape
-    return f"dw_k{kernel[0]}x{kernel[1]}_s1x1_{padding}_{h}x{w}x{c}{after}"
+    return f"dw_k{kernel[0]}x{kernel[1]}_s{strides[0]}x{strides[1]}_{padding}_{h}x{w}x{c}{after}"
+
+
+# A kernel as large as the (padded) frame with stride 2: one output, which the stride does not
+# change. Without CSS, these did not compile (synaptics-torq/torq-compiler-dev#2806).
+_GLOBAL_STRIDE2 = [
+    ((3, 3, 8), (3, 3), "valid"),
+    ((2, 2, 8), (3, 3), "same"),
+    ((12, 12, 45), (12, 12), "valid"),
+]
 
 
 CASES = {
     # a kernel as large as the frame
     _name((12, 12, 45), (12, 12), "valid"): depthwise((12, 12, 45), (12, 12)),
 }
+for _shape, _kernel, _padding in _GLOBAL_STRIDE2:
+    CASES[_name(_shape, _kernel, _padding, strides=(2, 2))] = depthwise(
+        _shape, _kernel, (2, 2), _padding
+    )
 for _shape, _kernel, _padding in _LAYERS:
     _key = _name(_shape, _kernel, _padding, "_relu")
     if _key in CASES:
         raise ValueError(f"depthwise: {_key} is listed twice")
     CASES[_key] = sequential(_shape, layers.DepthwiseConv2D(kernel_size=_kernel, padding=_padding),
                              layers.ReLU())
+
+# The stride-2 global cases must run on the slices.
+_NSS_ONLY = {"compiler_options": ["--torq-disable-host", "--torq-disable-css"]}
+CONFIG = {_name(shape, kernel, padding, strides=(2, 2)): _NSS_ONLY
+          for shape, kernel, padding in _GLOBAL_STRIDE2}

@@ -825,6 +825,12 @@ struct Conv2dConvert : public OpRewritePattern<LinalgConvOp> {
         }
 
         auto foldOrKeepExplicitPad = [&]() {
+            // An NHWC depthwise conv (other than the 1D one) has a kernel that covers the whole
+            // padded image (isDepthwiseKernelShape). Its lowering takes no padding, so its pad
+            // stays explicit, e.g. a 3x3 kernel with stride 2 on a 2x2 image with a "same" pad.
+            if (isDepthwise && !isNchw && !isDW1DStride1) {
+                return;
+            }
             Value origInput = input;
             SmallVector<Operation *> foldOps;
             // The conv's own result tensor: foldBackwardPadding reasons about the conv's
