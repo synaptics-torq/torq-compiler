@@ -1,17 +1,21 @@
-"""Elementwise operator fixtures built with torq.testing.onnx_builder: unary ops, Clip, Mul and
-comparisons.
+"""Elementwise operator fixtures built with torq.testing.onnx_builder: unary ops, Clip, Mul,
+comparisons, Max and Min, and bitwise and logical ops.
 
 The cases are ported from tests/testdata/tosa_ops, with the names of the MLIR files. The bf16 Max
 and Min cases stay there: ONNX Max and Min lower to a compare and a select, which the slices
 don't support (synaptics-torq/torq-compiler-dev#3061), while TOSA maximum and minimum lower to
-arith.maximumf and minimumf.
+arith.maximumf and minimumf. The i32 Abs cases stay there too: ONNX Abs lowers to math.absi,
+which the slices don't support (synaptics-torq/torq-compiler-dev#3074), while TOSA abs lowers to
+a subtraction and arith.maxsi.
 """
 
 from functools import partial
 
 import numpy as np
 
-from torq.testing.onnx_builder import BF16, F32, OnnxGraph
+from torq.testing.onnx_builder import BF16, F32, I32, OnnxGraph
+
+BOOL = np.bool_
 
 KIND = "onnx"
 
@@ -55,4 +59,27 @@ CASES = {
     "Elementwise_gteq-bf16": partial(
         _make_binary, "GreaterOrEqual", [4, 64], [4, 64], out_dtype=np.bool_
     ),
+    # i32 and i1
+    "identity-64-i32": partial(_make_unary, "Identity", [64], dtype=I32),
+    "identity-4x16x16-i32": partial(_make_unary, "Identity", [1, 4, 16, 16], dtype=I32),
+    "identity-2x5x2x16x8x2-i32": partial(_make_unary, "Identity", [2, 5, 2, 16, 8, 2], dtype=I32),
+    "Elementwise_bitwise_not-i32": partial(_make_unary, "BitwiseNot", [4, 64], dtype=I32),
+    "Elementwise_bitwise_and-i32": partial(_make_binary, "BitwiseAnd", [4, 64], [4, 64], dtype=I32),
+    "Elementwise_bitwise_or-i32": partial(_make_binary, "BitwiseOr", [4, 64], [4, 64], dtype=I32),
+    "Elementwise_bitwise_xor-i32": partial(_make_binary, "BitwiseXor", [4, 64], [4, 64], dtype=I32),
+    "Elementwise_max-i32": partial(_make_binary, "Max", [4, 64], [4, 64], dtype=I32),
+    "Elementwise_min-i32": partial(_make_binary, "Min", [4, 64], [4, 64], dtype=I32),
+    "Elementwise_eq-i32": partial(
+        _make_binary, "Equal", [4, 64], [4, 64], dtype=I32, out_dtype=BOOL
+    ),
+    "Elementwise_gt-i32": partial(
+        _make_binary, "Greater", [4, 64], [4, 64], dtype=I32, out_dtype=BOOL
+    ),
+    "Elementwise_gteq-i32": partial(
+        _make_binary, "GreaterOrEqual", [4, 64], [4, 64], dtype=I32, out_dtype=BOOL
+    ),
+    "Elementwise_logical_not": partial(_make_unary, "Not", [4, 64], dtype=BOOL),
+    "Elementwise_logical_and": partial(_make_binary, "And", [4, 64], [4, 64], dtype=BOOL),
+    "Elementwise_logical_or": partial(_make_binary, "Or", [4, 64], [4, 64], dtype=BOOL),
+    "Elementwise_logical_xor": partial(_make_binary, "Xor", [4, 64], [4, 64], dtype=BOOL),
 }

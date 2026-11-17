@@ -17,14 +17,13 @@ def _make_sub(input_0_shape, input_1_shape, *, dtype=I32, opset=19):
     return g.export(g.op("Sub", a, b, dtype=dtype, shape=shape))
 
 
-def _make_sub_constant(shape, value, *, constant_first=False):
-    """x - value, or value - x with constant_first, with value a bf16 constant of shape
-    [1, 1, 1]."""
+def _make_sub_constant(shape, value, *, constant_first=False, dtype=BF16):
+    """x - value, or value - x with constant_first, with value a constant of shape [1, 1, 1]."""
     g = OnnxGraph(opset=22)
-    x = g.input("x", BF16, shape)
-    c = g.const(np.full([1, 1, 1], value), BF16)
+    x = g.input("x", dtype, shape)
+    c = g.const(np.full([1, 1, 1], value), dtype)
     a, b = (c, x) if constant_first else (x, c)
-    return g.export(g.op("Sub", a, b, dtype=BF16, shape=shape))
+    return g.export(g.op("Sub", a, b, dtype=dtype, shape=shape))
 
 
 CASES = {
@@ -37,4 +36,10 @@ CASES = {
     "sub-scalar-tensor-bf16": partial(
         _make_sub_constant, [1, 21, 1024], 32768, constant_first=True
     ),
+    "Elementwise_sub-i32": partial(_make_sub, [4, 64, 64], [4, 64, 64]),
+    "sub-i32": partial(_make_sub, [1, 56, 56, 24], [1, 56, 56, 24]),
+    "sub-broadcast": partial(_make_sub, [1, 21, 1], [1, 21, 1024]),
+    "sub-broadcast-1": partial(_make_sub, [1, 21, 1], [1, 1, 1]),
+    "sub-constant": partial(_make_sub_constant, [1, 21, 1], 1, dtype=I32),
+    "sub-constant-1": partial(_make_sub_constant, [1, 21, 1], 31, constant_first=True, dtype=I32),
 }
