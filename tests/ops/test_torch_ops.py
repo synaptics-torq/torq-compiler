@@ -105,6 +105,7 @@ def case_config(request, runtime_hw_type, chip_config):
         "_case": data,
         "input_data": "tweaked_random_input_data",
         "torq_compiler_options": list(config.get("compiler_options", compiler_options)),
+        "torq_runtime_options": list(config.get("runtime_options", [])),
         "comparison_config": "torch_ops_comparison_config",
     }
     if "input_range" in config:

@@ -611,4 +611,10 @@ CONFIG = {
     # off, beyond the default relative fp_max_tol. Measured on sim-sl2610: 9/359712 differ (max
     # relative 0.016). A real regression would affect thousands of elements.
     "encoder_bf16_layer_Conv_2-sim-sl2610-v1": {"comparison": {"allowed_wrong": 1e-4}},
+    # The zero kernel rows of this stride [2, 1] conv read the grown input row, which must hold a
+    # defined value (synaptics-torq/torq-compiler-dev#3038). The simulator starts with zeroed
+    # memory, so fill it with NaN to fail when the row is not written.
+    "depthwise_conv2d_bf16_8x3x1_stride2x2_pad0_8x512x1024": {
+        "runtime_options": ["--torq_fill_memory=0xff"],
+    },
 }

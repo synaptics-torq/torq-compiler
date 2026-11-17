@@ -10,6 +10,7 @@ module-level literals without importing it:
 - CONFIG (optional): {case_stem: {key: value}}, the settings of cases that need more than the
   defaults of test_torch_ops.py:
   - compiler_options: torq-compile flags, replacing the group default;
+  - runtime_options: torq-run-module flags, e.g. ["--torq_fill_memory=0xff"];
   - comparison: comparison tolerances (torq.testing.comparison keys);
   - reference: the name of the reference-results fixture;
   - input_range: [low, high] of the random inputs;
@@ -50,7 +51,10 @@ def _group_dirs():
     return dirs
 
 
-_CONFIG_KEYS = {"compiler_options", "comparison", "reference", "input_range", "sim_runtime_timeout"}
+_CONFIG_KEYS = {
+    "compiler_options", "runtime_options", "comparison", "reference", "input_range",
+    "sim_runtime_timeout",
+}
 
 
 def _parse_family_module(path: Path):

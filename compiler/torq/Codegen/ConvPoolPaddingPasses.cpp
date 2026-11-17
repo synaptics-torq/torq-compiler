@@ -220,6 +220,24 @@ TorqConvPoolOp createWithPadding(
     }
 }
 
+// Returns the NCHW tensor `buffer` with its row `row` set to the constant `fillAttr`.
+static Value insertConstantRow(
+    PatternRewriter &rewriter, Location loc, Value buffer, int64_t row, TypedAttr fillAttr
+) {
+    auto bufferType = cast<RankedTensorType>(buffer.getType());
+    SmallVector<int64_t, 4> rowShape(bufferType.getShape());
+    rowShape[NCHW::H] = 1;
+    auto rowType = RankedTensorType::get(rowShape, bufferType.getElementType());
+    auto rowConst = arith::ConstantOp::create(
+        rewriter, loc, DenseElementsAttr::get(rowType, ArrayRef<Attribute>{fillAttr})
+    );
+    return tensor::InsertSliceOp::create(
+               rewriter, loc, rowConst.getResult(), buffer, createVector({0, 0, row, 0}, rewriter),
+               createVector(rowShape, rewriter), createVector({1, 1, 1, 1}, rewriter)
+    )
+        .getResult();
+}
+
 // Where the original windows of an axis converted from VALID to SAME padding start on the SAME
 // padded op.
 //
@@ -716,7 +734,8 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
         //   tensor.empty and FPGA read it as NaN (C-model zeros it).
         // - the original pads/halo changed, so the kernel can see the new border.
         // Do not fill every odd-H/W 2D stride-2 rewrite: that added extra NSS/DMA on
-        // MBv2 tiles that already had a defined halo.
+        // MBv2 tiles that already had a defined halo. Otherwise, a float stride [2, 1] conv with
+        // an odd height gets only its grown row written (see below).
         bool needFill = keepValid || pads[LRTBDim::Top] || pads[LRTBDim::Bottom] ||
                         (pads[LRTBDim::Left] != newPads[LRTBDim::Left]) ||
                         (pads[LRTBDim::Right] != newPads[LRTBDim::Right]);
@@ -729,6 +748,22 @@ class ConvertOddDimensionStrideConvPattern : public OpRewritePattern<TorqConvPoo
                 rewriter, loc, ValueRange{fillConst}, ValueRange{padTensor.getResult()}
             );
             convInput = fillOp.getResult(0);
+        }
+        else if (!std::is_same_v<TorqConvPoolOp, torq_hl::MaxPool2dOp> && oddHeight &&
+                 strides[1] == 1 && llvm::isa<FloatType>(elemType)) {
+            // A stride [2, 1] conv can get zero kernel rows (ConvPoolKernelLayoutPass,
+            // getRowPhaseSplit). A zero kernel row reads the grown row. 0 * NaN and 0 * Inf are
+            // NaN, thus the data that an earlier model left in the tensor.empty buffer changes
+            // the output. An integer type does not have this problem, because 0 * x is 0.
+            // Write only the grown row, and write it before the input. Then KeepConcatInLram
+            // keeps the two inserts in LRAM. A linalg.fill of the buffer moves them to XRAM, and
+            // a linalg.fill of a one-row buffer inserted the same way also costs more (about +45%
+            // on the case of synaptics-torq/torq-compiler-dev#3038, SL2610 and SR200).
+            TypedAttr fillAttr = makePadFillAttr(rewriter, elemType, op.getInputZp());
+            if (!fillAttr)
+                return failure();
+            const int64_t grownRow = shiftH.prepend ? 0 : shape[NCHW::H];
+            convInput = insertConstantRow(rewriter, loc, convInput, grownRow, fillAttr);
         }
 
         auto insertOp = tensor::InsertSliceOp::create(

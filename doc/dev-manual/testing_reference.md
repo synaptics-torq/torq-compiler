@@ -126,7 +126,7 @@ imported: these names must be plain literals.
 | ``KIND`` | ``"torch"`` (builders return an ``nn.Module``) or ``"onnx"`` (builders return an ``onnx.ModelProto``) |
 | ``CASES`` | ``{case name: builder}``: a function of the module or a ``functools.partial`` of one. Names starting with ``disable`` are skipped |
 | ``IO`` | PyTorch only: ``{case name: [[shape, dtype], ...]}``, the example inputs of ``torch.export`` |
-| ``CONFIG`` | ``{case name: settings}``, with the keys ``compiler_options`` (replace the default ones), ``comparison``, ``reference`` (the name of the reference fixture), ``input_range`` (``[low, high]`` of the random inputs), ``sim_runtime_timeout`` (seconds) |
+| ``CONFIG`` | ``{case name: settings}``, with the keys ``compiler_options`` (replace the default ones), ``runtime_options`` (``torq-run-module`` flags), ``comparison``, ``reference`` (the name of the reference fixture), ``input_range`` (``[low, high]`` of the random inputs), ``sim_runtime_timeout`` (seconds) |
 
 ### MLIR file
 

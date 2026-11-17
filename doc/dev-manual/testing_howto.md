@@ -161,6 +161,7 @@ For other checks, add a test module to ``tests/compiler/``, with a test function
 | Compiler options | ``CONFIG = {"<name>": {"compiler_options": [...]}}`` | ``CONFIG``, ``compiler_options`` (replaces the default ones) | ``CONFIG`` table of ``test_tosa_ops.py``, ``torq_compiler_options`` |
 | Tolerances | ``CONFIG``, ``comparison``: ``{"fp_avg_tol": 0.05}`` | ``CONFIG``, ``comparison`` | a comment: ``// TORQ_FP_AVG_TOL: 0.05`` |
 | Range of the random inputs | | ``CONFIG``, ``input_range: [low, high]`` | ``CONFIG`` table, ``tweaked_input_data_range`` |
+| Runtime options | | ``CONFIG``, ``runtime_options`` (e.g. ``["--torq_fill_memory=0xff"]``) | |
 | Runtime timeout | | ``CONFIG``, ``sim_runtime_timeout`` (seconds) | |
 
 The tolerance keys are listed in [Testing Reference](testing_reference.md#comparison-settings).
