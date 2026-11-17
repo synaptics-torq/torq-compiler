@@ -50,6 +50,6 @@ CASES = {
 }
 
 CONFIG = {
-    "gemm-fc-row-channel-tiling-bf16": {"comparison": {"fp_max_tol": 0.05}},
-    "gemm_bf16": {"comparison": {"fp_max_tol": 0.015}},
+    "gemm-fc-row-channel-tiling-bf16": {"reference": "onnx_fp32_reference_results"},
+    "gemm_bf16": {"reference": "onnx_fp32_reference_results"},
 }

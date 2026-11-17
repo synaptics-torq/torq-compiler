@@ -270,14 +270,3 @@ def _run_ort_fp32(onnx_model, input_data):
         ort_inputs[inp.name] = data
     outputs = ort_session.run(None, ort_inputs)
     return [np.asarray(o).astype(ml_dtypes.bfloat16).astype(np.float32) for o in outputs]
-
-
-@versioned_unhashable_object_fixture
-def bf16_onnx_fp32_reference_results(mlir_model_file, input_data):
-    """Reference for a bf16 torch_ops model whose ops the llvm-cpu/torch references
-    cannot run (e.g. a full backbone whose bf16 MaxPool trips 'util.initializer'
-    legalization on llvm-cpu). Requires a sibling <name>.onnx next to the .mlir: cast
-    it to fp32, run onnxruntime, round back to bf16. Wired in tests/ops/test_torch_ops.py."""
-    onnx_path = Path(str(mlir_model_file)).with_suffix(".onnx")
-    model = onnx.load(str(onnx_path))
-    return _run_ort_fp32(model, input_data)

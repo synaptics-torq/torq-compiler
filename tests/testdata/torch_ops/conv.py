@@ -447,6 +447,7 @@ CASES = {
         weight_range=(-0.3828125, 0.298828125), activation="relu",
         **_CONV_3X3_ATTRS, group=1, strides=[1, 1],
     ),
+    # The nonzero input zero point (si8 -23) must fold into the bias (the NSS does not subtract it).
     "conv_izp_i8": make_conv_izp_i8,
     "depthwise-conv1d-bf16-c464-k5": partial(
         _make_conv, [1, 464, 320], [464, 1, 5], [1, 464, 320], weight_value=0.30078125,
@@ -571,15 +572,17 @@ CASES = {
 }
 
 CONFIG = {
-    # The llvm-cpu reference reads the 2-element bf16 bias as [11, 11]
-    # (synaptics-torq/torq-compiler-dev#3053).
+    # The llvm-cpu reference accumulates bf16 convs and matmuls in bf16, and reads 2-element bf16
+    # constants wrong (synaptics-torq/torq-compiler-dev#3053): these cases compare against
+    # onnxruntime in fp32.
     "depthwise_conv2d_bf16_2x3x3_pad1_2x16x16": {"reference": "onnx_fp32_reference_results"},
     "depthwise_conv2d_bf16_2x5x5_pad2_2x16x16": {"reference": "onnx_fp32_reference_results"},
-    "depthwise_conv2d_bf16_4x3x3_pad1_4x16x16": {"comparison": {"fp_max_tol": 0.05}},
+    "depthwise_conv2d_bf16_4x3x3_pad1_4x16x16": {"reference": "onnx_fp32_reference_results"},
+    "Conv2d_bf16_1x1x64x8192": {"reference": "onnx_fp32_reference_results"},
+    "conv1d_matmul_bf16_tile_and_fuse": {"reference": "onnx_fp32_reference_results"},
     # bf16 intermediates: ~0.1% of the outputs are 1 ULP off after each of the first two convs,
     # which the next convs amplify past the default tolerance on near-cancelling outputs.
     "conv2d_bf16_chain_k5s2_k3s2_k3s2_32x240x320": {"comparison": {"allowed_wrong": 0.002}},
-    "Conv2d_bf16_1x1x64x8192": {"comparison": {"fp_max_tol": 1.1, "fp_avg_tol": 0.2}},
     # Gates of one int8 step, not two: a few outputs differ from the float reference by one step.
     "conv-qdq-sliced-remainder-i8": {
         "comparison": {"use_abs_tol_gate": 1.0, "fp_abs_tol_frac": 0.03},
@@ -593,11 +596,8 @@ CONFIG = {
     # The reduced Moonshine encoder convs and conv2d-host keep the host/CSS fallback.
     "conv1d-bf16-c288-k7-s3": {"compiler_options": []},
     "conv1d-bf16-c576-k3-s2": {"compiler_options": []},
-    "conv1d-bf16-k127-s64": {
-        "compiler_options": [],
-        "comparison": {"fp_avg_tol": 0.2, "fp_max_tol": 1.0},
-    },
-    "conv2d-host": {"compiler_options": [], "comparison": {"epsilon": 1e-3}},
+    "conv1d-bf16-k127-s64": {"compiler_options": [], "reference": "onnx_fp32_reference_results"},
+    "conv2d-host": {"compiler_options": []},
     # Tiled int8 QDQ conv W-shift regressions, one per conv lowering path: conv1d_307 (kw=7)
     # goes through the EK kernel; conv1d_295 (kw=11) takes the legacy path, whose baseOffset
     # W-correction the fix restores (without it, ~80% of the outputs are wrong). The residual
@@ -606,10 +606,6 @@ CONFIG = {
     # percent of the elements, more on sr200 (~2%) than on sl2610.
     "conv1d_295_qdq_tiled": {"comparison": {"fp_max_tol": 0.2, "allowed_wrong": 0.05}},
     "conv1d_307_qdq_tiled": {"comparison": {"fp_max_tol": 0.2, "allowed_wrong": 0.02}},
-    "conv1d_matmul_bf16_tile_and_fuse": {"comparison": {"fp_max_tol": 0.05}},
-    # The nonzero input zero point (si8 -23) must fold into the bias (the NSS does not subtract
-    # it). The residual is bf16 requant rounding.
-    "conv_izp_i8": {"comparison": {"fp_max_tol": 0.2, "allowed_wrong": 0.06}},
     # The S2D fold accumulates this stride-64 conv1d (audio-encoder layer) in a different order
     # than the llvm-cpu f32 reference: a few near-cancellation outputs (~3.5e-5) are ~1 bf16 ULP
     # off, beyond the default relative fp_max_tol. Measured on sim-sl2610: 9/359712 differ (max

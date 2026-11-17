@@ -29,7 +29,6 @@ CONFIG = {
             "--torq-disable-host", "--torq-disable-css", "--torq-convert-dtypes",
             "--torq-convert-io-dtype",
         ],
-        "comparison": {"int_tol": 2.0},
     },
     "dynamicquantize_large": {
         "compiler_options": [

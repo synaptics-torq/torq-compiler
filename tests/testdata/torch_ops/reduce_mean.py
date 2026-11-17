@@ -42,21 +42,17 @@ CASES = {
 
 # The NPU accumulates reductions in fp32, while the llvm-cpu reference accumulates in bf16. For
 # large reductions, or small ones over large inputs that cancel, the reference is the inaccurate
-# side, so these cases use an fp32-accumulated numpy reference.
+# side, so these cases use an fp32 reference.
 CONFIG = {
-    "reducemean": {"comparison": {"fp_max_tol": 0.31, "fp_avg_tol": 0.03}},
-    "reducemean-reshape": {"comparison": {"fp_max_tol": 0.31, "fp_avg_tol": 0.03}},
-    "reducemean-tiling": {
-        "comparison": {"fp_max_tol": 0.091},
-        "reference": "numpy_reducemean_reference_results",
-    },
+    "reducemean": {"reference": "onnx_fp32_reference_results"},
+    "reducemean-reshape": {"reference": "onnx_fp32_reference_results"},
+    "reducemean-tiling": {"reference": "numpy_reducemean_reference_results"},
     # LRAM-limit regression pinned to the no-slicing path used for real models (the sliced path
     # splits the reduction across slices and has an unrelated numeric mismatch at this width).
     "reducemean_wide_kept_dims_bf16": {
         "compiler_options": [
             "--torq-disable-slicing", "--torq-disable-host", "--torq-disable-css",
         ],
-        "comparison": {"fp_max_tol": 0.06, "fp_avg_tol": 0.02},
         "reference": "numpy_reducemean_reference_results",
     },
 }

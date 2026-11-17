@@ -192,36 +192,19 @@ CASES = {
     "matmul-notile-m7-k113-n80-bf16": partial(_make_matmul, [2, 7, 113], [2, 113, 80]),
 }
 
-# matmul_dql: block quantization rounds at block boundaries, which amplifies the relative error
-# of small outputs.
 # matmulinteger: ONNX DynamicQuantizeLinear tensors are always f32, so the DQL -> MatMulInteger
 # -> dequant chain is only reachable in a bf16 pipeline with --torq-convert-dtypes.
 CONFIG = {
-    # The tolerances of the MLIR files. For m7, the llvmcpu reference is less accurate than the
-    # NPU (up to ~200 vs ~60 absolute error against a float64 matmul): the gate ignores
-    # near-zero outputs where this is large relatively.
-    "matmul-notile-m3-k127-n80-bf16": {"comparison": {"fp_max_tol": 0.7, "epsilon": 1e-3}},
-    "matmul-notile-m7-k113-n80-bf16": {
-        "comparison": {"fp_max_tol": 0.05, "use_abs_tol_gate": 1.0, "fp_abs_tol_frac": 0.01},
-    },
-    "dequant_matmul_zp_n6": {"comparison": {"fp_max_tol": 0.1, "allowed_wrong": 0.1}},
-    "dequant_matmul_zp_nested_tile": {"comparison": {"fp_max_tol": 0.1, "allowed_wrong": 0.1}},
-    "dequant_matmul_zp_wide_n": {"comparison": {"fp_max_tol": 0.1, "allowed_wrong": 0.1}},
-    # K-split repros: the NSS accumulates the chunks in fp32 and rounds once, so the reference
-    # is a numpy matmul in fp32 (the llvm-cpu reference accumulates in bf16). Positive inputs
-    # keep cancellation noise from dominating the comparison.
+    # The NPU accumulates in fp32, the llvm-cpu reference in bf16: these cases compare against
+    # onnxruntime in fp32.
+    "matmul-notile-m3-k127-n80-bf16": {"reference": "onnx_fp32_reference_results"},
+    "matmul-notile-m7-k113-n80-bf16": {"reference": "onnx_fp32_reference_results"},
+    # K-split repros. Positive inputs keep cancellation noise from dominating the comparison.
     "matmul-1x128x3072x768-bf16": {
         "input_range": [0, 2],
-        "comparison": {"fp_avg_tol": 0.05, "fp_max_tol": 0.15, "allowed_wrong": 0.01},
-        "reference": "numpy_matmul_const_weight_reference_results",
+        "reference": "onnx_fp32_reference_results",
     },
     "matmul-1x128x768x3072-bf16": {"reference": "numpy_matmul_const_weight_reference_results"},
-    "matmul_dql_128x256_i4_zp": {"comparison": {"fp_max_tol": 0.5, "allowed_wrong": 0.2}},
-    "matmul_dql_q4_0": {"comparison": {"fp_max_tol": 0.5, "allowed_wrong": 0.2}},
-    "matmul_dql_q8_0": {"comparison": {"fp_max_tol": 0.5, "allowed_wrong": 0.2}},
-    "matmul_dql_q8_0_odd_tile": {"comparison": {"fp_max_tol": 0.5, "allowed_wrong": 0.2}},
-    "matmul_dql_q8_0_zp_splat_tiled": {"comparison": {"fp_max_tol": 0.5, "allowed_wrong": 0.2}},
-    "matmul_dql_q8_0_zp_zero_tiled": {"comparison": {"fp_max_tol": 0.5, "allowed_wrong": 0.2}},
     "matmulinteger_depthwise_conv": {
         "compiler_options": [
             "--torq-disable-host", "--torq-disable-css", "--torq-convert-dtypes",

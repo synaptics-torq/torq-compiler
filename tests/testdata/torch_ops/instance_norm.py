@@ -24,9 +24,6 @@ CONFIG = {
         # torch-mlir 3.12 decomposes InstanceNormalization in f32 inside the dispatch (bf16
         # interfaces); the NSS elementwise path needs bf16, so demote the cone back.
         "compiler_options": ["--torq-convert-dtypes"],
-        # The bf16 output carries ~1 bf16 ULP of error: against the fp32 numpy reference a few
-        # near-zero elements just exceed the default fp_max_tol.
-        "comparison": {"fp_max_tol": 2e-2, "allowed_wrong": 1e-3},
         "reference": "numpy_instancenorm_reference_results",
     },
 }

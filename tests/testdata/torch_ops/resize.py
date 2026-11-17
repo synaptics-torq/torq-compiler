@@ -30,7 +30,3 @@ def make_resize_nearest_upsample_fpn_bf16():
 CASES = {
     "resize_nearest_upsample_fpn_bf16": make_resize_nearest_upsample_fpn_bf16,
 }
-
-CONFIG = {
-    "resize_nearest_upsample_fpn_bf16": {"comparison": {"fp_max_tol": 0.05, "allowed_wrong": 0.03}},
-}

@@ -78,7 +78,9 @@ def torch_ops_torch_mlir_model_file(request, versioned_file, torch_ops_torch_mod
 @versioned_unhashable_object_fixture
 def onnx_fp32_reference_results(torch_ops_onnx_model, input_data):
     """The outputs of onnxruntime, which has no bf16 kernels, on the ONNX model of the case cast to
-    fp32, rounded to bf16. For cases whose llvm-cpu reference is wrong."""
+    fp32, rounded to bf16. For bf16 cases whose llvm-cpu reference is wrong, or less accurate than
+    Torq: it accumulates bf16 convs, matmuls and reductions in bf16, while Torq accumulates them in
+    fp32."""
     return _run_ort_fp32(torch_ops_onnx_model, input_data)
 
 

@@ -19,5 +19,5 @@ CASES = {
 }
 
 CONFIG = {
-    "localavgpool": {"comparison": {"fp_avg_tol": 0.2, "fp_max_tol": 1.004}},
+    "localavgpool": {"reference": "onnx_fp32_reference_results"},
 }
