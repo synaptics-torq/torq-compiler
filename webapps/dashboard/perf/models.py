@@ -1,5 +1,5 @@
 from django.db import models
-from django.utils.functional import cached_property
+from django.db.models import Count
 
 
 class TestCase(models.Model):
@@ -161,29 +161,33 @@ class TestSession(models.Model):
     def test_runs(self):
         return TestRun.objects.filter(test_run_batch__test_session=self)
 
-    @cached_property
-    def num_passed(self):        
-        return TestRun.objects.filter(test_run_batch__test_session=self, outcome=TestRun.Outcome.PASS).count()
+    """ Number of test runs of the session, in total and per outcome, updated by refresh_outcome_counts()
+    at the end of each import, so that pages listing many sessions don't count their test runs."""
+    num_total = models.PositiveIntegerField(default=0)
+    num_passed = models.PositiveIntegerField(default=0)
+    num_failed = models.PositiveIntegerField(default=0)
+    num_skipped = models.PositiveIntegerField(default=0)
+    num_error = models.PositiveIntegerField(default=0)
+    num_xfail = models.PositiveIntegerField(default=0)
+    num_nxpass = models.PositiveIntegerField(default=0)
 
-    @cached_property
-    def num_skipped(self):        
-        return TestRun.objects.filter(test_run_batch__test_session=self, outcome=TestRun.Outcome.SKIP).count()
+    def refresh_outcome_counts(self):
+        """Recounts the test runs of the session per outcome and stores the counts."""
 
-    @cached_property
-    def num_failed(self):
-        return TestRun.objects.filter(test_run_batch__test_session=self, outcome=TestRun.Outcome.FAIL).count()
+        counts = dict(TestRun.objects.filter(test_run_batch__test_session=self)
+                      .order_by()
+                      .values_list('outcome')
+                      .annotate(count=Count('id')))
 
-    @cached_property
-    def num_error(self):
-        return TestRun.objects.filter(test_run_batch__test_session=self, outcome=TestRun.Outcome.ERROR).count()
-
-    @cached_property
-    def num_total(self):
-        return TestRun.objects.filter(test_run_batch__test_session=self).count()
-
-    @cached_property
-    def num_xfail(self):
-        return TestRun.objects.filter(test_run_batch__test_session=self, outcome=TestRun.Outcome.XFAIL).count()
+        self.num_total = sum(counts.values())
+        self.num_passed = counts.get(TestRun.Outcome.PASS, 0)
+        self.num_failed = counts.get(TestRun.Outcome.FAIL, 0)
+        self.num_skipped = counts.get(TestRun.Outcome.SKIP, 0)
+        self.num_error = counts.get(TestRun.Outcome.ERROR, 0)
+        self.num_xfail = counts.get(TestRun.Outcome.XFAIL, 0)
+        self.num_nxpass = counts.get(TestRun.Outcome.NXPASS, 0)
+        self.save(update_fields=['num_total', 'num_passed', 'num_failed', 'num_skipped', 'num_error',
+                                 'num_xfail', 'num_nxpass'])
 
     @property
     def git_commit_url(self):

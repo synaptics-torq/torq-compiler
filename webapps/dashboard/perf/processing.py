@@ -222,6 +222,8 @@ def _import_test_runs(test_run_batch, manifest, root_dir):
         test_run_batch.processed = True
         test_run_batch.save()
 
+        test_run_batch.test_session.refresh_outcome_counts()
+
 
 @spool
 def process_uploaded_zip(args):

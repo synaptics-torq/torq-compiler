@@ -9,7 +9,6 @@ from rest_framework import viewsets, filters, status
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.decorators import action
-from django.db.models import Count, Q
 from drf_spectacular.utils import extend_schema, OpenApiParameter, inline_serializer
 from drf_spectacular.openapi import OpenApiTypes
 from rest_framework import serializers
@@ -133,15 +132,7 @@ class TestGroupViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class TestSessionViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = TestSession.objects.annotate(
-        num_total=Count('testrunbatch__testrun'),
-        num_passed=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.PASS)),
-        num_failed=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.FAIL)),
-        num_skipped=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.SKIP)),
-        num_error=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.ERROR)),
-        num_xfail=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.XFAIL)),
-        num_nxpass=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.NXPASS))
-    ).all()
+    queryset = TestSession.objects.all()
     serializer_class = TestSessionSerializer
     pagination_class = StandardResultsSetPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]

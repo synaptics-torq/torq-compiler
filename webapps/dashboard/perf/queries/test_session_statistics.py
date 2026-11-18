@@ -15,16 +15,6 @@ def get_main_branch_test_counts_over_time(limit=None):
     sessions = (
         TestSession.objects
         .filter(git_branch='refs/heads/main', test_plan='torq')
-        .annotate(
-            num_total=Count(
-                'testrunbatch__testrun',
-                filter=~Q(testrunbatch__testrun__outcome=TestRun.Outcome.SKIP),
-            ),
-            num_xfail=Count(
-                'testrunbatch__testrun',
-                filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.XFAIL),
-            ),
-        )
         .order_by('-timestamp', '-id')
     )
 
@@ -53,17 +43,8 @@ def get_latest_sessions_stats(criterias: Q, limit=None):
     if limit is not None:
         ids = ids[:limit]
 
-    # Annotate the sessions with the counts of test runs by outcome
     sessions_with_stats = (TestSession.objects
         .filter(id__in=ids)
-        .annotate(
-            num_total=Count('testrunbatch__testrun', filter=~Q(testrunbatch__testrun__outcome=TestRun.Outcome.SKIP)),
-            num_passed=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.PASS)),
-            num_failed=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.FAIL)),
-            num_error=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.ERROR)),
-            num_xfail=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.XFAIL)),
-            num_nxpass=Count('testrunbatch__testrun', filter=Q(testrunbatch__testrun__outcome=TestRun.Outcome.NXPASS))
-        )
         .order_by('-timestamp')
     )
 
