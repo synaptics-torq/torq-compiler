@@ -6,8 +6,8 @@
 
 // After a new IREE version, tosa.conv2d with weight_zp != 0 emits a
 // decomposed WZP-correction chain containing linalg.pooling_nhwc_sum and
-// tensor.collapse_shape inside the fuse-group.  createClonedBlock() later
-// hoists these ops before the conv anchor, producing a dominance violation.
+// an optional tensor.collapse_shape inside the fuse-group. createClonedBlock()
+// later hoists these ops before the conv anchor, producing a dominance violation.
 //
 // This pattern fixes the issue by folding weight_zp into the weight tensor at
 // compile time (w' = w - wzp), which makes the runtime Σ(input)*wzp chain
@@ -111,7 +111,7 @@ matchInputZpCorrection(linalg::GenericOp termB, Value weights, int64_t wzp) {
     return InputZpCorrection{weightSum, termC};
 }
 
-// Matches the pooling_nhwc_sum → collapse_shape → subi(acc, Σinput*wzp) chain
+// Matches pooling_nhwc_sum → [collapse_shape →] subi(acc, Σinput*wzp)
 // produced by new IREE for quantized conv with weight_zp != 0, and replaces it
 // by pre-subtracting wzp from the weights at compile time.
 struct AbsorbWzpCorrectionPattern : public RewritePattern {
@@ -121,14 +121,15 @@ struct AbsorbWzpCorrectionPattern : public RewritePattern {
     LogicalResult matchAndRewrite(Operation *op, PatternRewriter &rewriter) const override {
         auto poolingOp = cast<linalg::PoolingNhwcSumOp>(op);
 
-        // Match: pooling → collapse_shape → termB (subi(acc, Σinput*wzp))
-        auto collapseOp = getSingleUser<tensor::CollapseShapeOp>(poolingOp->getResult(0));
-        if (!collapseOp)
-            return rewriter.notifyMatchFailure(
-                op, "expected single-use collapse_shape after pooling"
-            );
+        // Regular convolution collapses the pooled channel reduction before
+        // subtracting it. Depthwise convolution already has one sum per channel
+        // in the output shape, so it feeds the correction directly.
+        Value pooledSum = poolingOp->getResult(0);
+        auto collapseOp = getSingleUser<tensor::CollapseShapeOp>(pooledSum);
+        if (collapseOp)
+            pooledSum = collapseOp.getResult();
 
-        auto termB = getSingleUser<linalg::GenericOp>(collapseOp.getResult());
+        auto termB = getSingleUser<linalg::GenericOp>(pooledSum);
         if (!termB || termB.getNumDpsInputs() != 2)
             return rewriter.notifyMatchFailure(op, "unexpected termB shape");
 
@@ -147,8 +148,11 @@ struct AbsorbWzpCorrectionPattern : public RewritePattern {
 
         // Walk back through intervening generics to find the conv/matmul.
         Operation *convAnchor = nullptr;
+        SmallVector<linalg::GenericOp> accumulatorChain;
         Value val = termB.getDpsInputOperand(0)->get();
         for (int i = 0; i < 20 && val; ++i) {
+            if (!collapseOp && !val.hasOneUse())
+                return rewriter.notifyMatchFailure(op, "shared direct correction accumulator");
             Operation *def = val.getDefiningOp();
             if (!def)
                 break;
@@ -161,18 +165,80 @@ struct AbsorbWzpCorrectionPattern : public RewritePattern {
             auto g = dyn_cast<linalg::GenericOp>(def);
             if (!g || g.getNumDpsInputs() < 1)
                 break;
+            accumulatorChain.push_back(g);
             val = g.getDpsInputOperand(0)->get();
         }
         if (!convAnchor)
             return rewriter.notifyMatchFailure(op, "conv/matmul anchor not found");
+
+        if (!collapseOp) {
+            if (!isa<linalg::DepthwiseConv2DNhwcHwcOp>(convAnchor))
+                return rewriter.notifyMatchFailure(
+                    op, "direct pooling correction is not depthwise"
+                );
+            if (*wzp < -128 || *wzp > 127 || !termB.hasPureTensorSemantics() ||
+                termB.getNumDpsInits() != 1)
+                return rewriter.notifyMatchFailure(op, "unsupported direct correction type");
+            auto poolInit = poolingOp.getDpsInitOperand(0)->get().getDefiningOp<linalg::FillOp>();
+            if (!poolInit || getIntConst(poolInit.getInputs()[0]) != 0)
+                return rewriter.notifyMatchFailure(op, "pool sum does not start at zero");
+            // Only absorb the direct correction of this same depthwise input,
+            // window and stride, with the accumulator and pooled sum in order.
+            auto conv = cast<linalg::DepthwiseConv2DNhwcHwcOp>(convAnchor);
+            auto accArg = dyn_cast<BlockArgument>(subi.getLhs());
+            auto sumArg = dyn_cast<BlockArgument>(muli.getLhs());
+            auto filterType = cast<RankedTensorType>(conv.getInputs()[1].getType());
+            auto windowType = cast<RankedTensorType>(poolingOp.getInputs()[1].getType());
+            if (!accArg || !sumArg || accArg.getOwner() != termB.getBody() ||
+                sumArg.getOwner() != termB.getBody() || accArg.getArgNumber() != 0 ||
+                sumArg.getArgNumber() != 1 || termB.getInputs()[1] != pooledSum ||
+                poolingOp.getInputs()[0] != conv.getInputs()[0] ||
+                poolingOp.getStrides() != conv.getStrides() ||
+                poolingOp.getDilations() != conv.getDilations() ||
+                windowType.getShape() != filterType.getShape().take_front(2))
+                return rewriter.notifyMatchFailure(op, "unmatched direct depthwise correction");
+
+            if (termB.getNumReductionLoops() ||
+                !llvm::all_of(termB.getIndexingMapsArray(), [](AffineMap map) {
+                    return map.isIdentity();
+                }))
+                return rewriter.notifyMatchFailure(op, "direct correction is not elementwise");
+            // Moving a weight offset into the convolution is valid through
+            // accumulator +/- bias, but not through scaling or nonlinear ops.
+            for (auto generic : accumulatorChain) {
+                if (!generic.hasPureTensorSemantics() || generic.getNumDpsInits() != 1 ||
+                    generic.getNumReductionLoops() ||
+                    !generic.getMatchingIndexingMap(generic.getDpsInputOperand(0)).isIdentity() ||
+                    !generic.getMatchingIndexingMap(generic.getDpsInitOperand(0)).isIdentity())
+                    return rewriter.notifyMatchFailure(
+                        op, "non-elementwise correction accumulator"
+                    );
+                auto yield = cast<linalg::YieldOp>(generic.getBody()->getTerminator());
+                auto arithmetic = yield.getValues()[0].getDefiningOp();
+                if (!arithmetic || !isa<arith::AddIOp, arith::SubIOp>(arithmetic) ||
+                    arithmetic->getOperand(0) != generic.getBody()->getArgument(0))
+                    return rewriter.notifyMatchFailure(op, "non-additive correction accumulator");
+                SmallVector<Value> pending{arithmetic->getOperand(1)};
+                while (!pending.empty()) {
+                    Value current = pending.pop_back_val();
+                    if (current == generic.getBody()->getArgument(0))
+                        return rewriter.notifyMatchFailure(op, "accumulator used in bias");
+                    auto definingOp = current.getDefiningOp();
+                    if (definingOp && definingOp->getNumRegions())
+                        return rewriter.notifyMatchFailure(op, "region in correction bias");
+                    if (definingOp && definingOp->getBlock() == generic.getBody())
+                        llvm::append_range(pending, definingOp->getOperands());
+                }
+            }
+        }
 
         if (convAnchor->getNumOperands() < 2)
             return rewriter.notifyMatchFailure(op, "anchor has too few operands");
 
         Value origWeights = convAnchor->getOperand(1);
         auto wTy = dyn_cast<RankedTensorType>(origWeights.getType());
-        if (!wTy)
-            return rewriter.notifyMatchFailure(op, "weights not a ranked tensor");
+        if (!wTy || (!collapseOp && !wTy.getElementType().isInteger(8)))
+            return rewriter.notifyMatchFailure(op, "weights are not a supported ranked tensor");
 
         auto izpCorrection = matchInputZpCorrection(termB, origWeights, *wzp);
 
@@ -227,7 +293,7 @@ struct AbsorbWzpCorrectionPattern : public RewritePattern {
         // Drop termB (the runtime Σinput*wzp correction is no longer needed).
         rewriter.replaceOp(termB, termB.getDpsInputOperand(0)->get());
 
-        if (collapseOp->use_empty())
+        if (collapseOp && collapseOp->use_empty())
             rewriter.eraseOp(collapseOp);
         if (poolingOp->use_empty())
             rewriter.eraseOp(poolingOp);
