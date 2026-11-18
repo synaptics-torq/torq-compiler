@@ -9,6 +9,18 @@ from torq.testing.onnx_builder import BF16, F32, I4, I8, I64, OnnxGraph
 KIND = "onnx"
 
 
+def make_matmul_bias_stream_64x4096x1024():
+    # f32 MatMul + per-column bias: the stream schedule tiles N so that one fc-fast tile is 7
+    # columns wide, and its 7-record (28-byte) bias read used to abort DEBR, which only takes
+    # 4/8/16/32-byte reads. A small splat weight keeps the output dominated by the bias, so a
+    # wrong bias read fails the comparison; the bias must not be a splat.
+    g = OnnxGraph(opset=21)
+    x = g.input("x", F32, [64, 4096])
+    y = g.op("MatMul", x, g.const(np.full([4096, 1024], 1e-4), F32), dtype=F32, shape=[64, 1024])
+    bias = g.const(np.random.default_rng(0).uniform(-1, 1, [1024]), F32)
+    return g.export(g.op("Add", y, bias, dtype=F32, shape=[64, 1024]))
+
+
 def _make_block_dequant_matmul(
     weight_shape, block_size, *, zero_point_range=None, zero_point=0, scale=1.0, opset=21
 ):
@@ -162,6 +174,7 @@ CASES = {
         _make_matmul, [64, 1600], [1600, 126], weight_value=0.010009765625
     ),
     "matmul-wi8-dequant-loop-reorder-bf16": make_matmul_wi8_dequant_loop_reorder_bf16,
+    "matmul_bias_stream_64x4096x1024": make_matmul_bias_stream_64x4096x1024,
     "matmul_dql_q8_0": make_matmul_dql_q8_0,
     "matmul_dql_q8_0_odd_tile": partial(
         _make_block_dequant_matmul, [640, 205], 32, zero_point_range=(-84, 77), opset=22
@@ -205,6 +218,15 @@ CONFIG = {
         "reference": "numpy_matmul_const_weight_reference_results",
     },
     "matmul-1x128x768x3072-bf16": {"reference": "numpy_matmul_const_weight_reference_results"},
+    # The SL2610 full-model flags. bf16 output: near-zero outputs (bias cancelling the matmul)
+    # are judged by the absolute gate, about one bf16 ULP of the output range.
+    "matmul_bias_stream_64x4096x1024": {
+        "compiler_options": [
+            "--torq-disable-host", "--torq-disable-css", "--torq-convert-dtypes",
+            "--torq-convert-io-dtype", "--torq-prefetch-algorithm=stream-schedule",
+        ],
+        "comparison": {"use_abs_tol_gate": True, "fp_abs_tol_frac": 0.01},
+    },
     "matmul_dql_128x256_i4_zp": {"comparison": {"fp_max_tol": 0.5, "allowed_wrong": 0.2}},
     "matmul_dql_q4_0": {"comparison": {"fp_max_tol": 0.5, "allowed_wrong": 0.2}},
     "matmul_dql_q8_0": {"comparison": {"fp_max_tol": 0.5, "allowed_wrong": 0.2}},
