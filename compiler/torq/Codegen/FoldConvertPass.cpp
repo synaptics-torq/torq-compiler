@@ -669,21 +669,7 @@ class SwapExtractAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
             return failure();
         }
 
-        // we don't support rank reducing extract operations
-        if (extractOp.getSource().getType().getRank() !=
-            extractOp.getResult().getType().getRank()) {
-            return failure();
-        }
-
-        if (auto rejection = checkSliceIsOneBlock(extractOp)) {
-            return reject(op, rewriter, *rejection);
-        }
-
-        if (auto rejection = checkConsumers(extractOp)) {
-            return reject(op, rewriter, *rejection);
-        }
-
-        if (auto rejection = checkResidency(op, extractOp)) {
+        if (auto rejection = getRejection(op, extractOp)) {
             return reject(op, rewriter, *rejection);
         }
 
@@ -710,7 +696,6 @@ class SwapExtractAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
         return success();
     }
 
-  private:
     // Why a guard turned the swap down: a short tag for the debug log, and a reason for the
     // pattern driver. A guard returns nothing when it lets the swap through.
     struct Rejection {
@@ -718,6 +703,25 @@ class SwapExtractAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
         const char *reason;
     };
 
+    // Why the swap of the convert `op` and its user `extractOp` is turned down, or nothing if the
+    // swap applies. CopySliceInLram asks it too, so that it leaves these slices to the swap.
+    std::optional<Rejection>
+    getRejection(torq_hl::ConvertOp op, tensor::ExtractSliceOp extractOp) const {
+        // we don't support rank reducing extract operations
+        if (extractOp.getSource().getType().getRank() !=
+            extractOp.getResult().getType().getRank()) {
+            return Rejection{"rank reducing", "rank reducing slice"};
+        }
+        if (auto rejection = checkSliceIsOneBlock(extractOp)) {
+            return rejection;
+        }
+        if (auto rejection = checkConsumers(extractOp)) {
+            return rejection;
+        }
+        return checkResidency(op, extractOp);
+    }
+
+  private:
     static LogicalResult
     reject(torq_hl::ConvertOp op, PatternRewriter &rewriter, Rejection rejection) {
         LLVM_DEBUG(llvm::dbgs() << "SwapExtractAndConvert: blocked (" << rejection.tag << ")\n");
@@ -912,6 +916,92 @@ class SwapExtractAndConvert : public OpRewritePattern<torq_hl::ConvertOp> {
     int64_t lramSize_;
 };
 
+// Copy a slice of a kernel output in LRAM when the kernel output would otherwise go to XRAM and
+// come back as the slice:
+//
+//   %s = convert(xram, %x : lram)            // store, staged through a dense copy of %x
+//   %e = tensor.extract_slice %s[...]
+//   %l = convert(lram, %e)                   // load
+//
+// becomes
+//
+//   %e = tensor.extract_slice %x[...]        // strided view of %x in LRAM
+//   %l = convert(lram, %e)                   // LRAM to LRAM copy of the slice
+//
+// For the slices that SwapExtractAndConvert turns down, because the consumer kernel cannot read
+// the strided view (e.g. the crop of a max pool computed padded, which cuts H and W). The consumer
+// still reads a dense LRAM buffer, the same as the load gave it.
+//
+// The data of %x is not dense (its rows are padded for the kernel that wrote it), so the store
+// copies it to a dense LRAM buffer before the DMA. The rewrite replaces that copy, the store and
+// the load with one copy of the slice: it saves the two DMAs and never needs more LRAM. A dense
+// %x is left alone: the store reads it in place, and keeping it live until the copy would cost
+// the size of the slice.
+//
+// Only when no kernel runs between the store and the load: otherwise %x would stay live in LRAM
+// while that kernel runs, instead of waiting in XRAM. And only when SwapExtractAndConvert turns
+// the slice down: where it applies, the consumer reads the view and there is no copy at all.
+class CopySliceInLram : public OpRewritePattern<torq_hl::ConvertOp> {
+  public:
+    CopySliceInLram(MLIRContext *ctx, int64_t lramSize)
+        : OpRewritePattern(ctx), swap_(ctx, lramSize) {}
+
+    LogicalResult matchAndRewrite(torq_hl::ConvertOp op, PatternRewriter &rewriter) const override {
+
+        if (!op.getOutput() ||
+            getEncodingMemorySpace(op.getOutput().getType()) != torq_hl::MemorySpace::Lram) {
+            return failure();
+        }
+
+        auto extractOp = op.getInput().getDefiningOp<tensor::ExtractSliceOp>();
+        if (!extractOp || extractOp.getSourceType().getRank() != extractOp.getType().getRank() ||
+            !extractOp.hasUnitStride()) {
+            return failure();
+        }
+
+        auto storeOp = extractOp.getSource().getDefiningOp<torq_hl::ConvertOp>();
+        if (!storeOp || !storeOp.getOutput() ||
+            getEncodingMemorySpace(storeOp.getOutput().getType()) == torq_hl::MemorySpace::Lram) {
+            return failure();
+        }
+
+        auto source = dyn_cast<TypedValue<RankedTensorType>>(storeOp.getInput());
+        if (!source || getEncodingMemorySpace(source.getType()) != torq_hl::MemorySpace::Lram) {
+            return failure();
+        }
+        if (isDenseInMemory(source.getType())) {
+            return rewriter.notifyMatchFailure(op, "the store reads a dense source in place");
+        }
+        if (storeOp->hasOneUse() && !swap_.getRejection(storeOp, extractOp)) {
+            return rewriter.notifyMatchFailure(op, "left to SwapExtractAndConvert");
+        }
+
+        if (storeOp->getBlock() != op->getBlock() || !storeOp->isBeforeInBlock(op)) {
+            return rewriter.notifyMatchFailure(op, "store and load are not in the same block");
+        }
+        for (Operation *it = storeOp->getNextNode(); it != op.getOperation();
+             it = it->getNextNode()) {
+            if (isa<torq_hl::KernelInterface>(it) && !isa<torq_hl::ConvertOp>(it)) {
+                return rewriter.notifyMatchFailure(op, "a kernel runs between store and load");
+            }
+        }
+
+        rewriter.setInsertionPoint(op);
+        auto lramSlice = tensor::ExtractSliceOp::create(
+            rewriter, extractOp.getLoc(), source, extractOp.getMixedOffsets(),
+            extractOp.getMixedSizes(), extractOp.getMixedStrides()
+        );
+        rewriter.modifyOpInPlace(op, [&] { op.getInputMutable().set(lramSlice.getResult()); });
+
+        LLVM_DEBUG(llvm::dbgs() << "CopySliceInLram: applied\n");
+
+        return success();
+    }
+
+  private:
+    SwapExtractAndConvert swap_;
+};
+
 //
 // Finds a concat operation in XRAM that has been expanded to two tensor.insert_slice
 // operations and ensures it is done in LRAM if it is sufficiently small
@@ -1084,6 +1174,126 @@ class KeepConcatInLram : public OpRewritePattern<tensor::InsertSliceOp> {
                 return true;
         }
         return false;
+    }
+
+    int64_t lramSize_;
+};
+
+// Insert an LRAM tensor into another LRAM tensor in LRAM, when both are stored to XRAM only for
+// the insert:
+//
+//   %xs = convert(xram, %x : lram)                   // store
+//   %ds = convert(xram, %d : lram)                   // store
+//   %r  = tensor.insert_slice %xs into %ds[...]      // in XRAM
+//
+// becomes
+//
+//   %s  = tensor.extract_slice %d[...]               // strided view of %d in LRAM
+//   %c  = convert(%s, %x)                            // LRAM to LRAM copy of %x into %d
+//   %rl = tensor.insert_slice %c into %d[...]        // in place, no copy
+//   %r  = convert(xram, %rl)
+//
+// E.g. the pad of a max pool or depthwise conv input: %d is the fill, %x the input. When %r is
+// only loaded back to LRAM, FoldRoundTripConversion then removes the last store and the load, so
+// the two stores, the copy in XRAM and the load become one copy in LRAM.
+//
+// Only for a dense %d: the users that read the load of %r then read %d, and the load gave them a
+// dense buffer.
+//
+// %x and %d are live together until the copy, so their sum must fit in LRAM. And no kernel other
+// than the producers of %x and %d may run between the first store and the insert: that kernel
+// would run with %x or %d live in LRAM, where it used to wait in XRAM.
+class InsertSliceInLram : public OpRewritePattern<tensor::InsertSliceOp> {
+  public:
+    InsertSliceInLram(MLIRContext *ctx, int64_t lramSize)
+        : OpRewritePattern(ctx), lramSize_(lramSize) {}
+
+    LogicalResult
+    matchAndRewrite(tensor::InsertSliceOp op, PatternRewriter &rewriter) const override {
+
+        if (getEncodingMemorySpace(op.getDest().getType()) != torq_hl::MemorySpace::Xram ||
+            !op.hasUnitStride() || op.getSourceType().getRank() != op.getDestType().getRank()) {
+            return failure();
+        }
+
+        auto sourceStore = getStoreOfLram(op.getSource());
+        auto destStore = getStoreOfLram(op.getDest());
+        if (!sourceStore || !destStore) {
+            return failure();
+        }
+
+        auto source = cast<TypedValue<RankedTensorType>>(sourceStore.getInput());
+        auto dest = cast<TypedValue<RankedTensorType>>(destStore.getInput());
+        if (!source.getType().hasStaticShape() || !dest.getType().hasStaticShape()) {
+            return failure();
+        }
+        // The users of the insert then read %d, where they used to read a load of %r. The load
+        // gave them a dense buffer, so %d must be dense too.
+        if (!isDenseInMemory(dest.getType())) {
+            return rewriter.notifyMatchFailure(op, "dest is not dense");
+        }
+
+        int64_t bytes =
+            getEncodedTotalSizeBytes(source.getType()) + getEncodedTotalSizeBytes(dest.getType());
+        if (bytes > lramSizeFor(op, lramSize_)) {
+            return rewriter.notifyMatchFailure(op, "source and dest do not fit in LRAM together");
+        }
+
+        if (sourceStore->getBlock() != op->getBlock() || destStore->getBlock() != op->getBlock()) {
+            return rewriter.notifyMatchFailure(op, "stores and insert are not in the same block");
+        }
+        Operation *first =
+            sourceStore->isBeforeInBlock(destStore) ? sourceStore.getOperation() : destStore;
+        for (Operation *it = first->getNextNode(); it != op.getOperation();
+             it = it->getNextNode()) {
+            if (isa<torq_hl::KernelInterface>(it) && !isa<torq_hl::ConvertOp>(it) &&
+                it != source.getDefiningOp() && it != dest.getDefiningOp()) {
+                return rewriter.notifyMatchFailure(op, "a kernel runs between store and insert");
+            }
+        }
+
+        // Copy %x into its place in %d with an explicit convert. Without it, the bufferization
+        // makes the producer of %x write in place into %d, at the strides of %d, which a kernel
+        // may not support (a max pool output must have dense rows) or run much slower with (a
+        // transpose). %s gets the strides of %d in its type: with the same type as %x, the
+        // convert would fold away as a no-op.
+        auto loc = op.getLoc();
+        auto slotEncoding = torq_hl::TensorEncodingAttr::get(
+            rewriter.getContext(), torq_hl::MemorySpace::Lram, op.getSourceType().getShape(),
+            getEncodedStridesElements(dest.getType()), /* padding = */ 0
+        );
+        auto slotType = RankedTensorType::get(
+            op.getSourceType().getShape(), op.getSourceType().getElementType(), slotEncoding
+        );
+        auto slot = tensor::ExtractSliceOp::create(
+            rewriter, loc, slotType, dest, op.getMixedOffsets(), op.getMixedSizes(),
+            op.getMixedStrides()
+        );
+        auto copy = torq_hl::ConvertOp::create(
+            rewriter, loc, slot.getType(), slot.getResult(), source,
+            /* requirements = */ nullptr, /* encoding = */ getEncoding(slot.getType())
+        );
+        auto lramInsert = tensor::InsertSliceOp::create(
+            rewriter, loc, copy.getResult(0), dest, op.getMixedOffsets(), op.getMixedSizes(),
+            op.getMixedStrides()
+        );
+        rewriter.replaceOp(op, convertTensorToType(rewriter, lramInsert.getResult(), op.getType()));
+
+        LLVM_DEBUG(llvm::dbgs() << "InsertSliceInLram: applied\n");
+
+        return success();
+    }
+
+  private:
+    // The convert that stores an LRAM tensor to `value`, if `value` has no other user.
+    static torq_hl::ConvertOp getStoreOfLram(Value value) {
+        auto convertOp = value.getDefiningOp<torq_hl::ConvertOp>();
+        if (!convertOp || !convertOp->hasOneUse() || !convertOp.getOutput() ||
+            getEncodingMemorySpace(convertOp.getInput().getType()) != torq_hl::MemorySpace::Lram ||
+            getEncodingMemorySpace(convertOp.getOutput().getType()) != torq_hl::MemorySpace::Xram) {
+            return {};
+        }
+        return convertOp;
     }
 
     int64_t lramSize_;
@@ -1397,6 +1607,7 @@ void FoldConvertPass::runOnOperation() {
     // tile loop (see lramSizeFor), or the real pipeline would keep more data in LRAM than the
     // probe that sized the tiles.
     patterns.add<KeepConcatInLram>(ctx, this->lramSize);
+    patterns.add<InsertSliceInLram>(ctx, this->lramSize);
     patterns.add<FoldDuplicateConversion>(ctx);
     if (this->shareSliceOutputs) {
         patterns.add<SinkSliceOutputConvert>(ctx);
@@ -1412,6 +1623,7 @@ void FoldConvertPass::runOnOperation() {
     // the slice. A second guard limits the extra LRAM the swap keeps live, which is what broke
     // efficientnetb0. Both guards are inside the pattern, each with its own comment.
     patterns.add<SwapExtractAndConvert>(ctx, this->lramSize);
+    patterns.add<CopySliceInLram>(ctx, this->lramSize);
 
     FrozenRewritePatternSet frozenPatterns(std::move(patterns));
     if (failed(applyPatternsGreedily(getOperation(), frozenPatterns))) {
