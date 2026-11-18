@@ -89,6 +89,8 @@ CASES = {
     "maxpool_k4_s4_20x20x8": _maxpool((20, 20, 8), 4, 4),
     "maxpool_k4x6_s2_20x20x8": _maxpool((20, 20, 8), (4, 6), 2),
     "maxpool_k5_s3_17x17x8": _maxpool((17, 17, 8), 5, 3),
+    "maxpool_k5_s3_62x80x32": _maxpool((62, 80, 32), 5, 3),
+    "maxpool_k5_s4_61x81x32": _maxpool((61, 81, 32), 5, 4),
     "maxpool_k5_s4_pad2_21x21x8": _maxpool((21, 21, 8), 5, 4, "same"),
     "maxpool_k5x3_s2_11x11x8": _maxpool((11, 11, 8), (5, 3), 2),
     "maxpool_k6_s2_20x20x8": _maxpool((20, 20, 8), 6, 2),
