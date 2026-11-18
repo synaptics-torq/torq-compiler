@@ -1,4 +1,5 @@
 import os
+import traceback
 import zipfile
 import json
 from datetime import timedelta
@@ -6,6 +7,7 @@ from tempfile import TemporaryDirectory
 from django.core.files.base import File
 from django.core.files.storage import default_storage
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 # conditionally import uwsgi spool decorator to make sure this module can be imported also in manage.py
@@ -76,13 +78,157 @@ def create_metrics(metric_names):
     return metrics
 
 
+OUTCOME_MAP = {
+    'passed': TestRun.Outcome.PASS,
+    'failed': TestRun.Outcome.FAIL,
+    'skipped': TestRun.Outcome.SKIP,
+    'error': TestRun.Outcome.ERROR,
+    'xfail': TestRun.Outcome.XFAIL,
+    'nxpass': TestRun.Outcome.NXPASS,
+}
+
+METADATA_FIELDS = ['compiler', 'compiler_input', 'compiler_target', 'compiler_options',
+                   'runtime', 'runtime_target', 'runtime_hw_type', 'runtime_options', 'runtime_input']
+
+
+def _test_case_key(item):
+    return (str(item['module']), str(item['name']), str(item.get('parameters', '')))
+
+
+def _metadata_key(item):
+    # the fields are text columns: compare as the database returns them
+    metadata = item['metadata']
+    return tuple(None if metadata.get(field) is None else str(metadata.get(field)) for field in METADATA_FIELDS)
+
+
+def _get_test_case_ids(keys):
+    """Returns {(module, name, parameters): test case id}, creating the missing test cases."""
+
+    found = TestCase.objects.filter(
+        module__in={k[0] for k in keys},
+        name__in={k[1] for k in keys},
+        parameters__in={k[2] for k in keys},
+    ).values_list('module', 'name', 'parameters', 'id')
+    ids = {(m, n, p): pk for m, n, p, pk in found if (m, n, p) in keys}
+
+    missing = [key for key in keys if key not in ids]
+    created = TestCase.objects.bulk_create([TestCase(module=m, name=n, parameters=p) for m, n, p in missing])
+    ids.update({key: test_case.pk for key, test_case in zip(missing, created)})
+
+    return ids
+
+
+def _get_test_metadata_ids(keys):
+    """Returns {metadata key: test metadata id}, creating the missing test metadata."""
+
+    compiler_inputs = {k[1] for k in keys}
+    query = Q(compiler_input__in=[v for v in compiler_inputs if v is not None])
+    if None in compiler_inputs:
+        query |= Q(compiler_input__isnull=True)
+
+    # TestMetadata has no unique constraint, so the table may hold duplicates: use the oldest one
+    ids = {}
+    for pk, *values in TestMetadata.objects.filter(query).order_by('-id').values_list('id', *METADATA_FIELDS):
+        if tuple(values) in keys:
+            ids[tuple(values)] = pk
+
+    missing = [key for key in keys if key not in ids]
+    created = TestMetadata.objects.bulk_create([TestMetadata(**dict(zip(METADATA_FIELDS, key))) for key in missing])
+    ids.update({key: metadata.pk for key, metadata in zip(missing, created)})
+
+    return ids
+
+
+def _build_test_run(item, test_run_batch, root_dir):
+    """Creates the (unsaved) TestRun of a manifest entry, uploading its failure log and profiling files."""
+
+    outcome = item['outcome']
+
+    test_run = TestRun(
+        test_run_batch=test_run_batch,
+        outcome=OUTCOME_MAP[outcome],
+        linked_issue=item.get('linked_issue'),
+        fetched_results=item.get('fetched_results') or [],
+    )
+
+    # Handle failure log file and server-side classification for failed tests
+    if outcome in ('failed', 'error'):
+        log_content = None
+        failure_log_rel = item.get('failure_log_file')  # relative path inside zip (optional)
+        if failure_log_rel:
+            failure_log_path = os.path.join(root_dir, failure_log_rel)
+            with open(failure_log_path, 'r', encoding='utf-8') as fl:
+                log_content = fl.read()
+
+            # Save the failure log file to storage (same pattern as profiling_data)
+            try:
+                with open(failure_log_path, 'rb') as fl:
+                    test_run.failure_log.save("failure.log", File(fl), save=False)
+            except Exception as e:
+                print(f'Warning: Could not upload failure log {failure_log_rel}: {e}')
+
+        # Classify failure type server-side
+        test_run.failure_type = _classify_failure(item.get('failed_phase', 'call'), log_content or None)
+
+        # Determine final outcome: Output Mismatch stays as FAIL, everything else becomes ERROR
+        if test_run.failure_type != 'Output Mismatch':
+            test_run.outcome = TestRun.Outcome.ERROR
+
+    profiling_rel = item.get('profiling_file')  # relative path inside zip (optional)
+    if profiling_rel:
+        try:
+            with open(os.path.join(root_dir, profiling_rel), 'rb') as pf:
+                test_run.profiling_data.save("trace.pb", File(pf), save=False)
+        except Exception as e:
+            print(f'Warning: Could not upload profiling file {profiling_rel}: {e}')
+
+    return test_run
+
+
+def _import_test_runs(test_run_batch, manifest, root_dir):
+    """
+    Imports the test runs of a manifest into a batch.
+
+    The files are uploaded first, then everything is written in one transaction, with one bulk insert per
+    model: if anything fails, the batch stays empty and unprocessed.
+    """
+
+    items = manifest.get('test_runs', [])
+    test_runs = [_build_test_run(item, test_run_batch, root_dir) for item in items]
+
+    with transaction.atomic():
+        metrics = create_metrics(manifest.get('metrics', []))
+        test_case_ids = _get_test_case_ids({_test_case_key(item) for item in items})
+        metadata_ids = _get_test_metadata_ids({_metadata_key(item) for item in items})
+
+        for item, test_run in zip(items, test_runs):
+            test_run.test_case_id = test_case_ids[_test_case_key(item)]
+            test_run.test_metadata_id = metadata_ids[_metadata_key(item)]
+
+        TestRun.objects.bulk_create(test_runs)
+
+        measurements = []
+        for item, test_run in zip(items, test_runs):
+            for metric_name, value in (item.get('measurements') or {}).items():
+                if metric_name not in metrics:
+                    print(f'Warning: Metric {metric_name} not found for {item["module"]}::{item["name"]}')
+                    continue
+                measurements.append(Measurement(test_run=test_run, metric=metrics[metric_name], value=value))
+        Measurement.objects.bulk_create(measurements)
+
+        # Mark the batch as processed in the same transaction, so that it is processed only once all its
+        # test runs are there
+        test_run_batch.processed = True
+        test_run_batch.save()
+
+
 @spool
 def process_uploaded_zip(args):
     """
     Spooled function to process test runs from uploaded zip files.
 
     This is processed in background thanks to the @spool decorator to avoid having a timeout on upload.
-    
+
     Args:
         args: Dictionary containing:
             - zip_path: Path to the uploaded zip file
@@ -91,159 +237,26 @@ def process_uploaded_zip(args):
 
     zip_path = args['zip_path']
     test_run_batch_id = int(args['test_run_batch_id'])
-    
-    metrics = {}
-    
+
     try:
         # Get the test run batch
         test_run_batch = TestRunBatch.objects.get(id=test_run_batch_id)
-        
+
         with TemporaryDirectory() as temp_dir:
             # Extract the zip file
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(temp_dir)
 
-            # Find JSON manifest named test_session.json
-            manifest_path = os.path.join(temp_dir, 'test_session.json')
-            
-            if not os.path.exists(manifest_path):
-                raise ValueError('Required manifest test_session.json not found in archive.')
-
-            with open(manifest_path, 'r', encoding='utf-8') as f:
+            with open(os.path.join(temp_dir, 'test_session.json'), 'r', encoding='utf-8') as f:
                 manifest = json.load(f)
 
-            metrics = create_metrics(manifest.get('metrics', []))
-
-            outcome_map = {
-                'passed': TestRun.Outcome.PASS,
-                'failed': TestRun.Outcome.FAIL,
-                'skipped': TestRun.Outcome.SKIP,
-                'error': TestRun.Outcome.ERROR,
-                'xfail': TestRun.Outcome.XFAIL,
-                'nxpass': TestRun.Outcome.NXPASS,
-            }
-
-            test_runs = manifest.get('test_runs', [])
-            
-            for item in test_runs:
-                try:
-                    module = item.get('module', '')
-                    name = item.get('name', '')
-                    parameters = item.get('parameters', '')
-                    outcome = item.get('outcome', '')
-                    linked_issue = item.get('linked_issue', None)  # optional linked issue
-                    profiling_rel = item.get('profiling_file')  # relative path inside zip (optional)
-                    
-                    if not module or not name or outcome not in outcome_map:
-                        # Log error but continue processing other test runs
-                        print(f'Invalid run entry in manifest: module={module}, name={name}, outcome={outcome}')
-                        continue
-                    
-                    test_case, _ = TestCase.objects.get_or_create(
-                        module=str(module), name=str(name), parameters=str(parameters)
-                    )
-
-                    test_metadata, _ = TestMetadata.objects.get_or_create(
-                        compiler=item.get('metadata', {}).get('compiler'),
-                        compiler_input=item.get('metadata', {}).get('compiler_input'),
-                        compiler_target=item.get('metadata', {}).get('compiler_target'),
-                        compiler_options=item.get('metadata', {}).get('compiler_options'),
-                        runtime=item.get('metadata', {}).get('runtime'),
-                        runtime_target=item.get('metadata', {}).get('runtime_target'),
-                        runtime_hw_type=item.get('metadata', {}).get('runtime_hw_type'),
-                        runtime_options=item.get('metadata', {}).get('runtime_options'),
-                        runtime_input=item.get('metadata', {}).get('runtime_input'),
-                    )
-
-                    test_run = TestRun.objects.create(
-                        test_run_batch=test_run_batch,
-                        test_case=test_case,
-                        test_metadata=test_metadata,
-                        outcome=outcome_map[outcome],
-                        linked_issue=linked_issue,
-                        fetched_results=item.get('fetched_results') or [],
-                    )
-
-                    # Handle failure log file and server-side classification for failed tests
-                    failure_log_rel = item.get('failure_log_file')  # relative path inside zip (optional)
-                    failed_phase = item.get('failed_phase', 'call')
-                    if outcome in ('failed', 'error') and failure_log_rel:
-                        failure_log_path = os.path.join(os.path.dirname(manifest_path), failure_log_rel)
-                        if os.path.exists(failure_log_path):
-                            # Read log content for classification
-                            try:
-                                with open(failure_log_path, 'r', encoding='utf-8') as fl:
-                                    log_content = fl.read()
-                            except Exception as e:
-                                print(f'Warning: Could not read failure log {failure_log_rel}: {e}')
-                                log_content = None
-
-                            # Save the failure log file to storage (same pattern as profiling_data)
-                            try:
-                                with open(failure_log_path, 'rb') as fl:
-                                    test_run.failure_log.save("failure.log", File(fl), save=False)
-                            except Exception as e:
-                                print(f'Warning: Could not upload failure log {failure_log_rel}: {e}')
-
-                            # Classify failure type server-side
-                            if log_content:
-                                test_run.failure_type = _classify_failure(failed_phase, log_content)
-                            else:
-                                test_run.failure_type = _classify_failure(failed_phase, None)
-                        else:
-                            test_run.failure_type = _classify_failure(failed_phase, None)
-                    elif outcome in ('failed', 'error'):
-                        test_run.failure_type = _classify_failure(failed_phase, None)
-
-                    # Determine final outcome: Output Mismatch stays as FAIL, everything else becomes ERROR
-                    if test_run.failure_type and test_run.failure_type != 'Output Mismatch':
-                        test_run.outcome = TestRun.Outcome.ERROR
-
-                    test_run.save()
-
-                    measurements = item.get('measurements', {})
-
-                    if measurements is None:
-                        measurements = {}
-                    
-                    for metric_name, value in measurements.items():
-
-                        if metric_name not in metrics:
-                            print(f'Warning: Metric {metric_name} not found for {module}::{name}')
-                            continue
-                        
-                        Measurement.objects.create(test_run=test_run, metric=metrics[metric_name], value=value)
-                        
-                    if profiling_rel:
-                        profiling_path = os.path.join(os.path.dirname(manifest_path), profiling_rel)
-
-                        if os.path.exists(profiling_path):
-                            # Save the profiling file
-                            try:
-                                with open(profiling_path, 'rb') as pf:
-                                    test_run.profiling_data.save("trace.pb", File(pf), save=False)
-                            except Exception as e:
-                                print(f'Warning: Could not upload profiling file {profiling_rel}: {e}')
-                                                                
-                            test_run.save()
-                        else:
-                            print(f'Warning: Profiling file {profiling_rel} not found in archive.')
-
-                except Exception as e:
-                    # print stack trace 
-                    import traceback
-                    traceback.print_exc()
-
-                    print(f'Error processing test run: {e}')
-
-            # Mark the batch as processed after all test runs have been created
-            test_run_batch.processed = True
-            test_run_batch.save()
+            _import_test_runs(test_run_batch, manifest, temp_dir)
 
     except TestRunBatch.DoesNotExist:
         print(f'Error: Test run batch {test_run_batch_id} not found')
     except Exception as e:
-        print(f'Error processing uploaded zip: {e}')
+        traceback.print_exc()
+        print(f'Error processing uploaded zip of test run batch {test_run_batch_id}: {e}')
     finally:
         # Clean up the uploaded zip file
         if os.path.exists(zip_path):
