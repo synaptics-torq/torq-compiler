@@ -2471,6 +2471,99 @@ static SmallVector<int64_t> invertPermutation(llvm::ArrayRef<int64_t> perm) {
     return inv;
 }
 
+// The TFLite importer represents the final signed-to-UINT8 byte encoding as
+// clamp_u8(apply_scale(sext(input) - inputZp) + outputZp). At unit scale and
+// outputZp - inputZp == 128, this is exactly input XOR 0x80 for every i8 value.
+// Integer signedness has already been stripped here. Use a bitwise operation,
+// rather than sending values 128..255 through a signed i8 ACT saturation path.
+struct UnsignedByteReencodingOpConversion : public OpRewritePattern<linalg::GenericOp> {
+    using OpRewritePattern::OpRewritePattern;
+
+    LogicalResult
+    matchAndRewrite(linalg::GenericOp srcOp, PatternRewriter &rewriter) const override {
+        if (!srcOp.hasPureTensorSemantics() || srcOp.getNumDpsInputs() != 1 ||
+            srcOp.getNumDpsInits() != 1 || srcOp.getNumReductionLoops() ||
+            !llvm::all_of(srcOp.getIndexingMapsArray(), [](AffineMap map) {
+                return map.isIdentity();
+            }))
+            return failure();
+
+        Value input = srcOp.getInputs()[0];
+        auto inputType = dyn_cast<RankedTensorType>(input.getType());
+        auto outputType = dyn_cast<RankedTensorType>(srcOp.getResult(0).getType());
+        if (!inputType || inputType != outputType || !inputType.hasStaticShape() ||
+            !inputType.getElementType().isSignlessInteger(8))
+            return failure();
+
+        auto yieldOp = dyn_cast<linalg::YieldOp>(srcOp.getBody()->getTerminator());
+        if (!yieldOp || yieldOp.getNumOperands() != 1)
+            return failure();
+        auto truncOp = yieldOp.getValues()[0].getDefiningOp<arith::TruncIOp>();
+        auto minOp = truncOp ? truncOp.getIn().getDefiningOp<arith::MinUIOp>() : nullptr;
+        if (!minOp || getConstIntValue(minOp.getRhs()) != 255)
+            return failure();
+        auto maxOp = minOp.getLhs().getDefiningOp<arith::MaxSIOp>();
+        if (!maxOp || getConstIntValue(maxOp.getRhs()) != 0)
+            return failure();
+
+        Value scaled = maxOp.getLhs();
+        auto addOp = scaled.getDefiningOp<arith::AddIOp>();
+        int64_t outputZp = 0;
+        if (addOp) {
+            auto zeroPoint = getConstIntValue(addOp.getRhs());
+            if (!zeroPoint)
+                return failure();
+            outputZp = *zeroPoint;
+            scaled = addOp.getLhs();
+        }
+        auto applyScaleOp = scaled.getDefiningOp<tosa::ApplyScaleOp>();
+        if (!applyScaleOp)
+            return failure();
+        auto multiplier = getConstIntValue(applyScaleOp.getMultiplier());
+        auto shift = getConstIntValue(applyScaleOp.getShift());
+        if (!multiplier || !shift || *shift < 0 || *shift > 30 ||
+            *multiplier != (int64_t(1) << *shift))
+            return failure();
+
+        Value extended = applyScaleOp.getValue();
+        auto subOp = extended.getDefiningOp<arith::SubIOp>();
+        int64_t inputZp = 0;
+        if (subOp) {
+            auto zeroPoint = getConstIntValue(subOp.getRhs());
+            if (!zeroPoint)
+                return failure();
+            inputZp = *zeroPoint;
+            extended = subOp.getLhs();
+        }
+        auto extOp = extended.getDefiningOp<arith::ExtSIOp>();
+        if (!extOp || extOp.getIn() != srcOp.getBody()->getArgument(0) ||
+            !extOp.getOut().getType().isSignlessInteger(32) || inputZp < -128 || inputZp > 127 ||
+            outputZp < 0 || outputZp > 255 || outputZp - inputZp != 128)
+            return failure();
+
+        // Do not discard any unrelated payload, including side effects.
+        SmallVector<Operation *> matched{yieldOp, truncOp, minOp, maxOp, applyScaleOp, extOp};
+        if (addOp)
+            matched.push_back(addOp);
+        if (subOp)
+            matched.push_back(subOp);
+        if (!llvm::all_of(srcOp.getBody()->getOperations(), [&](Operation &op) {
+                return isa<arith::ConstantOp>(op) || llvm::is_contained(matched, &op);
+            }))
+            return failure();
+
+        auto mask = arith::ConstantOp::create(
+            rewriter, srcOp.getLoc(), inputType,
+            SplatElementsAttr::get(inputType, rewriter.getI8IntegerAttr(-128))
+        );
+        rewriter.replaceOpWithNewOp<torq_hl::ElementWiseBinaryOp>(
+            srcOp, outputType, createInitTensor(srcOp, rewriter, outputType),
+            torq_hl::ElementwiseOpEnum::BITWISE_XOR, input, mask, false
+        );
+        return success();
+    }
+};
+
 struct RescaleOpConversion : public OpRewritePattern<linalg::GenericOp> {
   public:
     using OpRewritePattern::OpRewritePattern;
@@ -3741,7 +3834,7 @@ void populateLinalgToTorqHLPatterns(
     patterns.insert<CeilOpPattern>(context);
     patterns.insert<FloorOpPattern>(context);
 
-    patterns.insert<RescaleOpConversion>(context);
+    patterns.insert<UnsignedByteReencodingOpConversion, RescaleOpConversion>(context);
 
     // FIXME: these patterns ignore the markFuseGroups argument! They use
     // computeArithConst, which is difficult to refactor to use markFuseGroups.
