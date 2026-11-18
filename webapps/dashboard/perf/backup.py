@@ -17,6 +17,7 @@ from django.shortcuts import redirect, render
 from django.utils import timezone
 
 from perf import backup_store
+from perf.spooling import MAINTENANCE_SPOOLER
 
 # conditionally import uwsgi spool decorator to make sure this module can be imported also in manage.py
 try:
@@ -356,7 +357,7 @@ def backup_database_view(request):
             return redirect('admin_database_backup')
 
         record = backup_store.create_backup_record()
-        create_database_backup.spool(backup_id=record.id.encode('utf-8'))
+        create_database_backup.spool(backup_id=record.id.encode('utf-8'), spooler=MAINTENANCE_SPOOLER)
         messages.info(request, 'Backup started in the background. Refresh this page to check its progress.')
         return redirect('admin_database_backup')
 
@@ -398,6 +399,7 @@ def upload_backup_view(request):
                 import_database_backup_from_url.spool(
                     backup_id=record.id.encode('utf-8'),
                     source_url=source_url.encode('utf-8'),
+                    spooler=MAINTENANCE_SPOOLER,
                 )
                 messages.info(request, 'Backup import started in the background. Refresh this page to check its progress.')
             return redirect('admin_database_backup')
@@ -423,7 +425,7 @@ def restore_backup_view(request, backup_id):
         record.restore_finished_at = None
         backup_store.save_backup(record)
 
-        restore_database_backup.spool(backup_id=record.id.encode('utf-8'))
+        restore_database_backup.spool(backup_id=record.id.encode('utf-8'), spooler=MAINTENANCE_SPOOLER)
         messages.info(request, 'Restore started in the background. Refresh the backup list to check its progress.')
         return redirect('admin_database_backup')
 

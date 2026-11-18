@@ -19,6 +19,7 @@ except ImportError:
         return func
     
 from perf.models import TestCase, TestRun, TestRunBatch, TestMetadata, Metric, Measurement, TestSession
+from perf.spooling import MAINTENANCE_SPOOLER
 from perf.trim_status import TrimStatus, get_trim_status, save_trim_status, timestamp
 
 
@@ -331,7 +332,7 @@ def start_trim(retain_days):
         sessions_deleted=0,
         started_at=timestamp(),
     ))
-    trim_database.spool(retain_days=str(retain_days).encode('utf-8'))
+    trim_database.spool(retain_days=str(retain_days).encode('utf-8'), spooler=MAINTENANCE_SPOOLER)
 
     return sessions_total, prs_total
 
