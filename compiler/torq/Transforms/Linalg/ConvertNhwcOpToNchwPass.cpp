@@ -15,7 +15,8 @@
 //   - Conv fill init  : shape NHWC→NCHW
 //   - Conv            : input [0,3,1,2], filter [3,2,0,1], NCHW output
 //   - Bias add        : inputs are now NCHW, output shape NHWC→NCHW
-//   - WZP reduction   : input map (d1,d2,d3,d0)→(d0,d1,d2,d3) for FCHW filter
+//   - WZP reduction   : input map (d1,d2,d3,d0)→(d0,d1,d2,d3) for FCHW filter;
+//                       reductions of values upstream of the filter keep their layout
 //   - WZP correction  : channel map d3→d1
 //   - Rescale/quantize: channel maps d3→d1, output shape NHWC→NCHW
 //   - Final transpose : NCHW→NHWC [0,2,3,1] at the very end
@@ -662,9 +663,31 @@ void convertNhwcOpToNchwOp(FunctionOpInterface funcOp) {
                 }
             }
 
-            // Copy neededOps, excluding any ops in the filter/weight chain.
+            // A per-output-channel reduction of a value upstream of the conv
+            // filter (e.g. raw weights when the filter is w - wzp) has its own
+            // loop domain (F, H, W, C), not the activation's (N, H, W, C), and
+            // the conv's filter mapping does not cover its input. Keep its
+            // original layout and maps; its vector result needs no layout
+            // change. A reduction of the conv's own filter is converted with it.
+            Value convFilter = convOp.filter();
+            auto isFilterReduction = [&](Operation *op) {
+                auto generic = dyn_cast<linalg::GenericOp>(op);
+                if (!generic || !generic.hasPureTensorSemantics() || generic.getNumLoops() != 4 ||
+                    !generic.getNumReductionLoops() || generic.getNumDpsInits() != 1 ||
+                    generic.getNumDpsInputs() != 1)
+                    return false;
+                auto input = generic.getDpsInputs().front();
+                auto inputType = dyn_cast<RankedTensorType>(input.getType());
+                auto resultType = dyn_cast<RankedTensorType>(generic.getResult(0).getType());
+                return inputType && inputType.getRank() == 4 && resultType &&
+                       resultType.getRank() == 1 && input != convFilter &&
+                       filterChain.contains(input.getDefiningOp());
+            };
+
+            // Exclude filter producers and their vector reductions from the
+            // activation cluster. Their consumers still remap channel broadcasts.
             for (Operation *op : planOr->neededOps) {
-                if (!filterChain.contains(op)) {
+                if (!filterChain.contains(op) && !isFilterReduction(op)) {
                     neededOps.push_back(op);
                 }
             }
