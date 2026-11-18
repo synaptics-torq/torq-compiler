@@ -42,6 +42,10 @@ void populateConv1dPromotionPatterns(
 // convs; see the patterns for the convs they take.
 void populateThinUnitKernelStride2ConvPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
 
+// Registers the pattern that gives a stride of (1, 1) to a depthwise conv when each of its
+// strided axes has one output.
+void populateUnitOutputStrideConvPatterns(MLIRContext *ctx, RewritePatternSet &patterns);
+
 void populateOptimizeElementwiseBinaryOpPatterns(MLIRContext *context, RewritePatternSet &patterns);
 
 void populateOptimizeSelectPatterns(MLIRContext *context, RewritePatternSet &patterns);

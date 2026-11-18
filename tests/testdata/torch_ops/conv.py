@@ -367,6 +367,42 @@ CASES = {
         auto_pad="NOTSET", dilations=[1, 1], group=8, kernel_shape=[1, 1], pads=[0, 0, 0, 0],
         strides=[2, 2],
     ),
+    # Depthwise convs with one output on each strided axis: the stride has no effect, and the conv
+    # runs with a stride of (1, 1) (synaptics-torq/torq-compiler-dev#1789). The first three are
+    # the NNR 301 layers dw023, dw025 and dw026 of keras_ops in bf16: a W of 1 with a "same" pad.
+    # The depthwise lowering also takes the fourth conv with its stride of (2, 2). The image of
+    # the last two convs has one element that the conv does not read: in the border, and in the
+    # input.
+    "depthwise_conv2d_bf16_32x1x3_stride1x2_pads0101_32x128x1": partial(
+        _make_conv, [1, 32, 128, 1], [32, 1, 1, 3], [1, 32, 128, 1], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=32, kernel_shape=[1, 3], pads=[0, 1, 0, 1],
+        strides=[1, 2],
+    ),
+    "depthwise_conv2d_bf16_64x1x3_stride1x2_pads0101_64x64x1": partial(
+        _make_conv, [1, 64, 64, 1], [64, 1, 1, 3], [1, 64, 64, 1], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=64, kernel_shape=[1, 3], pads=[0, 1, 0, 1],
+        strides=[1, 2],
+    ),
+    "depthwise_conv2d_bf16_64x1x3_stride1x2_pads0101_64x32x1": partial(
+        _make_conv, [1, 64, 32, 1], [64, 1, 1, 3], [1, 64, 32, 1], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=64, kernel_shape=[1, 3], pads=[0, 1, 0, 1],
+        strides=[1, 2],
+    ),
+    "depthwise_conv2d_bf16_8x3x3_stride2x2_pad0_8x3x3": partial(
+        _make_conv, [1, 8, 3, 3], [8, 1, 3, 3], [1, 8, 1, 1], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=8, kernel_shape=[3, 3], pads=[0, 0, 0, 0],
+        strides=[2, 2],
+    ),
+    "depthwise_conv2d_bf16_8x1x3_stride1x2_pads0001_8x32x3": partial(
+        _make_conv, [1, 8, 32, 3], [8, 1, 1, 3], [1, 8, 32, 1], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=8, kernel_shape=[1, 3], pads=[0, 0, 0, 1],
+        strides=[1, 2],
+    ),
+    "depthwise_conv2d_bf16_8x1x3_stride1x2_pad0_8x32x4": partial(
+        _make_conv, [1, 8, 32, 4], [8, 1, 1, 3], [1, 8, 32, 1], weight_range=(-0.5, 0.5),
+        auto_pad="NOTSET", dilations=[1, 1], group=8, kernel_shape=[1, 3], pads=[0, 0, 0, 0],
+        strides=[1, 2],
+    ),
     "encoder_bf16_layer_Conv_2-sim-sl2610-v1": partial(
         _make_conv, [1, 1, 80000], [288, 1, 127], [1, 288, 1249], weight_range=(-1.6875, 1.71875),
         auto_pad="NOTSET", dilations=[1], group=1, kernel_shape=[127], pads=[0, 0], strides=[64],

@@ -38,11 +38,16 @@ CASES = {
     ),
     "dw021_MobileNetV2_dw_in7x7x960_k3x3_dm1_s1x1_same": depthwise((7, 7, 960), (3, 3), "same"),
     "dw022_NNR_301_dw_in128x1x32_k1x3_dm1_s1x1_same": depthwise((128, 1, 32), (1, 3), "same"),
-    "dw023_NNR_301_dw_in128x1x32_k1x3_dm1_s2x2_same": depthwise(
+    "dw023_NNR_301_dw_in128x1x32_k1x3_dm1_s1x2_same": depthwise(
         (128, 1, 32), (1, 3), (1, 2), "same",
     ),
     "dw024_NNR_301_dw_in64x1x64_k1x3_dm1_s1x1_same": depthwise((64, 1, 64), (1, 3), "same"),
-    "dw025_NNR_301_dw_in64x1x64_k1x3_dm1_s2x2_same": depthwise((64, 1, 64), (1, 3), (1, 2), "same"),
-    "dw026_NNR_301_dw_in32x1x64_k1x3_dm1_s2x2_same": depthwise((32, 1, 64), (1, 3), (1, 2), "same"),
+    "dw025_NNR_301_dw_in64x1x64_k1x3_dm1_s1x2_same": depthwise((64, 1, 64), (1, 3), (1, 2), "same"),
+    "dw026_NNR_301_dw_in32x1x64_k1x3_dm1_s1x2_same": depthwise((32, 1, 64), (1, 3), (1, 2), "same"),
     "dw027_mnist_dw_in26x26x8_k3x3_dm1_s2x2_same": depthwise((26, 26, 8), (3, 3), (2, 2), "same"),
 }
+
+# The NNR 301 layers must run on the slices. The stride (1, 2) layers did not compile without CSS
+# (synaptics-torq/torq-compiler-dev#1789).
+_NSS_ONLY = {"compiler_options": ["--torq-disable-host", "--torq-disable-css"]}
+CONFIG = {name: _NSS_ONLY for name in CASES if "_NNR_301_" in name}

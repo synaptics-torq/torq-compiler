@@ -337,6 +337,10 @@ def DecomposeConvToSpaceToDepth :
         conv2d and depthwise convs that the stride-2 kernels do not run
         correctly: the conv reads every second element of these axes with a
         stride of 1 (ThinUnitKernelStride2ConvPattern.cpp).
+
+        The pass also gives a stride of (1, 1) to a depthwise conv when each
+        strided axis has one output. The image loses the elements at its end
+        that this output does not read (UnitOutputStrideConvPattern.cpp).
     }];
 
     let constructor =

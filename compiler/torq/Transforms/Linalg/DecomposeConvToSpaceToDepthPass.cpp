@@ -650,6 +650,10 @@ struct DecomposeConvToSpaceToDepthPass
         // have a higher benefit, so they run before the S2D pattern on the same conv.
         populateThinUnitKernelStride2ConvPatterns(ctx, patterns);
 
+        // The stride of an axis with one output has no effect. The depthwise lowering does not
+        // take all strides, so a depthwise conv with these strides gets a stride of (1, 1).
+        populateUnitOutputStrideConvPatterns(ctx, patterns);
+
         patterns.add<DecomposeConvWithSpaceToDepthPattern>(ctx);
 
         if (failed(applyPatternsGreedily(func, std::move(patterns))))

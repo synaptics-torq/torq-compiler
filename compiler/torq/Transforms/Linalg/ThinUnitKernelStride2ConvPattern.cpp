@@ -17,12 +17,10 @@
 // folds it as it does for the other convs with these strides. A thinned depthwise conv has a
 // stride of (2, 1) or (1, 1), which its lowering takes.
 
+#include "ConvStridePatternUtils.h"
 #include "Patterns.h"
 
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
-#include "mlir/Dialect/Utils/StaticValueUtils.h"
-#include "mlir/IR/PatternMatch.h"
 
 #include <array>
 #include <type_traits>
@@ -30,9 +28,6 @@
 namespace mlir::syna::torq {
 
 namespace {
-
-// Index of the H axis in an NCHW shape. The W axis follows it.
-constexpr int64_t kFirstSpatialDim = 2;
 
 // For the H and the W axis: true when the pattern thins the axis.
 using ThinnedAxes = std::array<bool, 2>;
@@ -99,11 +94,8 @@ Value createThinnedSlice(
             steps[kFirstSpatialDim + axis] = 2;
         }
     }
-    MLIRContext *ctx = rewriter.getContext();
-    return tensor::ExtractSliceOp::create(
-        rewriter, loc, source, SmallVector<OpFoldResult>(steps.size(), rewriter.getIndexAttr(0)),
-        getAsIndexOpFoldResult(ctx, getThinnedShape(sourceType, thinned, outShape)),
-        getAsIndexOpFoldResult(ctx, steps)
+    return createLeadingSlice(
+        rewriter, loc, source, getThinnedShape(sourceType, thinned, outShape), steps
     );
 }
 
@@ -143,24 +135,14 @@ class ThinUnitKernelStride2ConvPattern : public OpRewritePattern<ConvOpT> {
         : OpRewritePattern<ConvOpT>(ctx, kThinPatternBenefit) {}
 
     LogicalResult matchAndRewrite(ConvOpT op, PatternRewriter &rewriter) const override {
-        Value image = op.getInputs()[0];
-        Value filter = op.getInputs()[1];
-        Value init = op.getOutputs()[0];
-        auto imageType = cast<RankedTensorType>(image.getType());
-        auto filterType = cast<RankedTensorType>(filter.getType());
-        auto initType = cast<RankedTensorType>(init.getType());
-        if (!imageType.hasStaticShape() || !filterType.hasStaticShape() ||
-            !initType.hasStaticShape()) {
+        std::optional<StaticConvInfo> conv = getStaticConvInfo(op);
+        if (!conv) {
             return rewriter.notifyMatchFailure(op, "shapes are not static");
         }
 
-        // The kernel is the last two dims of the conv2d [F, C, KH, KW] and of the depthwise
-        // [C, KH, KW] filters.
         constexpr bool isDepthwise = std::is_same_v<ConvOpT, linalg::DepthwiseConv2DNchwChwOp>;
-        SmallVector<int64_t> strides(op.getStrides().template getValues<int64_t>());
-        SmallVector<int64_t> dilations(op.getDilations().template getValues<int64_t>());
         const ThinnedAxes thinned =
-            selectAxesToThin(filterType.getShape().take_back(2), strides, dilations, isDepthwise);
+            selectAxesToThin(conv->kernel, conv->strides, conv->dilations, isDepthwise);
         if (!thinned[0] && !thinned[1]) {
             return rewriter.notifyMatchFailure(op, "no kernel-1 axis to thin");
         }
@@ -168,16 +150,17 @@ class ThinUnitKernelStride2ConvPattern : public OpRewritePattern<ConvOpT> {
         // A kernel of 1 has no dilation.
         for (int64_t axis = 0; axis < 2; ++axis) {
             if (thinned[axis]) {
-                strides[axis] = 1;
-                dilations[axis] = 1;
+                conv->strides[axis] = 1;
+                conv->dilations[axis] = 1;
             }
         }
 
-        Value thinnedImage =
-            createThinnedImage(rewriter, op.getLoc(), image, thinned, initType.getShape());
+        Value thinnedImage = createThinnedImage(
+            rewriter, op.getLoc(), op.getInputs()[0], thinned, conv->initType.getShape()
+        );
         rewriter.replaceOpWithNewOp<ConvOpT>(
-            op, init.getType(), ValueRange{thinnedImage, filter}, ValueRange{init},
-            rewriter.getI64TensorAttr(strides), rewriter.getI64TensorAttr(dilations)
+            op, conv->initType, ValueRange{thinnedImage, op.getInputs()[1]}, op.getOutputs(),
+            rewriter.getI64TensorAttr(conv->strides), rewriter.getI64TensorAttr(conv->dilations)
         );
         return success();
     }

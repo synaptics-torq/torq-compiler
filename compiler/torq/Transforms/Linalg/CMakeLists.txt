@@ -59,6 +59,7 @@ iree_cc_library(
     CommonStandardizationPatterns.cpp
     DecomposeConvToSpaceToDepthPass.cpp
     ThinUnitKernelStride2ConvPattern.cpp
+    UnitOutputStrideConvPattern.cpp
     SplitSmallChannelTransposePass.cpp
     DecomposeConvsForHardwarePass.cpp
     OptimizePowOpPattern.cpp

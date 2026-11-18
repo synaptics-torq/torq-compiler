@@ -5,66 +5,10 @@ numerical tests.
 """
 
 import re
-import subprocess
-from pathlib import Path
 
 import pytest
 
-PASS = "torq-decompose-conv-to-space-to-depth"
-CHANNELS = 8
-SIZE = 32
-
-CONV_OPS = {
-    "conv2d": "linalg.conv_2d_nchw_fchw",
-    "depthwise": "linalg.depthwise_conv_2d_nchw_chw",
-}
-
-
-def conv_ir(kind, kernel, pad_h=0, pad_w=0, channels=CHANNELS, size=SIZE, dtype="f32",
-            dilations=(1, 1)):
-    """A stride (2, 2) conv of a `size`x`size` image that has `pad_h` and `pad_w` border elements
-    on each side of the H and W axes."""
-    op = CONV_OPS[kind]
-    filter_channels = f"{channels}x{channels}" if kind == "conv2d" else f"{channels}"
-    padded = [size + 2 * pad_h, size + 2 * pad_w]
-    out = [(n - (k - 1) * d - 1) // 2 + 1 for n, k, d in zip(padded, kernel, dilations)]
-    image_type = f"tensor<1x{channels}x{size}x{size}x{dtype}>"
-    padded_type = f"tensor<1x{channels}x{padded[0]}x{padded[1]}x{dtype}>"
-    filter_type = f"tensor<{filter_channels}x{kernel[0]}x{kernel[1]}x{dtype}>"
-    out_type = f"tensor<1x{channels}x{out[0]}x{out[1]}x{dtype}>"
-    return f"""
-func.func @main(%image: {image_type}) -> {out_type} {{
-  %zero = arith.constant 0.0 : {dtype}
-  %filter = arith.constant dense<0.5> : {filter_type}
-  %padded = tensor.pad %image low[0, 0, {pad_h}, {pad_w}] high[0, 0, {pad_h}, {pad_w}] {{
-  ^bb0(%i0: index, %i1: index, %i2: index, %i3: index):
-    tensor.yield %zero : {dtype}
-  }} : {image_type} to {padded_type}
-  %empty = tensor.empty() : {out_type}
-  %init = linalg.fill ins(%zero : {dtype}) outs(%empty : {out_type}) -> {out_type}
-  %result = {op} {{dilations = dense<[{dilations[0]}, {dilations[1]}]> : vector<2xi64>,
-                   strides = dense<2> : vector<2xi64>}}
-      ins(%padded, %filter : {padded_type}, {filter_type}) outs(%init : {out_type}) -> {out_type}
-  return %result : {out_type}
-}}
-"""
-
-
-def run_pass(torq_compiler, source, options=()):
-    optimizer = Path(torq_compiler.file_path).parent / "iree-opt"
-    proc = subprocess.run(
-        [str(optimizer), f"--pass-pipeline=builtin.module(func.func({PASS}))", *options],
-        input=source, capture_output=True, text=True,
-    )
-    assert proc.returncode == 0, proc.stderr
-    return proc.stdout
-
-
-def slices(output):
-    """The (source, sizes, steps) of each tensor.extract_slice in `output`."""
-    return re.findall(
-        r"tensor\.extract_slice (%\w+)\[0, 0, 0, 0\] \[([\d, ]+)\] \[([\d, ]+)\]", output
-    )
+from .conv_stride_pattern_ir import CONV_OPS, conv_ir, pads, run_pass, slices
 
 
 @pytest.mark.ci
@@ -96,8 +40,7 @@ def test_border_of_another_axis_stays_a_pad_of_the_slice(torq_compiler):
     """The conv lowering folds a tensor.pad into the kernel only when the pad feeds the conv."""
     output = run_pass(torq_compiler, conv_ir("depthwise", (3, 1), pad_h=1))
     assert slices(output) == [("%arg0", "1, 8, 32, 16", "1, 1, 1, 2")]
-    pads = re.findall(r"tensor\.pad (%\w+) low\[([\d, ]+)\] high\[([\d, ]+)\]", output)
-    assert pads == [("%extracted_slice", "0, 0, 1, 0", "0, 0, 1, 0")]
+    assert pads(output) == [("%extracted_slice", "0, 0, 1, 0", "0, 0, 1, 0")]
 
 
 @pytest.mark.ci
