@@ -296,10 +296,12 @@ class RaiseDynamicQuantize : public OpRewritePattern<linalg::GenericOp> {
             )
                 .getResult();
         };
-        // ACT (bias, scale) for the reciprocal exponent-subtract (0x7E80 - x) and the
+        // ACT (bias, scale) for the reciprocal exponent-subtract (0x7E81 - x) and the
         // mantissa-LUT decode (base<<8), matching AddPattern / ExtractPattern; and the
         // 255.0 WRAM weight for inv_scale = recip * 255.
-        Value subScaleBias = makeScaleBias(-0x7E80, -1);
+        // 0x7E81 rather than BfloatReciprocalPattern's 0x7E80: the kernel's LUT entries are
+        // stored one lower to keep them below 0x80 (see buildReciprocalPackedLut).
+        Value subScaleBias = makeScaleBias(-0x7E81, -1);
         Value tableScaleBias = makeScaleBias(-128, 128);
         // WRAM constants for the two multiplies: inv_scale = recip * 255 and
         // scale = range_safe * (1/255).
